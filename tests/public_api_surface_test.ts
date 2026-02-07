@@ -1,0 +1,63 @@
+import * as capnp from "../mod.ts";
+import { assertEquals } from "./test_utils.ts";
+
+const EXPECTED_RUNTIME_EXPORTS = [
+  "AbiError",
+  "CapnpError",
+  "CapnpFrameFramer",
+  "EMPTY_STRUCT_MESSAGE",
+  "InMemoryRpcHarnessTransport",
+  "InstantiationError",
+  "MessagePortTransport",
+  "ProtocolError",
+  "RPC_MESSAGE_TAG_BOOTSTRAP",
+  "RPC_MESSAGE_TAG_CALL",
+  "RPC_MESSAGE_TAG_FINISH",
+  "RPC_MESSAGE_TAG_RELEASE",
+  "RPC_MESSAGE_TAG_RETURN",
+  "ReconnectingRpcClientTransport",
+  "RpcServerBridge",
+  "RpcSession",
+  "SessionError",
+  "SessionRpcClientTransport",
+  "TcpTransport",
+  "TransportError",
+  "WasmAbi",
+  "WasmAbiError",
+  "WasmPeer",
+  "WasmSerde",
+  "WebSocketTransport",
+  "connectTcpTransportWithReconnect",
+  "connectTransportWithReconnect",
+  "connectWebSocketTransportWithReconnect",
+  "connectWithReconnect",
+  "createDenoOtelObservability",
+  "createExponentialBackoffReconnectPolicy",
+  "createRpcSessionWithReconnect",
+  "decodeBootstrapRequestFrame",
+  "decodeCallRequestFrame",
+  "decodeFinishFrame",
+  "decodeReleaseFrame",
+  "decodeReturnFrame",
+  "decodeRpcMessageTag",
+  "emitObservabilityEvent",
+  "encodeBootstrapRequestFrame",
+  "encodeCallRequestFrame",
+  "encodeFinishFrame",
+  "encodeReleaseFrame",
+  "encodeReturnExceptionFrame",
+  "encodeReturnResultsFrame",
+  "extractBootstrapCapabilityIndex",
+  "getCapnpWasmExports",
+  "instantiatePeer",
+  "validateCapnpFrame",
+].sort();
+
+Deno.test("public API runtime exports remain stable", () => {
+  const actual = Object.keys(capnp).sort();
+  assertEquals(
+    JSON.stringify(actual),
+    JSON.stringify(EXPECTED_RUNTIME_EXPORTS),
+    "runtime export surface changed; update snapshot intentionally",
+  );
+});

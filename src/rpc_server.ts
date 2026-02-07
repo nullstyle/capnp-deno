@@ -1,0 +1,244 @@
+import { ProtocolError } from "./errors.ts";
+import {
+  decodeCallRequestFrame,
+  decodeFinishFrame,
+  decodeReleaseFrame,
+  decodeRpcMessageTag,
+  encodeReturnExceptionFrame,
+  encodeReturnResultsFrame,
+  RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_FINISH,
+  RPC_MESSAGE_TAG_RELEASE,
+  type RpcCallRequest,
+  type RpcCapDescriptor,
+  type RpcFinishRequest,
+} from "./rpc_wire.ts";
+
+export interface CapabilityPointer {
+  capabilityIndex: number;
+}
+
+export interface RpcCallContext {
+  readonly capability: CapabilityPointer;
+  readonly methodOrdinal: number;
+  readonly questionId: number;
+  readonly interfaceId: bigint;
+  readonly paramsCapTable: RpcCapDescriptor[];
+}
+
+export interface RpcCallResponse {
+  readonly content?: Uint8Array;
+  readonly capTable?: RpcCapDescriptor[];
+  readonly releaseParamCaps?: boolean;
+  readonly noFinishNeeded?: boolean;
+}
+
+export interface RpcServerDispatch {
+  readonly interfaceId: bigint;
+  dispatch(
+    methodOrdinal: number,
+    params: Uint8Array,
+    ctx: RpcCallContext,
+  ): Promise<Uint8Array | RpcCallResponse> | Uint8Array | RpcCallResponse;
+}
+
+export interface RpcServerBridgeOptions {
+  nextCapabilityIndex?: number;
+  onUnhandledError?: (
+    error: unknown,
+    call: RpcCallRequest,
+  ) => void | Promise<void>;
+  onFinish?: (finish: RpcFinishRequest) => void | Promise<void>;
+}
+
+interface RegisteredDispatch {
+  readonly dispatch: RpcServerDispatch;
+  refCount: number;
+}
+
+function normalizeCapability(
+  capability: number | CapabilityPointer,
+): number {
+  if (typeof capability === "number") {
+    return capability;
+  }
+  return capability.capabilityIndex;
+}
+
+function normalizeCallResponse(
+  value: Uint8Array | RpcCallResponse,
+): RpcCallResponse {
+  if (value instanceof Uint8Array) {
+    return { content: value };
+  }
+  return value;
+}
+
+export class RpcServerBridge {
+  #nextCapabilityIndex: number;
+  #dispatchByCapability = new Map<number, RegisteredDispatch>();
+  #onUnhandledError?: RpcServerBridgeOptions["onUnhandledError"];
+  #onFinish?: RpcServerBridgeOptions["onFinish"];
+
+  constructor(options: RpcServerBridgeOptions = {}) {
+    this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
+    this.#onUnhandledError = options.onUnhandledError;
+    this.#onFinish = options.onFinish;
+  }
+
+  exportCapability(
+    dispatch: RpcServerDispatch,
+    options: { capabilityIndex?: number; referenceCount?: number } = {},
+  ): CapabilityPointer {
+    const capabilityIndex = options.capabilityIndex ??
+      this.#nextCapabilityIndex;
+    if (options.capabilityIndex === undefined) {
+      this.#nextCapabilityIndex = capabilityIndex + 1;
+    }
+    if (this.#dispatchByCapability.has(capabilityIndex)) {
+      throw new ProtocolError(
+        `capability ${capabilityIndex} already has a registered server dispatch`,
+      );
+    }
+
+    const referenceCount = options.referenceCount ?? 1;
+    if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
+      throw new ProtocolError(
+        `referenceCount must be a positive integer, got ${referenceCount}`,
+      );
+    }
+
+    this.#dispatchByCapability.set(capabilityIndex, {
+      dispatch,
+      refCount: referenceCount,
+    });
+    return { capabilityIndex };
+  }
+
+  retainCapability(
+    capability: number | CapabilityPointer,
+    referenceCount = 1,
+  ): void {
+    if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
+      throw new ProtocolError(
+        `referenceCount must be a positive integer, got ${referenceCount}`,
+      );
+    }
+
+    const capabilityIndex = normalizeCapability(capability);
+    const registered = this.#dispatchByCapability.get(capabilityIndex);
+    if (!registered) {
+      throw new ProtocolError(`unknown capability ${capabilityIndex}`);
+    }
+    registered.refCount += referenceCount;
+  }
+
+  releaseCapability(
+    capability: number | CapabilityPointer,
+    referenceCount = 1,
+  ): boolean {
+    if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
+      throw new ProtocolError(
+        `referenceCount must be a positive integer, got ${referenceCount}`,
+      );
+    }
+
+    const capabilityIndex = normalizeCapability(capability);
+    const registered = this.#dispatchByCapability.get(capabilityIndex);
+    if (!registered) {
+      return false;
+    }
+
+    registered.refCount -= referenceCount;
+    if (registered.refCount <= 0) {
+      this.#dispatchByCapability.delete(capabilityIndex);
+      return false;
+    }
+    return true;
+  }
+
+  hasCapability(capability: number | CapabilityPointer): boolean {
+    return this.#dispatchByCapability.has(normalizeCapability(capability));
+  }
+
+  async handleFrame(frame: Uint8Array): Promise<Uint8Array | null> {
+    const tag = decodeRpcMessageTag(frame);
+
+    if (tag === RPC_MESSAGE_TAG_RELEASE) {
+      const release = decodeReleaseFrame(frame);
+      this.releaseCapability(release.id, release.referenceCount);
+      return null;
+    }
+
+    if (tag === RPC_MESSAGE_TAG_FINISH) {
+      const finish = decodeFinishFrame(frame);
+      if (this.#onFinish) {
+        await this.#onFinish(finish);
+      }
+      return null;
+    }
+
+    if (tag !== RPC_MESSAGE_TAG_CALL) {
+      throw new ProtocolError(
+        `unsupported rpc message tag for server bridge: ${tag}`,
+      );
+    }
+
+    return await this.#handleCall(decodeCallRequestFrame(frame));
+  }
+
+  async #handleCall(call: RpcCallRequest): Promise<Uint8Array> {
+    const registered = this.#dispatchByCapability.get(call.targetImportedCap);
+    if (!registered) {
+      return encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason: `unknown capability index: ${call.targetImportedCap}`,
+      });
+    }
+
+    if (registered.dispatch.interfaceId !== call.interfaceId) {
+      return encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason:
+          `interface mismatch for capability ${call.targetImportedCap}: expected ${registered.dispatch.interfaceId.toString()} got ${call.interfaceId.toString()}`,
+      });
+    }
+
+    const ctx: RpcCallContext = {
+      capability: { capabilityIndex: call.targetImportedCap },
+      methodOrdinal: call.methodId,
+      questionId: call.questionId,
+      interfaceId: call.interfaceId,
+      paramsCapTable: call.paramsCapTable.map((entry) => ({
+        tag: entry.tag,
+        id: entry.id,
+      })),
+    };
+
+    try {
+      const response = normalizeCallResponse(
+        await registered.dispatch.dispatch(
+          call.methodId,
+          call.paramsContent,
+          ctx,
+        ),
+      );
+      return encodeReturnResultsFrame({
+        answerId: call.questionId,
+        content: response.content,
+        capTable: response.capTable,
+        releaseParamCaps: response.releaseParamCaps,
+        noFinishNeeded: response.noFinishNeeded,
+      });
+    } catch (error) {
+      if (this.#onUnhandledError) {
+        await this.#onUnhandledError(error, call);
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      return encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason,
+      });
+    }
+  }
+}

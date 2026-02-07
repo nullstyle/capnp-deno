@@ -1,0 +1,393 @@
+import { TransportError } from "../errors.ts";
+import { CapnpFrameFramer, type CapnpFrameFramerOptions } from "../framer.ts";
+import {
+  emitObservabilityEvent,
+  type RpcObservability,
+} from "../observability.ts";
+import type { RpcTransport } from "../transport.ts";
+
+interface PendingOutboundFrame {
+  frame: Uint8Array;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+export interface TcpTransportOptions {
+  readBufferSize?: number;
+  frameLimits?: CapnpFrameFramerOptions;
+  maxOutboundFrameBytes?: number;
+  maxQueuedOutboundFrames?: number;
+  maxQueuedOutboundBytes?: number;
+  connectTimeoutMs?: number;
+  readIdleTimeoutMs?: number;
+  sendTimeoutMs?: number;
+  closeTimeoutMs?: number;
+  onError?: (error: unknown) => void | Promise<void>;
+  observability?: RpcObservability;
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return (
+    error instanceof Deno.errors.TimedOut ||
+    (error instanceof Error && /timed out/i.test(error.message))
+  );
+}
+
+export class TcpTransport implements RpcTransport {
+  readonly conn: Deno.Conn;
+  readonly options: TcpTransportOptions;
+
+  #started = false;
+  #closed = false;
+  #readLoop: Promise<void> = Promise.resolve();
+  #framer: CapnpFrameFramer;
+
+  #outboundQueue: PendingOutboundFrame[] = [];
+  #queuedOutboundBytes = 0;
+  #inflightOutboundFrames = 0;
+  #inflightOutboundBytes = 0;
+  #drainLoop: Promise<void> | null = null;
+
+  constructor(conn: Deno.Conn, options: TcpTransportOptions = {}) {
+    this.conn = conn;
+    this.options = options;
+    this.#framer = new CapnpFrameFramer(options.frameLimits);
+  }
+
+  static async connect(
+    hostname: string,
+    port: number,
+    options: TcpTransportOptions = {},
+  ): Promise<TcpTransport> {
+    const connect =
+      (Deno as unknown as { connect: typeof Deno.connect }).connect;
+    if (typeof connect !== "function") {
+      throw new TransportError(
+        "Deno.connect is unavailable; run with a runtime that supports TCP connect",
+      );
+    }
+
+    const connectPromise = connect({ hostname, port, transport: "tcp" });
+    const connectTimeoutMs = options.connectTimeoutMs;
+
+    if (connectTimeoutMs === undefined) {
+      const conn = await connectPromise;
+      return new TcpTransport(conn, options);
+    }
+
+    let timedOut = false;
+    const timed = new Promise<Deno.Conn>((_resolve, reject) => {
+      const timer = setTimeout(() => {
+        timedOut = true;
+        reject(
+          new TransportError(
+            `tcp connect timed out after ${connectTimeoutMs}ms (${hostname}:${port})`,
+          ),
+        );
+      }, connectTimeoutMs);
+      void connectPromise.finally(() => clearTimeout(timer));
+    });
+
+    void connectPromise.then((conn) => {
+      if (timedOut) {
+        try {
+          conn.close();
+        } catch {
+          // no-op
+        }
+      }
+    }).catch(() => {
+      // no-op, caller handles failure via race.
+    });
+
+    const conn = await Promise.race([connectPromise, timed]);
+    return new TcpTransport(conn, options);
+  }
+
+  start(
+    onFrame: (frame: Uint8Array) => void | Promise<void>,
+  ): void {
+    const startedAt = performance.now();
+    if (this.#closed) throw new TransportError("TcpTransport is closed");
+    if (this.#started) throw new TransportError("TcpTransport already started");
+    this.#started = true;
+    this.#readLoop = this.runReadLoop(onFrame).catch((error) =>
+      this.handleError(error)
+    );
+    emitObservabilityEvent(this.options.observability, {
+      name: "rpc.transport.tcp.start",
+      attributes: {
+        "rpc.outcome": "ok",
+      },
+      durationMs: performance.now() - startedAt,
+    });
+  }
+
+  async send(frame: Uint8Array): Promise<void> {
+    const startedAt = performance.now();
+    if (!this.#started) throw new TransportError("TcpTransport not started");
+    if (this.#closed) throw new TransportError("TcpTransport is closed");
+    this.assertOutboundFrameSize(frame);
+
+    const payload = new Uint8Array(frame);
+    this.assertOutboundQueueCapacity(payload.byteLength);
+
+    const completion = new Promise<void>((resolve, reject) => {
+      this.#outboundQueue.push({ frame: payload, resolve, reject });
+      this.#queuedOutboundBytes += payload.byteLength;
+    });
+
+    this.#ensureDrainLoop();
+    await completion;
+
+    emitObservabilityEvent(this.options.observability, {
+      name: "rpc.transport.tcp.send_frame",
+      attributes: {
+        "rpc.outcome": "ok",
+        "rpc.outbound.bytes": frame.byteLength,
+        "rpc.outbound.queue.frames": this.#outboundQueue.length,
+        "rpc.outbound.queue.bytes": this.#queuedOutboundBytes,
+      },
+      durationMs: performance.now() - startedAt,
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    const startedAt = performance.now();
+    this.#closed = true;
+
+    const closeError = new TransportError("TcpTransport is closed");
+    this.#rejectQueuedOutbound(closeError);
+
+    try {
+      this.conn.close();
+    } catch {
+      // no-op
+    }
+
+    const waitForRead = this.#readLoop.catch(() => {
+      // no-op during shutdown.
+    });
+    const waitForDrain = (this.#drainLoop ?? Promise.resolve()).catch(() => {
+      // no-op during shutdown.
+    });
+
+    const closeTimeoutMs = this.options.closeTimeoutMs;
+    let closeTimedOut = false;
+    if (closeTimeoutMs === undefined) {
+      await Promise.all([waitForRead, waitForDrain]);
+    } else {
+      await Promise.race([
+        Promise.all([waitForRead, waitForDrain]),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            closeTimedOut = true;
+            resolve();
+          }, closeTimeoutMs);
+        }),
+      ]);
+    }
+
+    emitObservabilityEvent(this.options.observability, {
+      name: "rpc.transport.tcp.close",
+      attributes: {
+        "rpc.outcome": "ok",
+        "rpc.close.timed_out": closeTimedOut,
+      },
+      durationMs: performance.now() - startedAt,
+    });
+  }
+
+  private async runReadLoop(
+    onFrame: (frame: Uint8Array) => void | Promise<void>,
+  ): Promise<void> {
+    const readBufferSize = this.options.readBufferSize ?? 64 * 1024;
+    const buffer = new Uint8Array(readBufferSize);
+
+    while (!this.#closed) {
+      const read = await this.readChunk(buffer);
+      if (read === null) return;
+      if (read === 0) continue;
+
+      this.#framer.push(buffer.subarray(0, read));
+      while (true) {
+        const frame = this.#framer.popFrame();
+        if (!frame) break;
+        await onFrame(frame);
+        emitObservabilityEvent(this.options.observability, {
+          name: "rpc.transport.tcp.inbound_frame",
+          attributes: {
+            "rpc.outcome": "ok",
+            "rpc.inbound.bytes": frame.byteLength,
+          },
+        });
+      }
+    }
+  }
+
+  private async readChunk(buffer: Uint8Array): Promise<number | null> {
+    const idleTimeoutMs = this.options.readIdleTimeoutMs;
+    const deadlineConn = this.conn as unknown as {
+      setReadDeadline?: (deadline?: number | Date) => void;
+    };
+    if (idleTimeoutMs !== undefined) {
+      deadlineConn.setReadDeadline?.(new Date(Date.now() + idleTimeoutMs));
+    }
+
+    try {
+      return await this.conn.read(buffer);
+    } catch (error) {
+      if (idleTimeoutMs !== undefined && isTimeoutError(error)) {
+        throw new TransportError(
+          `tcp read idle timeout after ${idleTimeoutMs}ms`,
+        );
+      }
+      throw error;
+    } finally {
+      if (idleTimeoutMs !== undefined) {
+        deadlineConn.setReadDeadline?.();
+      }
+    }
+  }
+
+  #ensureDrainLoop(): void {
+    if (this.#drainLoop) return;
+    this.#drainLoop = this.#drainOutbound()
+      .catch((_error) => {
+        // Individual send() callers receive write errors through their own
+        // completion promises; suppress unhandled drain-loop rejections here.
+      })
+      .finally(() => {
+        this.#drainLoop = null;
+        if (this.#outboundQueue.length > 0 && !this.#closed) {
+          this.#ensureDrainLoop();
+        }
+      });
+  }
+
+  async #drainOutbound(): Promise<void> {
+    while (!this.#closed && this.#outboundQueue.length > 0) {
+      const next = this.#outboundQueue.shift()!;
+      this.#queuedOutboundBytes -= next.frame.byteLength;
+      this.#inflightOutboundFrames += 1;
+      this.#inflightOutboundBytes += next.frame.byteLength;
+
+      try {
+        await this.writeFully(next.frame);
+        next.resolve();
+      } catch (error) {
+        next.reject(error);
+        this.#rejectQueuedOutbound(error);
+        if (this.options.onError) {
+          void Promise.resolve(this.options.onError(error));
+        }
+        throw error;
+      } finally {
+        this.#inflightOutboundFrames -= 1;
+        this.#inflightOutboundBytes -= next.frame.byteLength;
+      }
+    }
+  }
+
+  private async writeFully(frame: Uint8Array): Promise<void> {
+    let offset = 0;
+    while (offset < frame.byteLength) {
+      const chunk = frame.subarray(offset);
+      const writePromise = this.conn.write(chunk);
+      const written = await this.awaitWithTimeout(
+        writePromise,
+        this.options.sendTimeoutMs,
+        (timeoutMs) =>
+          new TransportError(`tcp send timed out after ${timeoutMs}ms`),
+      );
+
+      if (!Number.isInteger(written) || written <= 0) {
+        throw new TransportError(
+          `invalid tcp write result: ${String(written)}`,
+        );
+      }
+      offset += written;
+    }
+  }
+
+  private async awaitWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number | undefined,
+    onTimeout: (timeoutMs: number) => Error,
+  ): Promise<T> {
+    if (timeoutMs === undefined) {
+      return await promise;
+    }
+
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(onTimeout(timeoutMs)), timeoutMs);
+      void promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private async handleError(error: unknown): Promise<void> {
+    emitObservabilityEvent(this.options.observability, {
+      name: "rpc.transport.tcp.error",
+      attributes: {
+        "rpc.outcome": "error",
+      },
+      error,
+    });
+    if (this.options.onError) {
+      await this.options.onError(error);
+      return;
+    }
+    throw error;
+  }
+
+  #rejectQueuedOutbound(error: unknown): void {
+    while (this.#outboundQueue.length > 0) {
+      const next = this.#outboundQueue.shift()!;
+      this.#queuedOutboundBytes -= next.frame.byteLength;
+      next.reject(error);
+    }
+  }
+
+  private assertOutboundFrameSize(frame: Uint8Array): void {
+    const max = this.options.maxOutboundFrameBytes;
+    if (max !== undefined && frame.byteLength > max) {
+      throw new TransportError(
+        `tcp outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
+      );
+    }
+  }
+
+  private assertOutboundQueueCapacity(frameBytes: number): void {
+    const maxFrames = this.options.maxQueuedOutboundFrames;
+    if (maxFrames !== undefined) {
+      const used = this.#inflightOutboundFrames + this.#outboundQueue.length;
+      if (used + 1 > maxFrames) {
+        throw new TransportError(
+          `tcp outbound queue frame limit exceeded: ${used + 1} > ${maxFrames}`,
+        );
+      }
+    }
+
+    const maxBytes = this.options.maxQueuedOutboundBytes;
+    if (maxBytes !== undefined) {
+      const used = this.#inflightOutboundBytes + this.#queuedOutboundBytes;
+      if (used + frameBytes > maxBytes) {
+        throw new TransportError(
+          `tcp outbound queue byte limit exceeded: ${
+            used + frameBytes
+          } > ${maxBytes}`,
+        );
+      }
+    }
+  }
+}
