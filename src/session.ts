@@ -1,4 +1,4 @@
-import { SessionError } from "./errors.ts";
+import { normalizeSessionError, SessionError } from "./errors.ts";
 import {
   emitObservabilityEvent,
   type RpcObservability,
@@ -61,6 +61,10 @@ export class RpcSession {
         durationMs: performance.now() - startedAt,
       });
     } catch (error) {
+      const normalized = normalizeSessionError(
+        error,
+        "rpc session start failed",
+      );
       emitObservabilityEvent(this.#observability, {
         name: "rpc.session.start",
         attributes: {
@@ -68,9 +72,9 @@ export class RpcSession {
           "rpc.error.type": "start_failed",
         },
         durationMs: performance.now() - startedAt,
-        error,
+        error: normalized,
       });
-      throw error;
+      throw normalized;
     }
   }
 
@@ -95,6 +99,10 @@ export class RpcSession {
         durationMs: performance.now() - startedAt,
       });
     } catch (error) {
+      const normalized = normalizeSessionError(
+        error,
+        "rpc session inbound frame failed",
+      );
       emitObservabilityEvent(this.#observability, {
         name: "rpc.session.inbound_frame",
         attributes: {
@@ -102,9 +110,9 @@ export class RpcSession {
           "rpc.inbound.bytes": frame.byteLength,
         },
         durationMs: performance.now() - startedAt,
-        error,
+        error: normalized,
       });
-      throw error;
+      throw normalized;
     }
   }
 
@@ -138,18 +146,19 @@ export class RpcSession {
   }
 
   private async handleError(error: unknown): Promise<void> {
+    const normalized = normalizeSessionError(error, "rpc session error");
     emitObservabilityEvent(this.#observability, {
       name: "rpc.session.error",
       attributes: {
         "rpc.outcome": "error",
       },
-      error,
+      error: normalized,
     });
     if (this.#onError) {
-      await this.#onError(error);
+      await this.#onError(normalized);
       return;
     }
-    throw error;
+    throw normalized;
   }
 
   private assertOpen(): void {

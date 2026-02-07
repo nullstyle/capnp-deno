@@ -2,6 +2,7 @@ import {
   connectWithReconnect,
   type ConnectWithReconnectOptions,
 } from "./reconnect.ts";
+import { normalizeSessionError } from "./errors.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
 import { TcpTransport, type TcpTransportOptions } from "./transports/tcp.ts";
@@ -100,6 +101,6 @@ export async function createRpcSessionWithReconnect<
       }
     }
 
-    throw error;
+    throw normalizeSessionError(error, "failed to create rpc session");
   }
 }

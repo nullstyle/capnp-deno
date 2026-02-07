@@ -1,9 +1,11 @@
+import type { WasmHostCallRecord } from "./abi.ts";
 import { ProtocolError } from "./errors.ts";
 import {
   decodeCallRequestFrame,
   decodeFinishFrame,
   decodeReleaseFrame,
   decodeRpcMessageTag,
+  EMPTY_STRUCT_MESSAGE,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   RPC_MESSAGE_TAG_CALL,
@@ -51,10 +53,35 @@ export interface RpcServerBridgeOptions {
   onFinish?: (finish: RpcFinishRequest) => void | Promise<void>;
 }
 
+export interface RpcServerWasmHost {
+  readonly handle: number;
+  readonly abi: {
+    popHostCall(peer: number): WasmHostCallRecord | null;
+    respondHostCallResults(
+      peer: number,
+      questionId: number,
+      payloadFrame: Uint8Array,
+    ): void;
+    respondHostCallException(
+      peer: number,
+      questionId: number,
+      reason: string | Uint8Array,
+    ): void;
+  };
+}
+
+export interface RpcServerBridgePumpHostCallsOptions {
+  maxCalls?: number;
+}
+
 interface RegisteredDispatch {
   readonly dispatch: RpcServerDispatch;
   refCount: number;
 }
+
+type RpcDispatchOutcome =
+  | { kind: "results"; response: RpcCallResponse }
+  | { kind: "exception"; reason: string };
 
 function normalizeCapability(
   capability: number | CapabilityPointer,
@@ -187,21 +214,130 @@ export class RpcServerBridge {
     return await this.#handleCall(decodeCallRequestFrame(frame));
   }
 
+  async pumpWasmHostCalls(
+    wasmHost: RpcServerWasmHost,
+    options: RpcServerBridgePumpHostCallsOptions = {},
+  ): Promise<number> {
+    const maxCalls = options.maxCalls;
+    if (
+      maxCalls !== undefined &&
+      (!Number.isInteger(maxCalls) || maxCalls <= 0)
+    ) {
+      throw new ProtocolError(
+        `maxCalls must be a positive integer when provided, got ${
+          String(maxCalls)
+        }`,
+      );
+    }
+
+    let handled = 0;
+    while (maxCalls === undefined || handled < maxCalls) {
+      const hostCall = wasmHost.abi.popHostCall(wasmHost.handle);
+      if (!hostCall) break;
+      await this.#handleWasmHostCall(wasmHost, hostCall);
+      handled += 1;
+    }
+    return handled;
+  }
+
   async #handleCall(call: RpcCallRequest): Promise<Uint8Array> {
-    const registered = this.#dispatchByCapability.get(call.targetImportedCap);
-    if (!registered) {
+    const outcome = await this.#dispatchCall(call);
+    if (outcome.kind === "exception") {
       return encodeReturnExceptionFrame({
         answerId: call.questionId,
-        reason: `unknown capability index: ${call.targetImportedCap}`,
+        reason: outcome.reason,
       });
     }
 
+    return encodeReturnResultsFrame({
+      answerId: call.questionId,
+      content: outcome.response.content,
+      capTable: outcome.response.capTable,
+      releaseParamCaps: outcome.response.releaseParamCaps,
+      noFinishNeeded: outcome.response.noFinishNeeded,
+    });
+  }
+
+  async #handleWasmHostCall(
+    wasmHost: RpcServerWasmHost,
+    hostCall: WasmHostCallRecord,
+  ): Promise<void> {
+    let call: RpcCallRequest;
+    try {
+      call = decodeCallRequestFrame(hostCall.frame);
+    } catch (error) {
+      const reason = error instanceof Error
+        ? error.message
+        : `invalid host call frame: ${String(error)}`;
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        hostCall.questionId,
+        reason,
+      );
+      return;
+    }
+
+    if (call.questionId !== hostCall.questionId) {
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        hostCall.questionId,
+        `host call questionId mismatch: metadata=${hostCall.questionId} frame=${call.questionId}`,
+      );
+      return;
+    }
+
+    const outcome = await this.#dispatchCall(call);
+    if (outcome.kind === "exception") {
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        call.questionId,
+        outcome.reason,
+      );
+      return;
+    }
+
+    const response = outcome.response;
+    if ((response.capTable?.length ?? 0) > 0) {
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        call.questionId,
+        "wasm host-call bridge does not support response cap tables yet",
+      );
+      return;
+    }
+    if (
+      response.releaseParamCaps === false || response.noFinishNeeded === true
+    ) {
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        call.questionId,
+        "wasm host-call bridge does not support non-default return flags yet",
+      );
+      return;
+    }
+
+    wasmHost.abi.respondHostCallResults(
+      wasmHost.handle,
+      call.questionId,
+      response.content ?? new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    );
+  }
+
+  async #dispatchCall(call: RpcCallRequest): Promise<RpcDispatchOutcome> {
+    const registered = this.#dispatchByCapability.get(call.targetImportedCap);
+    if (!registered) {
+      return {
+        kind: "exception",
+        reason: `unknown capability index: ${call.targetImportedCap}`,
+      };
+    }
+
     if (registered.dispatch.interfaceId !== call.interfaceId) {
-      return encodeReturnExceptionFrame({
-        answerId: call.questionId,
+      return {
+        kind: "exception",
         reason:
           `interface mismatch for capability ${call.targetImportedCap}: expected ${registered.dispatch.interfaceId.toString()} got ${call.interfaceId.toString()}`,
-      });
+      };
     }
 
     const ctx: RpcCallContext = {
@@ -223,22 +359,13 @@ export class RpcServerBridge {
           ctx,
         ),
       );
-      return encodeReturnResultsFrame({
-        answerId: call.questionId,
-        content: response.content,
-        capTable: response.capTable,
-        releaseParamCaps: response.releaseParamCaps,
-        noFinishNeeded: response.noFinishNeeded,
-      });
+      return { kind: "results", response };
     } catch (error) {
       if (this.#onUnhandledError) {
         await this.#onUnhandledError(error, call);
       }
       const reason = error instanceof Error ? error.message : String(error);
-      return encodeReturnExceptionFrame({
-        answerId: call.questionId,
-        reason,
-      });
+      return { kind: "exception", reason };
     }
   }
 }

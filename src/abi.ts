@@ -24,6 +24,41 @@ export interface CapnpWasmExports {
     out_len_ptr: number,
   ): number;
   capnp_peer_pop_commit?(peer: number): void;
+  capnp_peer_pop_host_call?(
+    peer: number,
+    out_question_id_ptr: number,
+    out_interface_id_ptr: number,
+    out_method_id_ptr: number,
+    out_frame_ptr_ptr: number,
+    out_frame_len_ptr: number,
+  ): number;
+  capnp_peer_respond_host_call_results?(
+    peer: number,
+    question_id: number,
+    payload_ptr: number,
+    payload_len: number,
+  ): number;
+  capnp_peer_respond_host_call_exception?(
+    peer: number,
+    question_id: number,
+    reason_ptr: number,
+    reason_len: number,
+  ): number;
+  capnp_peer_send_finish?(
+    peer: number,
+    question_id: number,
+    release_result_caps: number,
+    require_early_cancellation: number,
+  ): number;
+  capnp_peer_send_release?(
+    peer: number,
+    cap_id: number,
+    reference_count: number,
+  ): number;
+  capnp_schema_manifest_json?(
+    out_ptr_ptr: number,
+    out_len_ptr: number,
+  ): number;
 
   capnp_wasm_abi_version?(): number;
   capnp_wasm_abi_min_version?(): number;
@@ -44,6 +79,9 @@ export interface WasmAbiOptions {
 
 export interface WasmAbiCapabilities {
   hasPeerPopCommit: boolean;
+  hasHostCallBridge: boolean;
+  hasLifecycleHelpers: boolean;
+  hasSchemaManifest: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
   hasAbiVersion: boolean;
@@ -53,6 +91,18 @@ export interface WasmAbiCapabilities {
   abiMinVersion: number | null;
   abiMaxVersion: number | null;
   featureFlags: bigint;
+}
+
+export interface WasmHostCallRecord {
+  questionId: number;
+  interfaceId: bigint;
+  methodId: number;
+  frame: Uint8Array;
+}
+
+export interface WasmSendFinishOptions {
+  releaseResultCaps?: boolean;
+  requireEarlyCancellation?: boolean;
 }
 
 export class WasmAbiError extends AbiError {
@@ -142,6 +192,12 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
 
   return {
     hasPeerPopCommit: typeof exports.capnp_peer_pop_commit === "function",
+    hasHostCallBridge: typeof exports.capnp_peer_pop_host_call === "function" &&
+      typeof exports.capnp_peer_respond_host_call_results === "function" &&
+      typeof exports.capnp_peer_respond_host_call_exception === "function",
+    hasLifecycleHelpers: typeof exports.capnp_peer_send_finish === "function" &&
+      typeof exports.capnp_peer_send_release === "function",
+    hasSchemaManifest: typeof exports.capnp_schema_manifest_json === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
     hasAbiVersion: abiVersion !== null,
@@ -196,6 +252,42 @@ export function getCapnpWasmExports(
     exports.capnp_peer_pop_commit = expectFunction(
       raw.capnp_peer_pop_commit,
       "capnp_peer_pop_commit",
+    );
+  }
+  if (raw.capnp_peer_pop_host_call !== undefined) {
+    exports.capnp_peer_pop_host_call = expectFunction(
+      raw.capnp_peer_pop_host_call,
+      "capnp_peer_pop_host_call",
+    );
+  }
+  if (raw.capnp_peer_respond_host_call_results !== undefined) {
+    exports.capnp_peer_respond_host_call_results = expectFunction(
+      raw.capnp_peer_respond_host_call_results,
+      "capnp_peer_respond_host_call_results",
+    );
+  }
+  if (raw.capnp_peer_respond_host_call_exception !== undefined) {
+    exports.capnp_peer_respond_host_call_exception = expectFunction(
+      raw.capnp_peer_respond_host_call_exception,
+      "capnp_peer_respond_host_call_exception",
+    );
+  }
+  if (raw.capnp_peer_send_finish !== undefined) {
+    exports.capnp_peer_send_finish = expectFunction(
+      raw.capnp_peer_send_finish,
+      "capnp_peer_send_finish",
+    );
+  }
+  if (raw.capnp_peer_send_release !== undefined) {
+    exports.capnp_peer_send_release = expectFunction(
+      raw.capnp_peer_send_release,
+      "capnp_peer_send_release",
+    );
+  }
+  if (raw.capnp_schema_manifest_json !== undefined) {
+    exports.capnp_schema_manifest_json = expectFunction(
+      raw.capnp_schema_manifest_json,
+      "capnp_schema_manifest_json",
     );
   }
   if (raw.capnp_buf_free !== undefined) {
@@ -337,6 +429,192 @@ export class WasmAbi {
       const frame = this.popOutFrame(peer);
       if (frame === null) return out;
       out.push(frame);
+    }
+  }
+
+  popHostCall(peer: number): WasmHostCallRecord | null {
+    const fn = this.exports.capnp_peer_pop_host_call;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_pop_host_call");
+    }
+
+    const questionIdPtr = this.alloc(4);
+    const interfaceIdPtr = this.alloc(8);
+    const methodIdPtr = this.alloc(2);
+    const framePtrPtr = this.alloc(4);
+    const frameLenPtr = this.alloc(4);
+    try {
+      this.writeU32(questionIdPtr, 0);
+      this.writeU64(interfaceIdPtr, 0n);
+      this.writeU16(methodIdPtr, 0);
+      this.writeU32(framePtrPtr, 0);
+      this.writeU32(frameLenPtr, 0);
+
+      this.clearError();
+      const hasCall = fn(
+        peer,
+        questionIdPtr,
+        interfaceIdPtr,
+        methodIdPtr,
+        framePtrPtr,
+        frameLenPtr,
+      );
+      if (hasCall === 0) {
+        const maybeErr = this.takeLastError();
+        if (maybeErr) throw maybeErr;
+        return null;
+      }
+      if (hasCall !== 1) {
+        throw new WasmAbiError(
+          `unexpected capnp_peer_pop_host_call result: ${hasCall}`,
+        );
+      }
+
+      const questionId = this.readU32(questionIdPtr);
+      const interfaceId = this.readU64(interfaceIdPtr);
+      const methodId = this.readU16(methodIdPtr);
+      const framePtr = this.readU32(framePtrPtr);
+      const frameLen = this.readU32(frameLenPtr);
+      const frame = this.copyBytes(framePtr, frameLen);
+      return {
+        questionId,
+        interfaceId,
+        methodId,
+        frame,
+      };
+    } finally {
+      this.free(questionIdPtr, 4);
+      this.free(interfaceIdPtr, 8);
+      this.free(methodIdPtr, 2);
+      this.free(framePtrPtr, 4);
+      this.free(frameLenPtr, 4);
+    }
+  }
+
+  respondHostCallResults(
+    peer: number,
+    questionId: number,
+    payloadFrame: Uint8Array,
+  ): void {
+    const fn = this.exports.capnp_peer_respond_host_call_results;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_respond_host_call_results",
+      );
+    }
+
+    this.assertU32(questionId, "questionId");
+    const ptr = this.alloc(payloadFrame.byteLength);
+    try {
+      if (payloadFrame.byteLength > 0) {
+        this.bytes().set(payloadFrame, ptr);
+      }
+      this.clearError();
+      const ok = fn(peer, questionId, ptr, payloadFrame.byteLength);
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_respond_host_call_results failed");
+      }
+    } finally {
+      this.free(ptr, payloadFrame.byteLength);
+    }
+  }
+
+  respondHostCallException(
+    peer: number,
+    questionId: number,
+    reason: string | Uint8Array,
+  ): void {
+    const fn = this.exports.capnp_peer_respond_host_call_exception;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_respond_host_call_exception",
+      );
+    }
+
+    this.assertU32(questionId, "questionId");
+    const bytes = typeof reason === "string"
+      ? new TextEncoder().encode(reason)
+      : reason;
+    const ptr = this.alloc(bytes.byteLength);
+    try {
+      if (bytes.byteLength > 0) {
+        this.bytes().set(bytes, ptr);
+      }
+      this.clearError();
+      const ok = fn(peer, questionId, ptr, bytes.byteLength);
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_respond_host_call_exception failed");
+      }
+    } finally {
+      this.free(ptr, bytes.byteLength);
+    }
+  }
+
+  sendFinish(
+    peer: number,
+    questionId: number,
+    options: WasmSendFinishOptions = {},
+  ): void {
+    const fn = this.exports.capnp_peer_send_finish;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_send_finish");
+    }
+
+    this.assertU32(questionId, "questionId");
+    const releaseResultCaps = options.releaseResultCaps ?? true;
+    const requireEarlyCancellation = options.requireEarlyCancellation ?? false;
+    this.clearError();
+    const ok = fn(
+      peer,
+      questionId,
+      releaseResultCaps ? 1 : 0,
+      requireEarlyCancellation ? 1 : 0,
+    );
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_send_finish failed");
+    }
+  }
+
+  sendRelease(peer: number, capId: number, referenceCount = 1): void {
+    const fn = this.exports.capnp_peer_send_release;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_send_release");
+    }
+
+    this.assertU32(capId, "capId");
+    this.assertU32(referenceCount, "referenceCount");
+    this.clearError();
+    const ok = fn(peer, capId, referenceCount);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_send_release failed");
+    }
+  }
+
+  schemaManifestJson(): string {
+    const fn = this.exports.capnp_schema_manifest_json;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_schema_manifest_json");
+    }
+
+    const pairSize = 8;
+    const pairPtr = this.alloc(pairSize);
+    try {
+      this.writeU32(pairPtr, 0);
+      this.writeU32(pairPtr + 4, 0);
+
+      this.clearError();
+      const ok = fn(pairPtr, pairPtr + 4);
+      if (ok !== 1) {
+        this.throwLastError("capnp_schema_manifest_json failed");
+      }
+
+      const ptr = this.readU32(pairPtr);
+      const len = this.readU32(pairPtr + 4);
+      const text = this.decodeUtf8(ptr, len);
+      this.freeOutBuffer(ptr, len);
+      return text;
+    } finally {
+      this.free(pairPtr, pairSize);
     }
   }
 
@@ -500,12 +778,34 @@ export class WasmAbi {
     return out;
   }
 
+  private assertU32(value: number, name: string): void {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new WasmAbiError(`${name} must be a u32, got ${value}`);
+    }
+  }
+
+  private writeU16(offset: number, value: number): void {
+    this.view().setUint16(offset, value & 0xffff, true);
+  }
+
   private writeU32(offset: number, value: number): void {
     this.view().setUint32(offset, value >>> 0, true);
   }
 
+  private writeU64(offset: number, value: bigint): void {
+    this.view().setBigUint64(offset, value, true);
+  }
+
+  private readU16(offset: number): number {
+    return this.view().getUint16(offset, true);
+  }
+
   private readU32(offset: number): number {
     return this.view().getUint32(offset, true);
+  }
+
+  private readU64(offset: number): bigint {
+    return this.view().getBigUint64(offset, true);
   }
 
   private bytes(): Uint8Array {

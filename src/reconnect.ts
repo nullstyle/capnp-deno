@@ -1,4 +1,4 @@
-import { TransportError } from "./errors.ts";
+import { normalizeTransportError, TransportError } from "./errors.ts";
 
 export interface ReconnectPolicyContext {
   attempt: number;
@@ -184,30 +184,63 @@ export async function connectWithReconnect<T>(
     try {
       return await connect();
     } catch (error) {
+      const normalized = normalizeTransportError(
+        error,
+        "reconnect connect attempt failed",
+      );
       attempt += 1;
       const elapsedMs = Math.max(0, now() - startedAtMs);
       const context: ReconnectPolicyContext = {
         attempt,
         elapsedMs,
-        error,
+        error: normalized,
       };
 
-      if (!options.policy.shouldRetry(context)) {
-        throw error;
+      let shouldRetry: boolean;
+      try {
+        shouldRetry = options.policy.shouldRetry(context);
+      } catch (policyError) {
+        throw normalizeTransportError(
+          policyError,
+          "reconnect policy shouldRetry failed",
+        );
       }
 
-      const rawDelayMs = options.policy.nextDelayMs(context);
+      if (!shouldRetry) {
+        throw normalized;
+      }
+
+      let rawDelayMs: number;
+      try {
+        rawDelayMs = options.policy.nextDelayMs(context);
+      } catch (policyError) {
+        throw normalizeTransportError(
+          policyError,
+          "reconnect policy nextDelayMs failed",
+        );
+      }
       assertNonNegativeFinite(rawDelayMs, "reconnect delay");
       const delayMs = Math.round(rawDelayMs);
 
       if (options.onRetry) {
-        await options.onRetry({
-          ...context,
-          delayMs,
-        });
+        try {
+          await options.onRetry({
+            ...context,
+            delayMs,
+          });
+        } catch (onRetryError) {
+          throw normalizeTransportError(
+            onRetryError,
+            "reconnect onRetry hook failed",
+          );
+        }
       }
 
-      await sleep(delayMs, options.signal);
+      try {
+        await sleep(delayMs, options.signal);
+      } catch (sleepError) {
+        throw normalizeTransportError(sleepError, "reconnect sleep failed");
+      }
     }
   }
 }

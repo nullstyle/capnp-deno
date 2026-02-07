@@ -1,0 +1,248 @@
+import {
+  encodeCallRequestFrame,
+  RpcServerBridge,
+  RpcServerRuntime,
+  type RpcServerWasmHost,
+  type RpcTransport,
+  SessionError,
+  type WasmHostCallRecord,
+  WasmPeer,
+} from "../mod.ts";
+import { FakeCapnpWasm } from "./fake_wasm.ts";
+import { assert, assertEquals } from "./test_utils.ts";
+
+function encodeSingleU32StructMessage(value: number): Uint8Array {
+  const out = new Uint8Array(24);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, 2, true);
+  view.setBigUint64(8, 0x0000_0001_0000_0000n, true);
+  view.setUint32(16, value >>> 0, true);
+  return out;
+}
+
+const MASK_30 = 0x3fff_ffffn;
+
+function signed30(value: bigint): number {
+  const raw = Number(value & MASK_30);
+  return (raw & (1 << 29)) !== 0 ? raw - (1 << 30) : raw;
+}
+
+function decodeSingleU32StructMessage(frame: Uint8Array): number {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const root = view.getBigUint64(8, true);
+  const offset = signed30((root >> 2n) & MASK_30);
+  const dataWord = 1 + offset;
+  return view.getUint32(8 + (dataWord * 8), true);
+}
+
+class MockTransport implements RpcTransport {
+  #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
+  readonly sent: Uint8Array[] = [];
+
+  start(onFrame: (frame: Uint8Array) => void | Promise<void>): void {
+    this.#onFrame = onFrame;
+  }
+
+  send(frame: Uint8Array): void {
+    this.sent.push(new Uint8Array(frame));
+  }
+
+  close(): void {
+    // no-op
+  }
+
+  async emit(frame: Uint8Array): Promise<void> {
+    if (!this.#onFrame) throw new Error("transport not started");
+    await this.#onFrame(frame);
+  }
+}
+
+class MockHostAbi {
+  readonly calls: WasmHostCallRecord[] = [];
+  readonly results: Array<{ questionId: number; payload: Uint8Array }> = [];
+  readonly exceptions: Array<{ questionId: number; reason: string }> = [];
+
+  popHostCall(_peer: number): WasmHostCallRecord | null {
+    if (this.calls.length === 0) return null;
+    return this.calls.shift() ?? null;
+  }
+
+  respondHostCallResults(
+    _peer: number,
+    questionId: number,
+    payloadFrame: Uint8Array,
+  ): void {
+    this.results.push({
+      questionId,
+      payload: new Uint8Array(payloadFrame),
+    });
+  }
+
+  respondHostCallException(
+    _peer: number,
+    questionId: number,
+    reason: string | Uint8Array,
+  ): void {
+    const text = typeof reason === "string"
+      ? reason
+      : new TextDecoder().decode(reason);
+    this.exceptions.push({ questionId, reason: text });
+  }
+}
+
+function createHostCall(questionId: number): WasmHostCallRecord {
+  return {
+    questionId,
+    interfaceId: 0x1234n,
+    methodId: 7,
+    frame: encodeCallRequestFrame({
+      questionId,
+      interfaceId: 0x1234n,
+      methodId: 7,
+      targetImportedCap: 5,
+      paramsContent: encodeSingleU32StructMessage(questionId),
+    }),
+  };
+}
+
+Deno.test("RpcServerRuntime auto-pumps wasm host calls after inbound frames", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(88)),
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  const wasmHost: RpcServerWasmHost = {
+    handle: peer.handle,
+    abi: hostAbi,
+  };
+
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost,
+    hostCallPump: {
+      maxCallsPerInboundFrame: 4,
+      maxCallsTotal: 10,
+    },
+  });
+
+  try {
+    await runtime.start();
+    await transport.emit(new Uint8Array([0x01]));
+    await runtime.flush();
+
+    assertEquals(hostAbi.exceptions.length, 0);
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(hostAbi.results[0].questionId, 1);
+    assertEquals(decodeSingleU32StructMessage(hostAbi.results[0].payload), 88);
+    assertEquals(runtime.totalHostCallsPumped, 1);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime enforces host-call pump limit in fail-fast mode", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(5)),
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  hostAbi.calls.push(createHostCall(2));
+
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 8,
+      maxCallsTotal: 1,
+      failOnLimit: true,
+    },
+  });
+
+  try {
+    await runtime.start();
+    let thrown: unknown;
+    try {
+      await transport.emit(new Uint8Array([0x01]));
+      await runtime.flush();
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /host-call pump limit reached/i.test(thrown.message),
+      `expected host-call limit SessionError, got: ${String(thrown)}`,
+    );
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(hostAbi.calls.length, 1);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime can warn-and-stop host-call pumping when limit is reached", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(7)),
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  hostAbi.calls.push(createHostCall(2));
+
+  const warnings: string[] = [];
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 8,
+      maxCallsTotal: 1,
+      failOnLimit: false,
+      onWarning: (warning) => {
+        warnings.push(warning.message);
+      },
+    },
+  });
+
+  try {
+    await runtime.start();
+    await transport.emit(new Uint8Array([0x01]));
+    await runtime.flush();
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(runtime.hostCallPumpDisabled, true);
+    assertEquals(warnings.length, 1);
+
+    await transport.emit(new Uint8Array([0x02]));
+    await runtime.flush();
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(hostAbi.calls.length, 1);
+  } finally {
+    await runtime.close();
+  }
+});

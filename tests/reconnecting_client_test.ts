@@ -342,3 +342,146 @@ Deno.test("ReconnectingRpcClientTransport reports finish/release failures as non
     await transport.close();
   }
 });
+
+Deno.test("ReconnectingRpcClientTransport survives repeated reconnect churn on bootstrap capability calls", async () => {
+  const closed: number[] = [];
+  let connectCount = 0;
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      const generation = connectCount;
+      let callCount = 0;
+      const failOnCall = generation === 1 ? 1 : 2;
+      const client: RpcClientTransportLike = {
+        bootstrap: () => Promise.resolve({ capabilityIndex: generation * 10 }),
+        call: () => {
+          callCount += 1;
+          if (callCount === failOnCall) {
+            return Promise.reject(
+              new TransportError(`connection dropped (gen=${generation})`),
+            );
+          }
+          return Promise.resolve(new Uint8Array([generation]));
+        },
+        close: () => {
+          closed.push(generation);
+          return Promise.resolve();
+        },
+      };
+      return Promise.resolve(client);
+    },
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    await transport.bootstrap();
+
+    const seenGenerations: number[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const cap = transport.bootstrapCapability;
+      assert(cap !== null, "expected bootstrap capability");
+      const response = await transport.call(cap, 0, EMPTY);
+      seenGenerations.push(response[0]);
+    }
+
+    assertEquals(connectCount, 7);
+    assertEquals(
+      JSON.stringify(seenGenerations),
+      JSON.stringify([2, 3, 4, 5, 6, 7]),
+    );
+  } finally {
+    await transport.close();
+  }
+
+  assertEquals(closed.length, 7);
+  assertEquals(
+    JSON.stringify(closed),
+    JSON.stringify([1, 2, 3, 4, 5, 6, 7]),
+  );
+});
+
+Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability across repeated reconnect churn", async () => {
+  const remapHistory: Array<{
+    previousBootstrap: number | null;
+    currentBootstrap: number | null;
+    capability: number;
+    methodOrdinal: number;
+  }> = [];
+  let connectCount = 0;
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      const generation = connectCount;
+      const client: RpcClientTransportLike = {
+        bootstrap: () => Promise.resolve({ capabilityIndex: generation * 10 }),
+        call: (capability) => {
+          if (capability.capabilityIndex === 99) {
+            return Promise.reject(
+              new TransportError(`connection dropped (gen=${generation})`),
+            );
+          }
+          if (capability.capabilityIndex !== 100 + generation) {
+            return Promise.reject(
+              new Error(
+                `expected remapped capability ${
+                  100 + generation
+                }, got ${capability.capabilityIndex}`,
+              ),
+            );
+          }
+          return Promise.resolve(new Uint8Array([generation]));
+        },
+        close: () => Promise.resolve(),
+      };
+      return Promise.resolve(client);
+    },
+    reconnect: reconnectOptions(),
+    remapCapabilityOnReconnect: (context) => {
+      remapHistory.push({
+        previousBootstrap:
+          context.previousBootstrapCapability?.capabilityIndex ?? null,
+        currentBootstrap: context.currentBootstrapCapability?.capabilityIndex ??
+          null,
+        capability: context.capability.capabilityIndex,
+        methodOrdinal: context.methodOrdinal,
+      });
+      const currentBootstrap = context.currentBootstrapCapability;
+      assert(
+        currentBootstrap !== null,
+        "expected current bootstrap capability",
+      );
+      return { capabilityIndex: 100 + (currentBootstrap.capabilityIndex / 10) };
+    },
+  });
+
+  try {
+    await transport.bootstrap();
+
+    const seenGenerations: number[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const response = await transport.call({ capabilityIndex: 99 }, 7, EMPTY);
+      seenGenerations.push(response[0]);
+    }
+
+    assertEquals(connectCount, 6);
+    assertEquals(
+      JSON.stringify(seenGenerations),
+      JSON.stringify([2, 3, 4, 5, 6]),
+    );
+    assertEquals(remapHistory.length, 5);
+    for (const entry of remapHistory) {
+      assertEquals(entry.capability, 99);
+      assertEquals(entry.methodOrdinal, 7);
+      assert(entry.previousBootstrap !== null, "expected previous bootstrap");
+      assert(entry.currentBootstrap !== null, "expected current bootstrap");
+      assert(
+        entry.previousBootstrap !== entry.currentBootstrap,
+        "expected bootstrap to change after reconnect",
+      );
+    }
+  } finally {
+    await transport.close();
+  }
+});

@@ -1,4 +1,8 @@
-import { ProtocolError, SessionError } from "./errors.ts";
+import {
+  normalizeSessionError,
+  ProtocolError,
+  SessionError,
+} from "./errors.ts";
 import type { RpcSession } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
 import {
@@ -335,6 +339,11 @@ export class SessionRpcClientTransport {
     await gate;
     try {
       return await op();
+    } catch (error) {
+      throw normalizeSessionError(
+        error,
+        "rpc client transport operation failed",
+      );
     } finally {
       release();
     }

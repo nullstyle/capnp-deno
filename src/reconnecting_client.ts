@@ -1,4 +1,8 @@
-import { SessionError, TransportError } from "./errors.ts";
+import {
+  normalizeSessionError,
+  SessionError,
+  TransportError,
+} from "./errors.ts";
 import {
   connectWithReconnect,
   type ConnectWithReconnectOptions,
@@ -114,9 +118,10 @@ export class ReconnectingRpcClientTransport {
       try {
         return await client.call(callCap, methodOrdinal, params, options);
       } catch (error) {
+        const normalized = normalizeSessionError(error, "rpc call failed");
         const retryEnabled = this.options.retryInFlightCalls ?? true;
-        if (!retryEnabled || !this.#shouldReconnect(error)) {
-          throw error;
+        if (!retryEnabled || !this.#shouldReconnect(normalized)) {
+          throw normalized;
         }
 
         const previousBootstrap = this.#bootstrapCapability;
@@ -127,14 +132,18 @@ export class ReconnectingRpcClientTransport {
           callCap,
           previousBootstrap,
           methodOrdinal,
-          error,
+          normalized,
         );
-        return await reconnected.call(
-          remappedCap,
-          methodOrdinal,
-          params,
-          options,
-        );
+        try {
+          return await reconnected.call(
+            remappedCap,
+            methodOrdinal,
+            params,
+            options,
+          );
+        } catch (retryError) {
+          throw normalizeSessionError(retryError, "rpc call retry failed");
+        }
       }
     });
   }
@@ -155,13 +164,14 @@ export class ReconnectingRpcClientTransport {
       try {
         await client.finish(questionId, options);
       } catch (error) {
-        if (!this.#shouldReconnect(error)) {
-          throw error;
+        const normalized = normalizeSessionError(error, "rpc finish failed");
+        if (!this.#shouldReconnect(normalized)) {
+          throw normalized;
         }
         await this.#reconnect();
         throw new SessionError(
           `finish(${questionId}) failed during reconnect; question IDs are connection-scoped and are not retried`,
-          { cause: error },
+          { cause: normalized },
         );
       }
     });
@@ -184,13 +194,14 @@ export class ReconnectingRpcClientTransport {
       try {
         await client.release(releaseCap, referenceCount);
       } catch (error) {
-        if (!this.#shouldReconnect(error)) {
-          throw error;
+        const normalized = normalizeSessionError(error, "rpc release failed");
+        if (!this.#shouldReconnect(normalized)) {
+          throw normalized;
         }
         await this.#reconnect();
         throw new SessionError(
           `release(${releaseCap.capabilityIndex}) failed during reconnect; capability references are connection-scoped and are not retried`,
-          { cause: error },
+          { cause: normalized },
         );
       }
     });
@@ -280,7 +291,13 @@ export class ReconnectingRpcClientTransport {
       );
     }
 
-    const bootstrap = normalizeCapability(await client.bootstrap(options));
+    let bootstrapCap: RpcCapabilityPointer;
+    try {
+      bootstrapCap = await client.bootstrap(options);
+    } catch (error) {
+      throw normalizeSessionError(error, "rpc bootstrap failed");
+    }
+    const bootstrap = normalizeCapability(bootstrapCap);
     this.#bootstrapCapability = bootstrap;
     return cloneCapability(bootstrap);
   }
@@ -288,10 +305,14 @@ export class ReconnectingRpcClientTransport {
   async #ensureConnected(): Promise<RpcClientTransportLike> {
     this.#assertOpen();
     if (this.#client) return this.#client;
-    this.#client = await connectWithReconnect(
-      this.options.connect,
-      this.options.reconnect,
-    );
+    try {
+      this.#client = await connectWithReconnect(
+        this.options.connect,
+        this.options.reconnect,
+      );
+    } catch (error) {
+      throw normalizeSessionError(error, "rpc client connect failed");
+    }
     return this.#client;
   }
 
@@ -311,7 +332,11 @@ export class ReconnectingRpcClientTransport {
 
   async #closeClient(client: RpcClientTransportLike | null): Promise<void> {
     if (!client?.close) return;
-    await client.close();
+    try {
+      await client.close();
+    } catch (error) {
+      throw normalizeSessionError(error, "rpc client close failed");
+    }
   }
 
   #assertOpen(): void {

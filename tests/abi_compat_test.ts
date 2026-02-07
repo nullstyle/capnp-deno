@@ -18,6 +18,9 @@ Deno.test("WasmAbi falls back cleanly for v1-only export shape", () => {
 
   const abi = new WasmAbi(fake.exports);
   assertEquals(abi.capabilities.hasPeerPopCommit, false);
+  assertEquals(abi.capabilities.hasHostCallBridge, false);
+  assertEquals(abi.capabilities.hasLifecycleHelpers, false);
+  assertEquals(abi.capabilities.hasSchemaManifest, false);
   assertEquals(abi.capabilities.hasBufFree, false);
   assertEquals(abi.capabilities.hasAbiVersion, false);
   assertEquals(abi.capabilities.hasAbiVersionRange, false);
@@ -53,6 +56,9 @@ Deno.test("WasmAbi detects version-range and feature-flag exports", () => {
   assertEquals(abi.capabilities.hasFeatureFlags, true);
   assertEquals(abi.capabilities.featureFlags, 0x0000_0002_0000_0005n);
   assertEquals(abi.capabilities.hasErrorTake, true);
+  assertEquals(abi.capabilities.hasHostCallBridge, false);
+  assertEquals(abi.capabilities.hasLifecycleHelpers, false);
+  assertEquals(abi.capabilities.hasSchemaManifest, false);
 
   assertEquals(abi.supportsFeature(0), true);
   assertEquals(abi.supportsFeature(1), false);
@@ -126,4 +132,151 @@ Deno.test("WasmAbi uses capnp_error_take and frees taken error buffers", () => {
   assertEquals(freed.length, 1);
   assert(freed[0].ptr > 0, "taken message pointer should be non-zero");
   assert(freed[0].len > 0, "taken message length should be non-zero");
+});
+
+Deno.test("WasmAbi host-call and lifecycle wrappers route through optional exports", () => {
+  const hostCalls: Array<{
+    questionId: number;
+    interfaceId: bigint;
+    methodId: number;
+    frame: Uint8Array;
+  }> = [
+    {
+      questionId: 42,
+      interfaceId: 0x1234n,
+      methodId: 9,
+      frame: new Uint8Array([0xaa, 0xbb, 0xcc]),
+    },
+  ];
+  const seenResults: Array<{ questionId: number; payload: Uint8Array }> = [];
+  const seenExceptions: Array<{ questionId: number; reason: string }> = [];
+  const seenFinish: Array<{
+    questionId: number;
+    releaseResultCaps: number;
+    requireEarlyCancellation: number;
+  }> = [];
+  const seenRelease: Array<{ capId: number; referenceCount: number }> = [];
+  let manifestFreed = false;
+
+  const fake = new FakeCapnpWasm({
+    extraExports: {
+      capnp_peer_pop_host_call: (
+        _peer: number,
+        outQuestionIdPtr: number,
+        outInterfaceIdPtr: number,
+        outMethodIdPtr: number,
+        outFramePtrPtr: number,
+        outFrameLenPtr: number,
+      ) => {
+        const next = hostCalls.shift();
+        if (!next) return 0;
+        fake.writeU32(outQuestionIdPtr, next.questionId);
+        const view = new DataView(fake.memory.buffer);
+        view.setBigUint64(outInterfaceIdPtr, next.interfaceId, true);
+        view.setUint16(outMethodIdPtr, next.methodId, true);
+        const framePtr = fake.allocBytes(next.frame);
+        fake.writeU32(outFramePtrPtr, framePtr);
+        fake.writeU32(outFrameLenPtr, next.frame.byteLength);
+        return 1;
+      },
+      capnp_peer_respond_host_call_results: (
+        _peer: number,
+        questionId: number,
+        payloadPtr: number,
+        payloadLen: number,
+      ) => {
+        seenResults.push({
+          questionId,
+          payload: fake.readBytes(payloadPtr, payloadLen),
+        });
+        return 1;
+      },
+      capnp_peer_respond_host_call_exception: (
+        _peer: number,
+        questionId: number,
+        reasonPtr: number,
+        reasonLen: number,
+      ) => {
+        seenExceptions.push({
+          questionId,
+          reason: fake.decode(fake.readBytes(reasonPtr, reasonLen)),
+        });
+        return 1;
+      },
+      capnp_peer_send_finish: (
+        _peer: number,
+        questionId: number,
+        releaseResultCaps: number,
+        requireEarlyCancellation: number,
+      ) => {
+        seenFinish.push({
+          questionId,
+          releaseResultCaps,
+          requireEarlyCancellation,
+        });
+        return 1;
+      },
+      capnp_peer_send_release: (
+        _peer: number,
+        capId: number,
+        referenceCount: number,
+      ) => {
+        seenRelease.push({ capId, referenceCount });
+        return 1;
+      },
+      capnp_schema_manifest_json: (outPtrPtr: number, outLenPtr: number) => {
+        const manifest = new TextEncoder().encode(
+          '{"schema":"demo.capnp","serde":[]}',
+        );
+        const ptr = fake.allocBytes(manifest);
+        fake.writeU32(outPtrPtr, ptr);
+        fake.writeU32(outLenPtr, manifest.byteLength);
+        return 1;
+      },
+      capnp_buf_free: (_ptr: number, _len: number) => {
+        manifestFreed = true;
+      },
+    },
+  });
+
+  const abi = new WasmAbi(fake.exports);
+  assertEquals(abi.capabilities.hasHostCallBridge, true);
+  assertEquals(abi.capabilities.hasLifecycleHelpers, true);
+  assertEquals(abi.capabilities.hasSchemaManifest, true);
+
+  const hostCall = abi.popHostCall(1);
+  assert(hostCall !== null, "expected host call");
+  assertEquals(hostCall.questionId, 42);
+  assertEquals(hostCall.interfaceId, 0x1234n);
+  assertEquals(hostCall.methodId, 9);
+  assertBytes(hostCall.frame, [0xaa, 0xbb, 0xcc]);
+  assertEquals(abi.popHostCall(1), null);
+
+  abi.respondHostCallResults(1, 42, new Uint8Array([0x01, 0x02, 0x03]));
+  assertEquals(seenResults.length, 1);
+  assertEquals(seenResults[0].questionId, 42);
+  assertBytes(seenResults[0].payload, [0x01, 0x02, 0x03]);
+
+  abi.respondHostCallException(1, 43, "boom");
+  assertEquals(seenExceptions.length, 1);
+  assertEquals(seenExceptions[0].questionId, 43);
+  assertEquals(seenExceptions[0].reason, "boom");
+
+  abi.sendFinish(1, 50, {
+    releaseResultCaps: false,
+    requireEarlyCancellation: true,
+  });
+  assertEquals(seenFinish.length, 1);
+  assertEquals(seenFinish[0].questionId, 50);
+  assertEquals(seenFinish[0].releaseResultCaps, 0);
+  assertEquals(seenFinish[0].requireEarlyCancellation, 1);
+
+  abi.sendRelease(1, 7, 3);
+  assertEquals(seenRelease.length, 1);
+  assertEquals(seenRelease[0].capId, 7);
+  assertEquals(seenRelease[0].referenceCount, 3);
+
+  const manifest = abi.schemaManifestJson();
+  assertEquals(manifest, '{"schema":"demo.capnp","serde":[]}');
+  assertEquals(manifestFreed, true);
 });

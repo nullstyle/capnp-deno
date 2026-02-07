@@ -1,4 +1,9 @@
 import {
+  decodeCallRequestFrame,
+  decodeReturnFrame,
+  encodeCallRequestFrame,
+  encodeFinishFrame,
+  encodeReleaseFrame,
   instantiatePeer,
   RpcSession,
   type RpcTransport,
@@ -6,15 +11,11 @@ import {
 } from "../mod.ts";
 import {
   BOOTSTRAP_Q1_INBOUND,
-  BOOTSTRAP_Q1_OUTBOUND,
   BOOTSTRAP_Q1_SUCCESS_INBOUND,
-  BOOTSTRAP_Q1_SUCCESS_OUTBOUND,
   CALL_BOOTSTRAP_CAP_Q2_INBOUND,
-  CALL_BOOTSTRAP_CAP_Q2_OUTBOUND,
   CALL_UNKNOWN_CAP_Q2_INBOUND,
-  CALL_UNKNOWN_CAP_Q2_OUTBOUND,
 } from "./fixtures/rpc_frames.ts";
-import { assertBytes, assertEquals } from "./test_utils.ts";
+import { assert, assertEquals } from "./test_utils.ts";
 
 const wasmPath = new URL(
   "../.artifacts/capnp_deno.wasm",
@@ -76,15 +77,89 @@ function enableBootstrapStub(
   }
 }
 
+function encodeSingleU32StructMessage(value: number): Uint8Array {
+  const out = new Uint8Array(24);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, 2, true);
+  view.setBigUint64(8, 0x0000_0001_0000_0000n, true);
+  view.setUint32(16, value >>> 0, true);
+  return out;
+}
+
+const MASK_30 = 0x3fff_ffffn;
+
+function signed30(value: bigint): number {
+  const raw = Number(value & MASK_30);
+  return (raw & (1 << 29)) !== 0 ? raw - (1 << 30) : raw;
+}
+
+function decodeSingleU32StructMessage(frame: Uint8Array): number {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const root = view.getBigUint64(8, true);
+  const offset = signed30((root >> 2n) & MASK_30);
+  const dataWord = 1 + offset;
+  return view.getUint32(8 + (dataWord * 8), true);
+}
+
+function assertUnknownCapabilityCall(
+  peer: WasmPeer,
+  targetCapId: number,
+  questionId: number,
+  callTemplate: {
+    interfaceId: bigint;
+    methodId: number;
+    paramsContent: Uint8Array;
+    paramsCapTable: Array<{ tag: number; id: number }>;
+  },
+): void {
+  const outbound = peer.pushFrame(
+    encodeCallRequestFrame({
+      questionId,
+      interfaceId: callTemplate.interfaceId,
+      methodId: callTemplate.methodId,
+      targetImportedCap: targetCapId,
+      paramsContent: callTemplate.paramsContent,
+      paramsCapTable: callTemplate.paramsCapTable,
+    }),
+  );
+  assertEquals(outbound.length, 1);
+  const decoded = decodeReturnFrame(outbound[0]);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind !== "exception") {
+    throw new Error(`expected exception return, got: ${decoded.kind}`);
+  }
+  assertEquals(decoded.answerId, questionId);
+  assert(
+    /unknown capability/i.test(decoded.reason),
+    `expected unknown capability exception, got: ${decoded.reason}`,
+  );
+}
+
 Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () => {
   await withPeer((_instance, peer) => {
     const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_INBOUND);
     assertEquals(bootstrapOutbound.length, 1);
-    assertBytes(bootstrapOutbound[0], Array.from(BOOTSTRAP_Q1_OUTBOUND));
+    const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
+    assertEquals(bootstrap.kind, "results");
+    if (bootstrap.kind !== "results") {
+      throw new Error(`expected results return, got: ${bootstrap.kind}`);
+    }
+    assertEquals(bootstrap.answerId, 1);
+    assertEquals(bootstrap.capTable.length, 1);
+    assertEquals(bootstrap.capTable[0].tag, 1);
+    assertEquals(bootstrap.capTable[0].id, 0);
+    assertEquals(bootstrap.noFinishNeeded, false);
 
     const callOutbound = peer.pushFrame(CALL_UNKNOWN_CAP_Q2_INBOUND);
     assertEquals(callOutbound.length, 1);
-    assertBytes(callOutbound[0], Array.from(CALL_UNKNOWN_CAP_Q2_OUTBOUND));
+    const call = decodeReturnFrame(callOutbound[0]);
+    assertEquals(call.kind, "exception");
+    if (call.kind !== "exception") {
+      throw new Error(`expected exception return, got: ${call.kind}`);
+    }
+    assertEquals(call.answerId, 2);
+    assertEquals(call.reason, "unknown capability");
 
     assertEquals(peer.drainOutgoingFrames().length, 0);
   });
@@ -96,16 +171,44 @@ Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", asyn
 
     const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
     assertEquals(bootstrapOutbound.length, 1);
-    assertBytes(
-      bootstrapOutbound[0],
-      Array.from(BOOTSTRAP_Q1_SUCCESS_OUTBOUND),
-    );
+    const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
+    assertEquals(bootstrap.kind, "results");
+    if (bootstrap.kind !== "results") {
+      throw new Error(`expected results return, got: ${bootstrap.kind}`);
+    }
+    assertEquals(bootstrap.answerId, 1);
+    assertEquals(bootstrap.capTable.length, 1);
+    assertEquals(bootstrap.capTable[0].tag, 1);
+    // Host call bridge owns export 0; bootstrap stub is installed as export 1.
+    assertEquals(bootstrap.capTable[0].id, 1);
 
     const callOutbound = peer.pushFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
-    assertEquals(callOutbound.length, 1);
-    assertBytes(callOutbound[0], Array.from(CALL_BOOTSTRAP_CAP_Q2_OUTBOUND));
+    assertEquals(callOutbound.length, 0);
 
-    assertEquals(peer.drainOutgoingFrames().length, 0);
+    const hostCall = peer.abi.popHostCall(peer.handle);
+    assert(hostCall !== null, "expected host call bridge record");
+    assertEquals(hostCall.questionId, 2);
+    assertEquals(hostCall.interfaceId, 0x1234n);
+    assertEquals(hostCall.methodId, 9);
+    assert(
+      hostCall.frame.byteLength > 0,
+      "expected non-empty host call payload",
+    );
+
+    peer.abi.respondHostCallException(
+      peer.handle,
+      hostCall.questionId,
+      "bootstrap stub",
+    );
+    const postResponseFrames = peer.drainOutgoingFrames();
+    assertEquals(postResponseFrames.length, 1);
+    const postResponse = decodeReturnFrame(postResponseFrames[0]);
+    assertEquals(postResponse.kind, "exception");
+    if (postResponse.kind !== "exception") {
+      throw new Error(`expected exception return, got: ${postResponse.kind}`);
+    }
+    assertEquals(postResponse.answerId, 2);
+    assertEquals(postResponse.reason, "bootstrap stub");
   });
 });
 
@@ -122,9 +225,91 @@ Deno.test("RpcSession pumps real wasm peer using successful bootstrap fixture", 
       await session.flush();
 
       assertEquals(transport.sent.length, 1);
-      assertBytes(transport.sent[0], Array.from(BOOTSTRAP_Q1_SUCCESS_OUTBOUND));
+      const bootstrap = decodeReturnFrame(transport.sent[0]);
+      assertEquals(bootstrap.kind, "results");
+      if (bootstrap.kind !== "results") {
+        throw new Error(`expected results return, got: ${bootstrap.kind}`);
+      }
+      assertEquals(bootstrap.answerId, 1);
+      assertEquals(bootstrap.capTable.length, 1);
+      assertEquals(bootstrap.capTable[0].tag, 1);
+      assertEquals(bootstrap.capTable[0].id, 1);
     } finally {
       await session.close();
     }
+  });
+});
+
+Deno.test("real wasm rpc lifecycle: finish retires returned caps and release frames are accepted", async () => {
+  await withPeer((instance, peer) => {
+    enableBootstrapStub(instance, peer);
+    const callTemplate = decodeCallRequestFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+
+    const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
+    assertEquals(bootstrapOutbound.length, 1);
+    const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
+    assertEquals(bootstrap.kind, "results");
+    if (bootstrap.kind !== "results") {
+      throw new Error(`expected results return, got: ${bootstrap.kind}`);
+    }
+    assertEquals(bootstrap.answerId, 1);
+    assertEquals(bootstrap.capTable.length, 1);
+    const bootstrapCapId = bootstrap.capTable[0].id;
+    assertEquals(bootstrapCapId, 1);
+
+    const callOutbound = peer.pushFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+    assertEquals(callOutbound.length, 0);
+
+    const hostCall = peer.abi.popHostCall(peer.handle);
+    assert(hostCall !== null, "expected host call bridge record");
+    assertEquals(hostCall.questionId, 2);
+    const responsePayload = encodeSingleU32StructMessage(808);
+    peer.abi.respondHostCallResults(
+      peer.handle,
+      hostCall.questionId,
+      responsePayload,
+    );
+    const postResponseFrames = peer.drainOutgoingFrames();
+    assertEquals(postResponseFrames.length, 1);
+    const postResponse = decodeReturnFrame(postResponseFrames[0]);
+    assertEquals(postResponse.kind, "results");
+    if (postResponse.kind !== "results") {
+      throw new Error(`expected results return, got: ${postResponse.kind}`);
+    }
+    assertEquals(postResponse.answerId, 2);
+    assertEquals(
+      decodeSingleU32StructMessage(postResponse.contentBytes),
+      808,
+    );
+    const returnedCapIds = postResponse.capTable.map((entry) => entry.id);
+
+    const finishOutbound = peer.pushFrame(
+      encodeFinishFrame({
+        questionId: 2,
+        releaseResultCaps: true,
+      }),
+    );
+    assertEquals(finishOutbound.length, 0);
+
+    if (returnedCapIds.length > 0) {
+      let questionId = 3;
+      for (const capId of returnedCapIds) {
+        assertUnknownCapabilityCall(peer, capId, questionId, callTemplate);
+        questionId += 1;
+      }
+    }
+
+    for (const capId of returnedCapIds) {
+      const releaseReturned = peer.pushFrame(
+        encodeReleaseFrame({ id: capId, referenceCount: 1 }),
+      );
+      assertEquals(releaseReturned.length, 0);
+    }
+
+    const releaseOutbound = peer.pushFrame(
+      encodeReleaseFrame({ id: bootstrapCapId, referenceCount: 1 }),
+    );
+    assertEquals(releaseOutbound.length, 0);
+    assertEquals(peer.drainOutgoingFrames().length, 0);
   });
 });

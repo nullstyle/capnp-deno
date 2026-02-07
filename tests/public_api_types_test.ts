@@ -42,9 +42,16 @@ import type {
   RpcReturnResults,
   RpcReturnResultsFrameRequest,
   RpcServerBridgeOptions,
+  RpcServerBridgePumpHostCallsOptions,
   RpcServerCallContext,
   RpcServerCallResponse,
   RpcServerDispatch,
+  RpcServerRuntimeHostCallPumpOptions,
+  RpcServerRuntimeOptions,
+  RpcServerRuntimePumpOptions,
+  RpcServerRuntimeWarning,
+  RpcServerRuntimeWarningCode,
+  RpcServerWasmHost,
   RpcSessionHarnessTransport,
   RpcSessionOptions,
   RpcTransport,
@@ -52,6 +59,8 @@ import type {
   TcpTransportOptions,
   WasmAbiCapabilities,
   WasmAbiOptions,
+  WasmHostCallRecord,
+  WasmSendFinishOptions,
   WebSocketTransportOptions,
 } from "../mod.ts";
 
@@ -66,6 +75,7 @@ type PublicTypeExportSmoke = {
   capnpFrameLimitsOptions: CapnpFrameLimitsOptions;
   capnpWasmExports: CapnpWasmExports;
   wasmAbiCapabilities: WasmAbiCapabilities;
+  wasmHostCallRecord: WasmHostCallRecord;
   capabilityPointer: CapabilityPointer;
   connectTcpTransportWithReconnectOptions:
     ConnectTcpTransportWithReconnectOptions;
@@ -109,15 +119,23 @@ type PublicTypeExportSmoke = {
   rpcReturnResults: RpcReturnResults;
   rpcReturnResultsFrameRequest: RpcReturnResultsFrameRequest;
   rpcServerBridgeOptions: RpcServerBridgeOptions;
+  rpcServerRuntimeHostCallPumpOptions: RpcServerRuntimeHostCallPumpOptions;
+  rpcServerRuntimeOptions: RpcServerRuntimeOptions;
+  rpcServerRuntimePumpOptions: RpcServerRuntimePumpOptions;
+  rpcServerRuntimeWarning: RpcServerRuntimeWarning;
+  rpcServerRuntimeWarningCode: RpcServerRuntimeWarningCode;
+  rpcServerBridgePumpHostCallsOptions: RpcServerBridgePumpHostCallsOptions;
   rpcServerCallContext: RpcServerCallContext;
   rpcServerCallResponse: RpcServerCallResponse;
   rpcServerDispatch: RpcServerDispatch;
+  rpcServerWasmHost: RpcServerWasmHost;
   rpcSessionHarnessTransport: RpcSessionHarnessTransport;
   rpcSessionOptions: RpcSessionOptions;
   rpcTransport: RpcTransport;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
   tcpTransportOptions: TcpTransportOptions;
   wasmAbiOptions: WasmAbiOptions;
+  wasmSendFinishOptions: WasmSendFinishOptions;
   webSocketTransportOptions: WebSocketTransportOptions;
 };
 

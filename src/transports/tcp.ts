@@ -1,4 +1,4 @@
-import { TransportError } from "../errors.ts";
+import { normalizeTransportError, TransportError } from "../errors.ts";
 import { CapnpFrameFramer, type CapnpFrameFramerOptions } from "../framer.ts";
 import {
   emitObservabilityEvent,
@@ -71,7 +71,15 @@ export class TcpTransport implements RpcTransport {
     const connectTimeoutMs = options.connectTimeoutMs;
 
     if (connectTimeoutMs === undefined) {
-      const conn = await connectPromise;
+      let conn: Deno.Conn;
+      try {
+        conn = await connectPromise;
+      } catch (error) {
+        throw normalizeTransportError(
+          error,
+          `tcp connect failed (${hostname}:${port})`,
+        );
+      }
       return new TcpTransport(conn, options);
     }
 
@@ -100,7 +108,15 @@ export class TcpTransport implements RpcTransport {
       // no-op, caller handles failure via race.
     });
 
-    const conn = await Promise.race([connectPromise, timed]);
+    let conn: Deno.Conn;
+    try {
+      conn = await Promise.race([connectPromise, timed]);
+    } catch (error) {
+      throw normalizeTransportError(
+        error,
+        `tcp connect failed (${hostname}:${port})`,
+      );
+    }
     return new TcpTransport(conn, options);
   }
 
@@ -243,7 +259,7 @@ export class TcpTransport implements RpcTransport {
           `tcp read idle timeout after ${idleTimeoutMs}ms`,
         );
       }
-      throw error;
+      throw normalizeTransportError(error, "tcp read failed");
     } finally {
       if (idleTimeoutMs !== undefined) {
         deadlineConn.setReadDeadline?.();
@@ -277,12 +293,13 @@ export class TcpTransport implements RpcTransport {
         await this.writeFully(next.frame);
         next.resolve();
       } catch (error) {
-        next.reject(error);
-        this.#rejectQueuedOutbound(error);
+        const normalized = normalizeTransportError(error, "tcp send failed");
+        next.reject(normalized);
+        this.#rejectQueuedOutbound(normalized);
         if (this.options.onError) {
-          void Promise.resolve(this.options.onError(error));
+          void Promise.resolve(this.options.onError(normalized));
         }
-        throw error;
+        throw normalized;
       } finally {
         this.#inflightOutboundFrames -= 1;
         this.#inflightOutboundBytes -= next.frame.byteLength;
@@ -336,18 +353,19 @@ export class TcpTransport implements RpcTransport {
   }
 
   private async handleError(error: unknown): Promise<void> {
+    const normalized = normalizeTransportError(error, "tcp transport error");
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.tcp.error",
       attributes: {
         "rpc.outcome": "error",
       },
-      error,
+      error: normalized,
     });
     if (this.options.onError) {
-      await this.options.onError(error);
+      await this.options.onError(normalized);
       return;
     }
-    throw error;
+    throw normalized;
   }
 
   #rejectQueuedOutbound(error: unknown): void {

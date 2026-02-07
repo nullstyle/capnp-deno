@@ -49,6 +49,24 @@ until empty.
 1. calling `peer.pushFrame(inbound)`,
 2. sending every returned outbound frame through the transport in order.
 
+## Server Runtime Helper
+
+For wasm host-call bridge deployments, use `RpcServerRuntime` to combine:
+
+1. `RpcSession` inbound/outbound transport pumping,
+2. `RpcServerBridge` dispatch handling, and
+3. automatic `capnp_peer_pop_host_call` -> response pumping after each inbound
+   frame.
+
+`RpcServerRuntime` includes guardrails for the current upstream limitation where
+host-call frames do not yet expose an explicit free/commit ABI:
+
+- `maxCallsPerInboundFrame`: bounds host-call work per inbound frame,
+- `maxCallsTotal`: lifetime budget before protection trips,
+- `failOnLimit`: fail-fast (`true`) or warn-and-stop pump (`false`).
+
+Use `onWarning` when running `failOnLimit: false` to surface operational alerts.
+
 ## Example
 
 ```ts

@@ -6,6 +6,7 @@ import {
   parseCliConfigToml,
   renderBarrelModule,
 } from "../tools/capnpc-deno/cli.ts";
+import { CliConfigError, CliUsageError } from "../tools/capnpc-deno/errors.ts";
 import type { GeneratedFile } from "../tools/capnpc-deno/emitter.ts";
 import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
@@ -207,6 +208,32 @@ Deno.test("capnpc-deno CLI rejects unsupported TOML config keys", () => {
   assertThrows(
     () => parseCliConfigToml('runtime_import = "@capnp/deno"'),
     /unsupported config key/,
+  );
+});
+
+Deno.test("capnpc-deno CLI throws typed usage error for unknown argument", () => {
+  let thrown: unknown;
+  try {
+    parseCliArgs(["--wat"]);
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof CliUsageError,
+    `expected CliUsageError, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("capnpc-deno CLI throws typed config error for invalid config key", () => {
+  let thrown: unknown;
+  try {
+    parseCliConfigToml("1bad = true");
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof CliConfigError,
+    `expected CliConfigError, got: ${String(thrown)}`,
   );
 });
 

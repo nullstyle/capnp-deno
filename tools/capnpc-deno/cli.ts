@@ -1,4 +1,5 @@
 import type { GeneratedFile } from "./emitter.ts";
+import { CliConfigError, CliUsageError } from "./errors.ts";
 
 export type OutputLayout = "schema" | "flat";
 
@@ -125,7 +126,7 @@ export function parseCliArgs(args: string[]): CliOptions {
         break;
       case "--config":
         i += 1;
-        if (i >= queue.length) throw new Error("--config requires a value");
+        if (i >= queue.length) throw new CliUsageError("--config requires a value");
         options.configPath = queue[i];
         break;
       case "--no-config":
@@ -133,42 +134,46 @@ export function parseCliArgs(args: string[]): CliOptions {
         break;
       case "--out":
         i += 1;
-        if (i >= queue.length) throw new Error("--out requires a value");
+        if (i >= queue.length) throw new CliUsageError("--out requires a value");
         options.outDir = queue[i];
         options.overrides.outDir = true;
         break;
       case "--request-bin":
         i += 1;
-        if (i >= queue.length) throw new Error("--request-bin requires a value");
+        if (i >= queue.length) {
+          throw new CliUsageError("--request-bin requires a value");
+        }
         options.requestBin = queue[i];
         options.overrides.requestBin = true;
         break;
       case "--schema":
         i += 1;
-        if (i >= queue.length) throw new Error("--schema requires a value");
+        if (i >= queue.length) throw new CliUsageError("--schema requires a value");
         options.schemas.push(queue[i]);
         options.overrides.schemas = true;
         break;
       case "--src":
         i += 1;
-        if (i >= queue.length) throw new Error("--src requires a value");
+        if (i >= queue.length) throw new CliUsageError("--src requires a value");
         options.srcDirs.push(queue[i]);
         options.overrides.srcDirs = true;
         break;
       case "-I":
       case "--import-path":
         i += 1;
-        if (i >= queue.length) throw new Error(`${arg} requires a value`);
+        if (i >= queue.length) throw new CliUsageError(`${arg} requires a value`);
         options.importPaths.push(queue[i]);
         options.overrides.importPaths = true;
         break;
       case "--layout":
         i += 1;
-        if (i >= queue.length) throw new Error("--layout requires a value");
+        if (i >= queue.length) throw new CliUsageError("--layout requires a value");
         {
           const layout = queue[i];
           if (layout !== "schema" && layout !== "flat") {
-            throw new Error(`--layout must be "schema" or "flat", got: ${layout}`);
+            throw new CliUsageError(
+              `--layout must be "schema" or "flat", got: ${layout}`,
+            );
           }
           options.layout = layout;
           options.overrides.layout = true;
@@ -189,9 +194,11 @@ export function parseCliArgs(args: string[]): CliOptions {
       case "--":
         break;
       default:
-        if (arg.startsWith("-")) throw new Error(`unknown argument: ${arg}`);
+        if (arg.startsWith("-")) {
+          throw new CliUsageError(`unknown argument: ${arg}`);
+        }
         if (pluginMode) {
-          throw new Error(
+          throw new CliUsageError(
             `unexpected positional argument in plugin mode: ${arg} (use "generate" to pass positional schemas)`,
           );
         }
@@ -202,10 +209,10 @@ export function parseCliArgs(args: string[]): CliOptions {
   }
 
   if (!options.useConfig && options.configPath) {
-    throw new Error("--no-config cannot be used with --config");
+    throw new CliUsageError("--no-config cannot be used with --config");
   }
   if (options.requestBin && (options.schemas.length > 0 || options.srcDirs.length > 0)) {
-    throw new Error("--request-bin cannot be used with --schema/--src");
+    throw new CliUsageError("--request-bin cannot be used with --schema/--src");
   }
 
   return options;
@@ -247,10 +254,11 @@ export async function loadCliFileConfig(options: CliOptions): Promise<CliFileCon
     if (isOptional && error instanceof Deno.errors.NotFound) {
       return null;
     }
-    throw new Error(
+    throw new CliConfigError(
       error instanceof Error
         ? `failed to read config file ${configPath}: ${error.message}`
         : `failed to read config file ${configPath}`,
+      { cause: error },
     );
   }
 
@@ -317,7 +325,7 @@ export function parseCliConfigToml(source: string): CliFileConfig {
         config.pluginResponse = parseBooleanValue(rawValue, "plugin_response");
         break;
       default:
-        throw new Error(`unsupported config key: ${key}`);
+        throw new CliConfigError(`unsupported config key: ${key}`);
     }
   }
 
@@ -364,7 +372,7 @@ export function finalizeGeneratedFiles(
     const source = file.sourceFilename ?? file.path;
     const prior = pathToSource.get(safePath);
     if (prior !== undefined) {
-      throw new Error(
+      throw new CliUsageError(
         `output path collision: ${safePath} from ${prior} and ${source}; try --layout schema or adjust --src`,
       );
     }
@@ -381,7 +389,9 @@ export function finalizeGeneratedFiles(
   if (options.emitBarrel) {
     const barrelPath = "mod.ts";
     if (pathToSource.has(barrelPath)) {
-      throw new Error("generated files already include mod.ts; cannot emit barrel");
+      throw new CliUsageError(
+        "generated files already include mod.ts; cannot emit barrel",
+      );
     }
     out.push({
       path: barrelPath,
@@ -446,34 +456,36 @@ function parseTomlAssignments(source: string): Map<string, string> {
     if (line.length === 0) continue;
 
     if (line.startsWith("[") && !line.includes("=")) {
-      throw new Error("config tables are not supported; use top-level keys only");
+      throw new CliConfigError(
+        "config tables are not supported; use top-level keys only",
+      );
     }
 
     const eq = line.indexOf("=");
     if (eq <= 0) {
-      throw new Error(`invalid config line ${i + 1}: ${lines[i]}`);
+      throw new CliConfigError(`invalid config line ${i + 1}: ${lines[i]}`);
     }
     const key = line.slice(0, eq).trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      throw new Error(`invalid config key on line ${i + 1}: ${key}`);
+      throw new CliConfigError(`invalid config key on line ${i + 1}: ${key}`);
     }
     let value = line.slice(eq + 1).trim();
     if (value.length === 0) {
-      throw new Error(`config key ${key} is missing a value`);
+      throw new CliConfigError(`config key ${key} is missing a value`);
     }
 
     if (value.startsWith("[") && !isBracketLiteralClosed(value)) {
       while (!isBracketLiteralClosed(value)) {
         i += 1;
         if (i >= lines.length) {
-          throw new Error(`unterminated array for config key ${key}`);
+          throw new CliConfigError(`unterminated array for config key ${key}`);
         }
         value += `\n${stripTomlComments(lines[i])}`;
       }
     }
 
     if (out.has(key)) {
-      throw new Error(`duplicate config key: ${key}`);
+      throw new CliConfigError(`duplicate config key: ${key}`);
     }
     out.set(key, value.trim());
   }
@@ -495,22 +507,22 @@ function parseStringValue(value: string, key: string): string {
     try {
       const parsed = JSON.parse(trimmed);
       if (typeof parsed !== "string") {
-        throw new Error("value is not a string");
+        throw new CliConfigError(`config key ${key} must be a quoted string`);
       }
       return parsed;
     } catch {
-      throw new Error(`config key ${key} must be a quoted string`);
+      throw new CliConfigError(`config key ${key} must be a quoted string`);
     }
   }
   if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
     return trimmed.slice(1, -1);
   }
-  throw new Error(`config key ${key} must be a quoted string`);
+  throw new CliConfigError(`config key ${key} must be a quoted string`);
 }
 
 function parseStringArrayValue(value: string, key: string): string[] {
   if (!value.startsWith("[") || !value.endsWith("]")) {
-    throw new Error(`config key ${key} must be an array of strings`);
+    throw new CliConfigError(`config key ${key} must be an array of strings`);
   }
   const out: string[] = [];
   let cursor = 1;
@@ -519,7 +531,9 @@ function parseStringArrayValue(value: string, key: string): string[] {
     if (cursor >= value.length - 1) break;
     const quote = value[cursor];
     if (quote !== '"' && quote !== "'") {
-      throw new Error(`config key ${key} must contain only quoted strings`);
+      throw new CliConfigError(
+        `config key ${key} must contain only quoted strings`,
+      );
     }
     const parsed = parseQuotedToken(value, cursor, key);
     out.push(parsed.value);
@@ -553,24 +567,24 @@ function parseQuotedToken(
       cursor += 1;
     }
     if (cursor >= source.length) {
-      throw new Error(`unterminated string in config key ${key}`);
+      throw new CliConfigError(`unterminated string in config key ${key}`);
     }
     const token = source.slice(start, cursor + 1);
     try {
       const value = JSON.parse(token);
       if (typeof value !== "string") {
-        throw new Error("value is not a string");
+        throw new CliConfigError(`invalid string value in config key ${key}`);
       }
       return { value, next: cursor + 1 };
     } catch {
-      throw new Error(`invalid string value in config key ${key}`);
+      throw new CliConfigError(`invalid string value in config key ${key}`);
     }
   }
 
   let cursor = start + 1;
   while (cursor < source.length && source[cursor] !== "'") cursor += 1;
   if (cursor >= source.length) {
-    throw new Error(`unterminated string in config key ${key}`);
+    throw new CliConfigError(`unterminated string in config key ${key}`);
   }
   return {
     value: source.slice(start + 1, cursor),
@@ -582,13 +596,13 @@ function parseBooleanValue(value: string, key: string): boolean {
   const trimmed = value.trim();
   if (trimmed === "true") return true;
   if (trimmed === "false") return false;
-  throw new Error(`config key ${key} must be true or false`);
+  throw new CliConfigError(`config key ${key} must be true or false`);
 }
 
 function parseLayoutValue(value: string, key: string): OutputLayout {
   const parsed = parseStringValue(value, key);
   if (parsed !== "schema" && parsed !== "flat") {
-    throw new Error(`config key ${key} must be "schema" or "flat"`);
+    throw new CliConfigError(`config key ${key} must be "schema" or "flat"`);
   }
   return parsed;
 }
@@ -714,7 +728,7 @@ function ensureSafeOutputPath(value: string): string {
     allowParentTraversal: false,
     context: "generated output path",
   });
-  if (safe.length === 0) throw new Error(`invalid output path: ${value}`);
+  if (safe.length === 0) throw new CliUsageError(`invalid output path: ${value}`);
   return safe;
 }
 
@@ -746,7 +760,9 @@ function normalizeRelativePath(
     if (segment.length === 0 || segment === ".") continue;
     if (segment === "..") {
       if (!options.allowParentTraversal) {
-        throw new Error(`${options.context} must not contain '..': ${value}`);
+        throw new CliUsageError(
+          `${options.context} must not contain '..': ${value}`,
+        );
       }
       if (out.length > 0) out.pop();
       continue;

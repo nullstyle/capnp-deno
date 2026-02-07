@@ -19,6 +19,11 @@
     "verify:integration": "deno task test:integration",
     "verify:real": "deno task build:wasm && deno task smoke:real && deno task test:integration && deno task test:real"
   },
+  "lint": {
+    "exclude": [
+      "vendor/capnp-zig/vendor/**"
+    ]
+  },
   "compilerOptions": {
     "strict": true
   }

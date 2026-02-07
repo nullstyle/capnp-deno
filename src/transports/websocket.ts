@@ -1,4 +1,4 @@
-import { TransportError } from "../errors.ts";
+import { normalizeTransportError, TransportError } from "../errors.ts";
 import {
   type CapnpFrameLimitsOptions,
   validateCapnpFrame,
@@ -125,9 +125,17 @@ export class WebSocketTransport implements RpcTransport {
     protocols?: string | string[],
     options: WebSocketTransportOptions = {},
   ): Promise<WebSocketTransport> {
-    const socket = protocols === undefined
-      ? new WebSocket(url)
-      : new WebSocket(url, protocols);
+    let socket: WebSocket;
+    try {
+      socket = protocols === undefined
+        ? new WebSocket(url)
+        : new WebSocket(url, protocols);
+    } catch (error) {
+      throw normalizeTransportError(
+        error,
+        `failed to create websocket: ${String(url)}`,
+      );
+    }
 
     const timeoutMs = options.connectTimeoutMs;
     await new Promise<void>((resolve, reject) => {
@@ -314,9 +322,13 @@ export class WebSocketTransport implements RpcTransport {
         this.socket.send(next.frame);
         next.resolve();
       } catch (error) {
-        next.reject(error);
-        this.#rejectQueuedOutbound(error);
-        throw error;
+        const normalized = normalizeTransportError(
+          error,
+          "websocket send failed",
+        );
+        next.reject(normalized);
+        this.#rejectQueuedOutbound(normalized);
+        throw normalized;
       } finally {
         this.#inflightOutboundFrames -= 1;
         this.#inflightOutboundBytes -= next.frame.byteLength;
@@ -355,18 +367,22 @@ export class WebSocketTransport implements RpcTransport {
   }
 
   #handleError(error: unknown): void {
+    const normalized = normalizeTransportError(
+      error,
+      "websocket transport error",
+    );
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.websocket.error",
       attributes: {
         "rpc.outcome": "error",
       },
-      error,
+      error: normalized,
     });
     if (this.options.onError) {
-      void Promise.resolve(this.options.onError(error));
+      void Promise.resolve(this.options.onError(normalized));
       return;
     }
-    throw error;
+    throw normalized;
   }
 
   async #waitForClose(): Promise<void> {

@@ -5,6 +5,8 @@ export {
   type WasmAbiCapabilities,
   WasmAbiError,
   type WasmAbiOptions,
+  type WasmHostCallRecord,
+  type WasmSendFinishOptions,
 } from "./src/abi.ts";
 export {
   AbiError,
@@ -28,6 +30,14 @@ export {
 } from "./src/observability.ts";
 export { instantiatePeer } from "./src/load.ts";
 export { RpcSession, type RpcSessionOptions } from "./src/session.ts";
+export {
+  RpcServerRuntime,
+  type RpcServerRuntimeHostCallPumpOptions,
+  type RpcServerRuntimeOptions,
+  type RpcServerRuntimePumpOptions,
+  type RpcServerRuntimeWarning,
+  type RpcServerRuntimeWarningCode,
+} from "./src/server_runtime.ts";
 export { type RpcTransport } from "./src/transport.ts";
 export { WasmPeer } from "./src/wasm_peer.ts";
 export {
@@ -84,7 +94,9 @@ export {
   type RpcCallResponse as RpcServerCallResponse,
   RpcServerBridge,
   type RpcServerBridgeOptions,
+  type RpcServerBridgePumpHostCallsOptions,
   type RpcServerDispatch,
+  type RpcServerWasmHost,
 } from "./src/rpc_server.ts";
 export {
   type JsonSerdeCodec,

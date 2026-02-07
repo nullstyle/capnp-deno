@@ -17,6 +17,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "RPC_MESSAGE_TAG_RETURN",
   "ReconnectingRpcClientTransport",
   "RpcServerBridge",
+  "RpcServerRuntime",
   "RpcSession",
   "SessionError",
   "SessionRpcClientTransport",

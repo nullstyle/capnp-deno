@@ -1,4 +1,4 @@
-import { TransportError } from "../errors.ts";
+import { normalizeTransportError, TransportError } from "../errors.ts";
 import {
   type CapnpFrameLimitsOptions,
   validateCapnpFrame,
@@ -229,10 +229,14 @@ export class MessagePortTransport implements RpcTransport {
         this.port.postMessage(new Uint8Array(next.frame));
         next.resolve();
       } catch (error) {
-        next.reject(error);
-        this.#rejectQueuedOutbound(error);
-        this.#handleError(error);
-        throw error;
+        const normalized = normalizeTransportError(
+          error,
+          "message port send failed",
+        );
+        next.reject(normalized);
+        this.#rejectQueuedOutbound(normalized);
+        this.#handleError(normalized);
+        throw normalized;
       } finally {
         this.#inflightOutboundFrames -= 1;
         this.#inflightOutboundBytes -= next.frame.byteLength;
@@ -241,18 +245,22 @@ export class MessagePortTransport implements RpcTransport {
   }
 
   #handleError(error: unknown): void {
+    const normalized = normalizeTransportError(
+      error,
+      "message port transport error",
+    );
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.message_port.error",
       attributes: {
         "rpc.outcome": "error",
       },
-      error,
+      error: normalized,
     });
     if (this.options.onError) {
-      void Promise.resolve(this.options.onError(error));
+      void Promise.resolve(this.options.onError(normalized));
       return;
     }
-    throw error;
+    throw normalized;
   }
 
   #rejectQueuedOutbound(error: unknown): void {
