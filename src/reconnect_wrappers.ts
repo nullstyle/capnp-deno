@@ -12,27 +12,57 @@ import {
 } from "./transports/websocket.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
 
+/**
+ * Options for {@link connectTcpTransportWithReconnect}.
+ */
 export interface ConnectTcpTransportWithReconnectOptions {
+  /** Options forwarded to each {@link TcpTransport.connect} attempt. */
   transport?: TcpTransportOptions;
+  /** Reconnection policy and options. */
   reconnect: ConnectWithReconnectOptions;
 }
 
+/**
+ * Options for {@link connectWebSocketTransportWithReconnect}.
+ */
 export interface ConnectWebSocketTransportWithReconnectOptions {
+  /** WebSocket sub-protocols to request during the handshake. */
   protocols?: string | string[];
+  /** Options forwarded to each {@link WebSocketTransport.connect} attempt. */
   transport?: WebSocketTransportOptions;
+  /** Reconnection policy and options. */
   reconnect: ConnectWithReconnectOptions;
 }
 
+/**
+ * Options for {@link createRpcSessionWithReconnect}.
+ *
+ * @typeParam TTransport - The specific transport type being connected.
+ */
 export interface CreateRpcSessionWithReconnectOptions<
   TTransport extends RpcTransport,
 > {
+  /** Factory function that creates a new transport connection. */
   connectTransport: () => Promise<TTransport>;
+  /** Factory function that creates (or reuses) a WASM peer for the session. */
   createPeer: () => Promise<WasmPeer> | WasmPeer;
+  /** Reconnection policy and options for the transport connection. */
   reconnect: ConnectWithReconnectOptions;
+  /** Options forwarded to the {@link RpcSession} constructor. */
   session?: RpcSessionOptions;
+  /** Whether to automatically start the session. Defaults to `true`. */
   autoStart?: boolean;
 }
 
+/**
+ * Connect any {@link RpcTransport} with automatic reconnection on failure.
+ *
+ * @typeParam TTransport - The specific transport type.
+ * @param connect - Factory function that creates a new transport.
+ * @param reconnect - Reconnection policy and options.
+ * @returns The connected transport.
+ * @throws {TransportError} If all retry attempts are exhausted.
+ */
 export async function connectTransportWithReconnect<
   TTransport extends RpcTransport,
 >(
@@ -42,6 +72,16 @@ export async function connectTransportWithReconnect<
   return await connectWithReconnect(connect, reconnect);
 }
 
+/**
+ * Connect a {@link TcpTransport} to the given host and port with automatic
+ * reconnection on failure.
+ *
+ * @param hostname - The TCP hostname to connect to.
+ * @param port - The TCP port to connect to.
+ * @param options - Transport and reconnection options.
+ * @returns The connected TCP transport.
+ * @throws {TransportError} If all retry attempts are exhausted.
+ */
 export async function connectTcpTransportWithReconnect(
   hostname: string,
   port: number,
@@ -53,6 +93,15 @@ export async function connectTcpTransportWithReconnect(
   );
 }
 
+/**
+ * Connect a {@link WebSocketTransport} to the given URL with automatic
+ * reconnection on failure.
+ *
+ * @param url - The WebSocket URL to connect to.
+ * @param options - Transport, protocol, and reconnection options.
+ * @returns The connected WebSocket transport.
+ * @throws {TransportError} If all retry attempts are exhausted.
+ */
 export async function connectWebSocketTransportWithReconnect(
   url: string | URL,
   options: ConnectWebSocketTransportWithReconnectOptions,
@@ -68,6 +117,18 @@ export async function connectWebSocketTransportWithReconnect(
   );
 }
 
+/**
+ * Create a complete {@link RpcSession} with a reconnectable transport.
+ *
+ * This is a high-level convenience that connects the transport (with retries),
+ * creates a WASM peer, constructs an RPC session, and optionally starts it.
+ * On failure, partially-created resources are cleaned up automatically.
+ *
+ * @typeParam TTransport - The specific transport type.
+ * @param options - Session, peer, transport, and reconnection options.
+ * @returns The created session and connected transport.
+ * @throws {SessionError} If session creation fails after transport connection.
+ */
 export async function createRpcSessionWithReconnect<
   TTransport extends RpcTransport,
 >(

@@ -9,37 +9,79 @@ import {
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+  RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_MESSAGE_TAG_CALL,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   type RpcCallRequest,
   type RpcCallTarget,
   type RpcCapDescriptor,
   type RpcFinishRequest,
+  type RpcPromisedAnswerOp,
 } from "./rpc_wire.ts";
 
+/** A pointer to a capability identified by its export table index. */
 export interface CapabilityPointer {
+  /** The capability's index in the export/import table. */
   capabilityIndex: number;
 }
 
+/**
+ * Context provided to server dispatch handlers for each incoming RPC call.
+ *
+ * Contains the full call metadata including target, capability, method,
+ * question ID, interface ID, and the parameters capability table.
+ */
 export interface RpcCallContext {
+  /** The call target (imported cap or promised answer). */
   readonly target: RpcCallTarget;
+  /** The capability being called. */
   readonly capability: CapabilityPointer;
+  /** The method ordinal within the interface. */
   readonly methodOrdinal: number;
+  /** The question ID for this call. */
   readonly questionId: number;
+  /** The Cap'n Proto interface ID. */
   readonly interfaceId: bigint;
+  /** Capability descriptors from the call's parameter payload. */
   readonly paramsCapTable: RpcCapDescriptor[];
 }
 
+/**
+ * Response returned by an {@link RpcServerDispatch} handler.
+ *
+ * Can be a simple `Uint8Array` (treated as content-only) or a full response
+ * object with capability table and return flags.
+ */
 export interface RpcCallResponse {
+  /** The serialized result content (Cap'n Proto message). */
   readonly content?: Uint8Array;
+  /** Capability descriptors to include in the response. */
   readonly capTable?: RpcCapDescriptor[];
+  /** Whether to release parameter capabilities. Defaults to true. */
   readonly releaseParamCaps?: boolean;
+  /** Whether a Finish message is unnecessary. Defaults to false. */
   readonly noFinishNeeded?: boolean;
 }
 
+/**
+ * Interface for server-side RPC dispatch handlers.
+ *
+ * Implement this interface for each Cap'n Proto interface you want to serve.
+ * Register implementations with {@link RpcServerBridge.exportCapability}.
+ */
 export interface RpcServerDispatch {
+  /** The Cap'n Proto interface ID this dispatch handles. */
   readonly interfaceId: bigint;
+  /**
+   * Handles an incoming RPC call.
+   *
+   * @param methodOrdinal - The method number within the interface.
+   * @param params - The serialized parameter content.
+   * @param ctx - Full call context including capability and question info.
+   * @returns The response bytes or a full response object.
+   */
   dispatch(
     methodOrdinal: number,
     params: Uint8Array,
@@ -47,6 +89,9 @@ export interface RpcServerDispatch {
   ): Promise<Uint8Array | RpcCallResponse> | Uint8Array | RpcCallResponse;
 }
 
+/**
+ * Options for configuring an {@link RpcServerBridge}.
+ */
 export interface RpcServerBridgeOptions {
   nextCapabilityIndex?: number;
   onUnhandledError?: (
@@ -56,6 +101,10 @@ export interface RpcServerBridgeOptions {
   onFinish?: (finish: RpcFinishRequest) => void | Promise<void>;
 }
 
+/**
+ * Abstraction over the WASM peer's host-call bridge used by {@link RpcServerBridge}
+ * to pump and respond to host calls.
+ */
 export interface RpcServerWasmHost {
   readonly handle: number;
   readonly abi: {
@@ -78,7 +127,11 @@ export interface RpcServerWasmHost {
   };
 }
 
+/**
+ * Options for {@link RpcServerBridge.pumpWasmHostCalls}.
+ */
 export interface RpcServerBridgePumpHostCallsOptions {
+  /** Maximum number of host calls to process in this pump cycle. */
   maxCalls?: number;
 }
 
@@ -90,6 +143,18 @@ interface RegisteredDispatch {
 type RpcDispatchOutcome =
   | { kind: "results"; response: RpcCallResponse }
   | { kind: "exception"; reason: string };
+
+/**
+ * An entry in the answer table, tracking an in-flight or completed question.
+ * Used for promise pipelining: when a pipelined call targets a promisedAnswer,
+ * we look up the referenced question here to find the capability to dispatch to.
+ */
+interface AnswerTableEntry {
+  /** Promise that resolves when the dispatch completes */
+  readonly promise: Promise<RpcDispatchOutcome>;
+  /** Resolved outcome, set once the promise settles */
+  outcome?: RpcDispatchOutcome;
+}
 
 function normalizeCapability(
   capability: number | CapabilityPointer,
@@ -109,11 +174,84 @@ function normalizeCallResponse(
   return value;
 }
 
+/**
+ * Resolve a promisedAnswer target to a capability index by looking up
+ * the answer table entry and applying the transform operations.
+ *
+ * In the Cap'n Proto RPC protocol, a promisedAnswer target says:
+ * "take the result of question N, then follow these pointer fields
+ *  to find the capability I want to call."
+ *
+ * The transform is a sequence of PromisedAnswer.Op entries. Each
+ * getPointerField(n) operation selects the n-th capability from the
+ * cap table. For the common case (no transform or empty transform),
+ * we use capTable[0].id as the capability index.
+ */
+function resolvePromisedAnswerCapability(
+  outcome: RpcDispatchOutcome,
+  transform: RpcPromisedAnswerOp[] | undefined,
+): number {
+  if (outcome.kind === "exception") {
+    throw new ProtocolError(
+      `promisedAnswer target question resolved with exception: ${outcome.reason}`,
+    );
+  }
+
+  const capTable = outcome.response.capTable ?? [];
+  const ops = transform ?? [];
+
+  // If no transform, use the first capability in the cap table.
+  if (ops.length === 0) {
+    if (capTable.length === 0) {
+      throw new ProtocolError(
+        "promisedAnswer target resolved but result has no capabilities in cap table",
+      );
+    }
+    return capTable[0].id;
+  }
+
+  // Apply getPointerField operations to select the capability.
+  let pointerIndex = 0;
+  for (const op of ops) {
+    if (op.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
+      pointerIndex = op.pointerIndex ?? 0;
+    }
+    // noop ops are simply skipped
+  }
+
+  if (pointerIndex >= capTable.length) {
+    throw new ProtocolError(
+      `promisedAnswer transform getPointerField(${pointerIndex}) is out of range; cap table has ${capTable.length} entries`,
+    );
+  }
+
+  return capTable[pointerIndex].id;
+}
+
+/**
+ * Server-side bridge that dispatches incoming RPC calls to registered
+ * capability handlers.
+ *
+ * The bridge maintains a registry of exported capabilities (each associated
+ * with an {@link RpcServerDispatch} handler) and routes incoming Call, Release,
+ * and Finish messages to the appropriate handler.
+ *
+ * It can also pump host calls from a WASM peer via {@link pumpWasmHostCalls}.
+ *
+ * @example
+ * ```ts
+ * const bridge = new RpcServerBridge();
+ * const cap = bridge.exportCapability(myDispatch);
+ * // cap.capabilityIndex is now registered and will receive calls
+ * ```
+ */
 export class RpcServerBridge {
   #nextCapabilityIndex: number;
   #dispatchByCapability = new Map<number, RegisteredDispatch>();
   #onUnhandledError?: RpcServerBridgeOptions["onUnhandledError"];
   #onFinish?: RpcServerBridgeOptions["onFinish"];
+  /** Answer table: maps question IDs to their dispatch promises/outcomes */
+  #answerTable = new Map<number, AnswerTableEntry>();
 
   constructor(options: RpcServerBridgeOptions = {}) {
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
@@ -196,6 +334,14 @@ export class RpcServerBridge {
     return this.#dispatchByCapability.has(normalizeCapability(capability));
   }
 
+  /**
+   * Returns the number of entries currently in the answer table.
+   * Useful for testing and debugging promise pipelining state.
+   */
+  get answerTableSize(): number {
+    return this.#answerTable.size;
+  }
+
   async handleFrame(frame: Uint8Array): Promise<Uint8Array | null> {
     const tag = decodeRpcMessageTag(frame);
 
@@ -207,6 +353,8 @@ export class RpcServerBridge {
 
     if (tag === RPC_MESSAGE_TAG_FINISH) {
       const finish = decodeFinishFrame(frame);
+      // Clean up the answer table entry for this question.
+      this.#answerTable.delete(finish.questionId);
       if (this.#onFinish) {
         await this.#onFinish(finish);
       }
@@ -249,7 +397,22 @@ export class RpcServerBridge {
   }
 
   async #handleCall(call: RpcCallRequest): Promise<Uint8Array> {
+    // Register this question in the answer table before dispatching,
+    // so that pipelined calls targeting this question can find it.
+    let resolveEntry!: (outcome: RpcDispatchOutcome) => void;
+    const entry: AnswerTableEntry = {
+      promise: new Promise<RpcDispatchOutcome>((resolve) => {
+        resolveEntry = resolve;
+      }),
+    };
+    this.#answerTable.set(call.questionId, entry);
+
     const outcome = await this.#dispatchCall(call);
+
+    // Store the resolved outcome and resolve the promise.
+    (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
+    resolveEntry(outcome);
+
     if (outcome.kind === "exception") {
       return encodeReturnExceptionFrame({
         answerId: call.questionId,
@@ -348,15 +511,85 @@ export class RpcServerBridge {
   }
 
   async #dispatchCall(call: RpcCallRequest): Promise<RpcDispatchOutcome> {
+    // Handle promisedAnswer targets (Level 2 RPC / promise pipelining).
+    if (call.target.tag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
+      return await this.#dispatchPipelinedCall(call);
+    }
+
     if (call.target.tag !== RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
       return {
         kind: "exception",
-        reason:
-          "server bridge does not support promisedAnswer call targets yet",
+        reason: `unsupported call target tag: ${
+          (call.target as { tag: number }).tag
+        }`,
       };
     }
 
     const capabilityIndex = call.target.importedCap;
+    return await this.#dispatchToCapability(capabilityIndex, call);
+  }
+
+  /**
+   * Handle a pipelined call that targets a promisedAnswer.
+   * This waits for the referenced question to complete, resolves the
+   * capability from the result's cap table using the transform, then
+   * dispatches the call to that capability.
+   */
+  async #dispatchPipelinedCall(
+    call: RpcCallRequest,
+  ): Promise<RpcDispatchOutcome> {
+    if (call.target.tag !== RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
+      return {
+        kind: "exception",
+        reason: "internal error: expected promisedAnswer target",
+      };
+    }
+
+    const { questionId: targetQuestionId, transform } =
+      call.target.promisedAnswer;
+
+    // Look up the referenced question in the answer table.
+    const answerEntry = this.#answerTable.get(targetQuestionId);
+    if (!answerEntry) {
+      return {
+        kind: "exception",
+        reason:
+          `promisedAnswer references unknown question ${targetQuestionId}`,
+      };
+    }
+
+    // Wait for the referenced question to complete.
+    let targetOutcome: RpcDispatchOutcome;
+    if (answerEntry.outcome !== undefined) {
+      targetOutcome = answerEntry.outcome;
+    } else {
+      targetOutcome = await answerEntry.promise;
+    }
+
+    // Resolve the capability index from the answer's result cap table.
+    let capabilityIndex: number;
+    try {
+      capabilityIndex = resolvePromisedAnswerCapability(
+        targetOutcome,
+        transform,
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { kind: "exception", reason };
+    }
+
+    // Dispatch to the resolved capability.
+    return await this.#dispatchToCapability(capabilityIndex, call);
+  }
+
+  /**
+   * Dispatch a call to a specific capability index.
+   * Shared by both direct (importedCap) and pipelined (promisedAnswer) paths.
+   */
+  async #dispatchToCapability(
+    capabilityIndex: number,
+    call: RpcCallRequest,
+  ): Promise<RpcDispatchOutcome> {
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
       return {

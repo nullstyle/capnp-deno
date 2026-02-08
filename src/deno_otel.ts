@@ -51,9 +51,15 @@ interface DenoTelemetryNamespace {
   meterProvider?: OTelMeterProvider;
 }
 
+/**
+ * Options for configuring the Deno OpenTelemetry observability integration.
+ */
 export interface DenoOtelObservabilityOptions {
+  /** Instrumentation name reported to the tracer/meter provider. Defaults to "@capnp/deno". */
   instrumentationName?: string;
+  /** Instrumentation version string. Defaults to "0.0.0-dev". */
   instrumentationVersion?: string;
+  /** Whether to emit short-lived spans for error events. Defaults to true. */
   emitErrorSpans?: boolean;
 }
 
@@ -79,6 +85,25 @@ function readDenoTelemetry(): DenoTelemetryNamespace | undefined {
   return (Deno as unknown as { telemetry?: DenoTelemetryNamespace }).telemetry;
 }
 
+/**
+ * Creates an {@link RpcObservability} implementation that reports events to
+ * Deno's built-in OpenTelemetry integration (`Deno.telemetry`).
+ *
+ * Emits counters for events and errors, a histogram for event durations,
+ * and optional error spans. If `Deno.telemetry` is not available (e.g.,
+ * running without `--unstable-otel`), returns a no-op observer.
+ *
+ * @param options - Configuration for instrumentation naming and error span emission.
+ * @returns An `RpcObservability` hook that forwards events to OpenTelemetry.
+ *
+ * @example
+ * ```ts
+ * const observability = createDenoOtelObservability({
+ *   instrumentationName: "@myapp/rpc",
+ * });
+ * const session = new RpcSession(peer, transport, { observability });
+ * ```
+ */
 export function createDenoOtelObservability(
   options: DenoOtelObservabilityOptions = {},
 ): RpcObservability {

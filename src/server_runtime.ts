@@ -37,40 +37,125 @@ class PostInboundHookTransport implements RpcTransport {
   }
 }
 
+/**
+ * Identifies the kind of warning emitted by {@link RpcServerRuntime}.
+ *
+ * - `"host_call_pump_unavailable"` - The WASM module does not expose the
+ *   host-call bridge exports, so host-call pumping has been automatically disabled.
+ * - `"host_call_pump_limit_reached"` - The configured maximum total host calls
+ *   has been reached and further pumping is stopped.
+ */
 export type RpcServerRuntimeWarningCode =
   | "host_call_pump_unavailable"
   | "host_call_pump_limit_reached";
 
+/**
+ * A structured warning emitted by the {@link RpcServerRuntime} when
+ * host-call pumping encounters a non-fatal issue.
+ */
 export interface RpcServerRuntimeWarning {
+  /** The warning category. */
   code: RpcServerRuntimeWarningCode;
+  /** A human-readable description of the warning. */
   message: string;
+  /** The number of host calls pumped so far. */
   totalHostCallsPumped: number;
+  /** The configured maximum total host calls allowed. */
   maxHostCallsTotal: number;
 }
 
+/**
+ * Options controlling automatic host-call pumping in the {@link RpcServerRuntime}.
+ *
+ * After each inbound frame is processed, the runtime can automatically pump
+ * host calls from the WASM peer, dispatching them to the server bridge.
+ */
 export interface RpcServerRuntimeHostCallPumpOptions {
+  /**
+   * Whether host-call pumping is enabled. Defaults to `true` if the WASM
+   * module supports the host-call bridge; otherwise automatically disabled.
+   */
   enabled?: boolean;
+  /**
+   * Maximum number of host calls to pump after each inbound frame.
+   * Defaults to 64.
+   */
   maxCallsPerInboundFrame?: number;
+  /**
+   * Maximum total number of host calls to pump over the runtime's lifetime.
+   * Defaults to `Number.MAX_SAFE_INTEGER`.
+   */
   maxCallsTotal?: number;
+  /**
+   * Whether to throw a {@link SessionError} when the total host-call limit
+   * is reached. Defaults to `true`. When `false`, pumping is silently disabled
+   * and a warning is emitted instead.
+   */
   failOnLimit?: boolean;
+  /**
+   * Callback invoked when the runtime emits a warning about host-call pumping.
+   * Exceptions thrown by this callback are silently ignored.
+   */
   onWarning?: (
     warning: RpcServerRuntimeWarning,
   ) => void | Promise<void>;
 }
 
+/**
+ * Configuration options for creating an {@link RpcServerRuntime}.
+ */
 export interface RpcServerRuntimeOptions {
+  /** Options forwarded to the underlying {@link RpcSession}. */
   session?: RpcSessionOptions;
+  /**
+   * An explicit WASM host handle. When omitted, the runtime will attempt
+   * to derive one from the peer's ABI capabilities.
+   */
   wasmHost?: RpcServerWasmHost;
+  /** Options controlling automatic host-call pumping behavior. */
   hostCallPump?: RpcServerRuntimeHostCallPumpOptions;
 }
 
+/**
+ * Options for a single invocation of {@link RpcServerRuntime.pumpHostCallsNow}.
+ */
 export interface RpcServerRuntimePumpOptions {
+  /**
+   * Maximum number of host calls to pump in this invocation.
+   * Defaults to `maxCallsPerInboundFrame` from the runtime options.
+   */
   maxCalls?: number;
 }
 
+/**
+ * High-level server-side runtime that combines an {@link RpcSession}, a
+ * {@link RpcServerBridge}, and a {@link WasmPeer} into a single managed unit.
+ *
+ * The runtime automatically pumps host calls from the WASM peer after each
+ * inbound frame, dispatching them through the bridge to your server-side
+ * handler. This eliminates the need for manual host-call pumping in most
+ * server scenarios.
+ *
+ * Lifecycle:
+ * 1. Construct with a peer, transport, and bridge.
+ * 2. Call {@link start} to begin processing inbound frames.
+ * 3. The runtime automatically pumps host calls after each frame.
+ * 4. Call {@link close} to shut down.
+ *
+ * @example
+ * ```ts
+ * const runtime = new RpcServerRuntime(peer, transport, bridge);
+ * await runtime.start();
+ * // ... runtime processes frames and pumps host calls automatically ...
+ * await runtime.close();
+ * ```
+ */
 export class RpcServerRuntime {
+  /** The underlying RPC session. */
   readonly session: RpcSession;
+  /** The server bridge that dispatches host calls. */
   readonly bridge: RpcServerBridge;
+  /** The WASM peer used for frame processing. */
   readonly peer: WasmPeer;
 
   #wasmHost: RpcServerWasmHost | null;
@@ -162,34 +247,52 @@ export class RpcServerRuntime {
     this.session = new RpcSession(peer, hooked, options.session ?? {});
   }
 
+  /** Whether the underlying session has been started. */
   get started(): boolean {
     return this.session.started;
   }
 
+  /** Whether the underlying session has been closed. */
   get closed(): boolean {
     return this.session.closed;
   }
 
+  /** The total number of host calls pumped since this runtime was created. */
   get totalHostCallsPumped(): number {
     return this.#totalHostCallsPumped;
   }
 
+  /** Whether host-call pumping has been permanently disabled due to a limit being reached. */
   get hostCallPumpDisabled(): boolean {
     return this.#hostCallPumpDisabled;
   }
 
+  /**
+   * Start the underlying RPC session, beginning inbound frame processing
+   * and automatic host-call pumping.
+   */
   async start(): Promise<void> {
     await this.session.start();
   }
 
+  /** Flush any pending outbound frames in the session. */
   async flush(): Promise<void> {
     await this.session.flush();
   }
 
+  /** Close the underlying RPC session and stop processing. */
   async close(): Promise<void> {
     await this.session.close();
   }
 
+  /**
+   * Manually pump host calls from the WASM peer right now, outside of the
+   * automatic post-inbound-frame pumping cycle.
+   *
+   * @param options - Options controlling the maximum number of calls to pump.
+   * @returns The number of host calls actually handled in this invocation.
+   * @throws {SessionError} If the host-call limit is reached and `failOnLimit` is `true`.
+   */
   async pumpHostCallsNow(
     options: RpcServerRuntimePumpOptions = {},
   ): Promise<number> {

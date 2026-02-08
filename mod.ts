@@ -45,6 +45,7 @@ export {
   type RpcClientCallOptions,
   type RpcClientCallResult,
   type RpcFinishOptions,
+  RpcPipeline,
   type RpcSessionHarnessTransport,
   SessionRpcClientTransport,
   type SessionRpcClientTransportOptions,

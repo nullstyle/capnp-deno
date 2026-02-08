@@ -2,9 +2,15 @@ import { getCapnpWasmExports, type WasmAbiOptions } from "./abi.ts";
 import { InstantiationError } from "./errors.ts";
 import { WasmPeer } from "./wasm_peer.ts";
 
+/**
+ * Result of instantiating a Cap'n Proto WASM peer via {@link instantiatePeer}.
+ */
 export interface InstantiatePeerResult {
+  /** The underlying WebAssembly instance. */
   instance: WebAssembly.Instance;
+  /** The compiled WebAssembly module (can be reused for additional instances). */
   module: WebAssembly.Module;
+  /** The ready-to-use WasmPeer. */
   peer: WasmPeer;
 }
 
@@ -76,6 +82,39 @@ async function instantiateFromUrl(
   return await instantiateFromResponse(response, imports);
 }
 
+/**
+ * Loads a Cap'n Proto WASM module and creates a ready-to-use {@link WasmPeer}.
+ *
+ * This is the primary entry point for loading WASM modules. It accepts a
+ * variety of source types and handles compilation, instantiation, export
+ * validation, and peer creation in a single call.
+ *
+ * @param source - The WASM module source. Accepts:
+ *   - A `URL` or URL string pointing to a `.wasm` file (supports `file:`, `http:`, `https:` schemes)
+ *   - A file path string (loaded via `Deno.readFile`)
+ *   - A `Response` object (uses streaming instantiation when possible)
+ *   - A `BufferSource` containing the raw WASM bytes
+ * @param imports - WebAssembly imports to provide to the module. Defaults to `{}`.
+ * @param options - ABI version negotiation options.
+ * @returns The instantiated module, compiled module, and ready-to-use peer.
+ * @throws {InstantiationError} If the source cannot be loaded or compiled.
+ * @throws {WasmAbiError} If required exports are missing or version negotiation fails.
+ *
+ * @example
+ * ```ts
+ * const { peer } = await instantiatePeer(
+ *   new URL("./capnp_deno.wasm", import.meta.url),
+ *   {},
+ *   { expectedVersion: 1 },
+ * );
+ * try {
+ *   const outbound = peer.pushFrame(inboundFrame);
+ *   // ... process outbound frames
+ * } finally {
+ *   peer.close();
+ * }
+ * ```
+ */
 export async function instantiatePeer(
   source: URL | string | Response | BufferSource,
   imports: WebAssembly.Imports = {},

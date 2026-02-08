@@ -5,10 +5,20 @@ const POINTER_HOP_LIMIT = 8;
 const MASK_29 = 0x1fff_ffffn;
 const MASK_30 = 0x3fff_ffffn;
 
+/**
+ * Options for limiting the size and complexity of Cap'n Proto frames.
+ *
+ * These limits protect against excessively large or deeply nested messages
+ * that could cause out-of-memory errors or stack overflows.
+ */
 export interface CapnpFrameLimitsOptions {
+  /** Maximum number of segments allowed in a single frame. */
   maxSegmentCount?: number;
+  /** Maximum total frame size in bytes (header + all segments). */
   maxFrameBytes?: number;
+  /** Maximum total word count across all segments. */
   maxTraversalWords?: number;
+  /** Maximum pointer nesting depth. When set, a full pointer tree walk is performed. */
   maxNestingDepth?: number;
 }
 
@@ -434,6 +444,16 @@ function enforceNestingDepth(
   }
 }
 
+/**
+ * Validates a Cap'n Proto frame against the provided size and complexity limits.
+ *
+ * Parses the frame header, checks segment counts and sizes, and optionally
+ * walks the pointer tree to enforce a maximum nesting depth.
+ *
+ * @param frame - The complete Cap'n Proto frame bytes to validate.
+ * @param limits - The limits to enforce. An empty object performs only basic structural validation.
+ * @throws {ProtocolError} If any limit is exceeded or the frame is malformed.
+ */
 export function validateCapnpFrame(
   frame: Uint8Array,
   limits: CapnpFrameLimitsOptions = {},

@@ -16,16 +16,35 @@ interface PendingOutboundFrame {
   reject: (error: unknown) => void;
 }
 
+/**
+ * Configuration options for {@link MessagePortTransport}.
+ */
 export interface MessagePortTransportOptions {
+  /**
+   * Error handler invoked when the transport encounters an error.
+   * If not provided, errors are thrown.
+   */
   onError?: (error: unknown) => void | Promise<void>;
+  /**
+   * Whether to reject non-binary (e.g. string) messages received on the port.
+   * Defaults to `true`.
+   */
   rejectNonBinaryFrames?: boolean;
+  /** Whether to call `port.close()` when the transport is closed. Defaults to `false`. */
   closePortOnClose?: boolean;
+  /** Cap'n Proto frame validation limits applied to inbound frames. */
   frameLimits?: CapnpFrameLimitsOptions;
+  /** Maximum allowed size in bytes for a single inbound frame. */
   maxInboundFrameBytes?: number;
+  /** Maximum allowed size in bytes for a single outbound frame. */
   maxOutboundFrameBytes?: number;
+  /** Maximum number of outbound frames that can be queued. */
   maxQueuedOutboundFrames?: number;
+  /** Maximum total bytes across all queued outbound frames. */
   maxQueuedOutboundBytes?: number;
+  /** Maximum time in milliseconds a queued frame can wait before being sent. */
   sendTimeoutMs?: number;
+  /** Observability provider for emitting transport events. */
   observability?: RpcObservability;
 }
 
@@ -48,8 +67,30 @@ function toBinary(
   return null;
 }
 
+/**
+ * An {@link RpcTransport} implementation backed by the Web {@link MessagePort} API.
+ *
+ * Suitable for communication between browser tabs, workers, iframes, or any
+ * environment that exposes a `MessagePort` interface (including Deno workers).
+ * Binary data is transferred via `postMessage` with `Uint8Array` payloads.
+ *
+ * Outbound frames are queued and drained asynchronously to prevent blocking
+ * the event loop. Inbound frames are delivered sequentially through a chain
+ * of promises to preserve ordering.
+ *
+ * @example
+ * ```ts
+ * const channel = new MessageChannel();
+ * const transport = new MessagePortTransport(channel.port1, {
+ *   closePortOnClose: true,
+ * });
+ * transport.start((frame) => handleFrame(frame));
+ * ```
+ */
 export class MessagePortTransport implements RpcTransport {
+  /** The underlying `MessagePort` used for communication. */
   readonly port: MessagePort;
+  /** The options this transport was configured with. */
   readonly options: MessagePortTransportOptions;
 
   #started = false;

@@ -4,16 +4,25 @@ const WORD_BYTES = 8;
 const MASK_30 = 0x3fff_ffffn;
 const POINTER_OFFSET_MASK = MASK_30 << 2n;
 
+/** Tag value for a Cap'n Proto RPC Call message. */
 export const RPC_MESSAGE_TAG_CALL = 2;
+/** Tag value for a Cap'n Proto RPC Return message. */
 export const RPC_MESSAGE_TAG_RETURN = 3;
+/** Tag value for a Cap'n Proto RPC Finish message. */
 export const RPC_MESSAGE_TAG_FINISH = 4;
+/** Tag value for a Cap'n Proto RPC Release message. */
 export const RPC_MESSAGE_TAG_RELEASE = 6;
+/** Tag value for a Cap'n Proto RPC Bootstrap message. */
 export const RPC_MESSAGE_TAG_BOOTSTRAP = 8;
 
+/** Call target tag: the target is an imported capability. */
 export const RPC_CALL_TARGET_TAG_IMPORTED_CAP = 0;
+/** Call target tag: the target is a promised answer (pipelined call). */
 export const RPC_CALL_TARGET_TAG_PROMISED_ANSWER = 1;
 
+/** PromisedAnswer transform op: no-op (identity). */
 export const RPC_PROMISED_ANSWER_OP_TAG_NOOP = 0;
+/** PromisedAnswer transform op: follow a pointer field in the result struct. */
 export const RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD = 1;
 
 const RETURN_TAG_RESULTS = 0;
@@ -22,6 +31,10 @@ const RETURN_TAG_EXCEPTION = 1;
 const CAP_DESCRIPTOR_TAG_SENDER_HOSTED = 1;
 const CAP_DESCRIPTOR_TAG_RECEIVER_HOSTED = 3;
 
+/**
+ * A minimal Cap'n Proto message containing an empty struct.
+ * Used as the default content for payloads that carry no data.
+ */
 export const EMPTY_STRUCT_MESSAGE: Uint8Array = new Uint8Array([
   0x00,
   0x00,
@@ -41,10 +54,13 @@ export const EMPTY_STRUCT_MESSAGE: Uint8Array = new Uint8Array([
   0x00,
 ]);
 
+/** Parameters for encoding a Bootstrap request frame. */
 export interface RpcBootstrapRequest {
+  /** The question ID assigned to this bootstrap request. */
   questionId: number;
 }
 
+/** Decoded representation of a Cap'n Proto RPC Call message. */
 export interface RpcCallRequest {
   questionId: number;
   interfaceId: bigint;
@@ -55,17 +71,23 @@ export interface RpcCallRequest {
   paramsCapTable: RpcCapDescriptor[];
 }
 
+/** Decoded representation of a Cap'n Proto RPC Finish message. */
 export interface RpcFinishRequest {
+  /** The question ID to finish. */
   questionId: number;
+  /** Whether to release capabilities in the result. */
   releaseResultCaps: boolean;
+  /** Whether early cancellation is required. */
   requireEarlyCancellation: boolean;
 }
 
+/** Decoded representation of a Cap'n Proto RPC Release message. */
 export interface RpcReleaseRequest {
   id: number;
   referenceCount: number;
 }
 
+/** Parameters for encoding a Call request frame via {@link encodeCallRequestFrame}. */
 export interface RpcCallFrameRequest {
   questionId: number;
   interfaceId: bigint;
@@ -76,16 +98,19 @@ export interface RpcCallFrameRequest {
   paramsCapTable?: RpcCapDescriptor[];
 }
 
+/** A single transform operation in a PromisedAnswer pipeline. */
 export interface RpcPromisedAnswerOp {
   tag: number;
   pointerIndex?: number;
 }
 
+/** A PromisedAnswer call target referencing a previous question's result. */
 export interface RpcPromisedAnswerTarget {
   questionId: number;
   transform?: RpcPromisedAnswerOp[];
 }
 
+/** Discriminated union of call target types: imported capability or promised answer. */
 export type RpcCallTarget =
   | {
     tag: typeof RPC_CALL_TARGET_TAG_IMPORTED_CAP;
@@ -96,8 +121,11 @@ export type RpcCallTarget =
     promisedAnswer: RpcPromisedAnswerTarget;
   };
 
+/** A capability descriptor in a Cap'n Proto RPC payload's capability table. */
 export interface RpcCapDescriptor {
+  /** The descriptor tag (e.g., senderHosted=1, receiverHosted=3). */
   tag: number;
+  /** The capability ID (export/import table index). */
   id: number;
 }
 
@@ -107,19 +135,23 @@ interface RpcReturnBase {
   noFinishNeeded: boolean;
 }
 
+/** A successful Return message containing results. */
 export interface RpcReturnResults extends RpcReturnBase {
   kind: "results";
   contentBytes: Uint8Array;
   capTable: RpcCapDescriptor[];
 }
 
+/** A Return message indicating an exception/error. */
 export interface RpcReturnException extends RpcReturnBase {
   kind: "exception";
   reason: string;
 }
 
+/** Discriminated union of Return message types: results or exception. */
 export type RpcReturnMessage = RpcReturnResults | RpcReturnException;
 
+/** Parameters for encoding a Return results frame via {@link encodeReturnResultsFrame}. */
 export interface RpcReturnResultsFrameRequest {
   answerId: number;
   content?: Uint8Array;
@@ -128,6 +160,7 @@ export interface RpcReturnResultsFrameRequest {
   noFinishNeeded?: boolean;
 }
 
+/** Parameters for encoding a Return exception frame via {@link encodeReturnExceptionFrame}. */
 export interface RpcReturnExceptionFrameRequest {
   answerId: number;
   reason: string;
@@ -931,6 +964,14 @@ class MessageBuilder {
   }
 }
 
+/**
+ * Decodes only the message tag from a Cap'n Proto RPC frame without fully
+ * parsing the message body.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The RPC message tag (e.g., {@link RPC_MESSAGE_TAG_CALL}).
+ * @throws {ProtocolError} If the frame is too short or malformed.
+ */
 export function decodeRpcMessageTag(frame: Uint8Array): number {
   const segment = segmentFromFrame(frame);
   const root = decodeStructPointer(segment, 0);
@@ -938,6 +979,13 @@ export function decodeRpcMessageTag(frame: Uint8Array): number {
   return readU16InStruct(segment, root, 0);
 }
 
+/**
+ * Encodes a Bootstrap request into a Cap'n Proto RPC frame.
+ *
+ * @param request - The bootstrap request parameters.
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If the questionId is invalid.
+ */
 export function encodeBootstrapRequestFrame(
   request: RpcBootstrapRequest,
 ): Uint8Array {
@@ -955,6 +1003,13 @@ export function encodeBootstrapRequestFrame(
   return builder.toMessageBytes();
 }
 
+/**
+ * Encodes a Call request into a Cap'n Proto RPC frame.
+ *
+ * @param request - The call request parameters including target, interface, method, and params.
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If any field value is out of range.
+ */
 export function encodeCallRequestFrame(
   request: RpcCallFrameRequest,
 ): Uint8Array {
@@ -1013,6 +1068,13 @@ export function encodeCallRequestFrame(
   return builder.toMessageBytes();
 }
 
+/**
+ * Encodes a Finish message into a Cap'n Proto RPC frame.
+ *
+ * @param request - The finish parameters.
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If the questionId is invalid.
+ */
 export function encodeFinishFrame(request: {
   questionId: number;
   releaseResultCaps?: boolean;
@@ -1039,6 +1101,13 @@ export function encodeFinishFrame(request: {
   return builder.toMessageBytes();
 }
 
+/**
+ * Encodes a Release message into a Cap'n Proto RPC frame.
+ *
+ * @param request - The release parameters (capability ID and reference count).
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If the id or referenceCount is invalid.
+ */
 export function encodeReleaseFrame(request: RpcReleaseRequest): Uint8Array {
   const id = ensureU32(request.id, "id");
   const referenceCount = ensureU32(request.referenceCount, "referenceCount");
@@ -1056,6 +1125,13 @@ export function encodeReleaseFrame(request: RpcReleaseRequest): Uint8Array {
   return builder.toMessageBytes();
 }
 
+/**
+ * Encodes a Return message with results into a Cap'n Proto RPC frame.
+ *
+ * @param request - The return parameters including content and capability table.
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If any field value is invalid.
+ */
 export function encodeReturnResultsFrame(
   request: RpcReturnResultsFrameRequest,
 ): Uint8Array {
@@ -1083,6 +1159,13 @@ export function encodeReturnResultsFrame(
   return builder.toMessageBytes();
 }
 
+/**
+ * Encodes a Return message with an exception into a Cap'n Proto RPC frame.
+ *
+ * @param request - The exception parameters including answer ID and reason string.
+ * @returns The serialized frame bytes.
+ * @throws {ProtocolError} If any field value is invalid.
+ */
 export function encodeReturnExceptionFrame(
   request: RpcReturnExceptionFrameRequest,
 ): Uint8Array {
@@ -1114,6 +1197,13 @@ export function encodeReturnExceptionFrame(
   return builder.toMessageBytes();
 }
 
+/**
+ * Decodes a Cap'n Proto RPC Bootstrap request frame.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The decoded bootstrap request.
+ * @throws {ProtocolError} If the frame is not a valid bootstrap message.
+ */
 export function decodeBootstrapRequestFrame(
   frame: Uint8Array,
 ): RpcBootstrapRequest {
@@ -1130,6 +1220,13 @@ export function decodeBootstrapRequestFrame(
   };
 }
 
+/**
+ * Decodes a Cap'n Proto RPC Call request frame.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The decoded call request including target, params, and capability table.
+ * @throws {ProtocolError} If the frame is not a valid call message.
+ */
 export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
   const segment = segmentFromFrame(frame);
   const root = decodeStructPointer(segment, 0);
@@ -1174,6 +1271,13 @@ export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
   return request;
 }
 
+/**
+ * Decodes a Cap'n Proto RPC Finish frame.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The decoded finish request.
+ * @throws {ProtocolError} If the frame is not a valid finish message.
+ */
 export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {
   const segment = segmentFromFrame(frame);
   const root = decodeStructPointer(segment, 0);
@@ -1191,6 +1295,13 @@ export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {
   };
 }
 
+/**
+ * Decodes a Cap'n Proto RPC Release frame.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The decoded release request.
+ * @throws {ProtocolError} If the frame is not a valid release message.
+ */
 export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
   const segment = segmentFromFrame(frame);
   const root = decodeStructPointer(segment, 0);
@@ -1206,6 +1317,13 @@ export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
   };
 }
 
+/**
+ * Decodes a Cap'n Proto RPC Return frame.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns The decoded return message (either results or exception).
+ * @throws {ProtocolError} If the frame is not a valid return message.
+ */
 export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   const segment = segmentFromFrame(frame);
   const root = decodeStructPointer(segment, 0);
@@ -1268,6 +1386,16 @@ export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   throw new ProtocolError(`unsupported return tag: ${tag}`);
 }
 
+/**
+ * Extracts the bootstrap capability index from a Return results message.
+ *
+ * Looks for the first sender-hosted or receiver-hosted capability descriptor
+ * in the return message's capability table.
+ *
+ * @param message - The decoded return message from a bootstrap request.
+ * @returns The capability index of the bootstrap capability.
+ * @throws {ProtocolError} If the message is an exception or has no hosted capability.
+ */
 export function extractBootstrapCapabilityIndex(
   message: RpcReturnMessage,
 ): number {

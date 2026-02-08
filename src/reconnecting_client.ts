@@ -9,35 +9,71 @@ import {
 } from "./reconnect.ts";
 import type { RpcClientCallOptions, RpcFinishOptions } from "./rpc_client.ts";
 
+/**
+ * A lightweight reference to a Cap'n Proto capability by its index in the
+ * session's capability table.
+ */
 export interface RpcCapabilityPointer {
+  /** The zero-based index of the capability in the session's cap table. */
   capabilityIndex: number;
 }
 
+/**
+ * Minimal interface for an RPC client transport, used by
+ * {@link ReconnectingRpcClientTransport} to communicate with the underlying
+ * session. This allows wrapping different transport implementations
+ * (e.g. {@link SessionRpcClientTransport}) without coupling to a specific class.
+ */
 export interface RpcClientTransportLike {
+  /** Obtain the server's bootstrap capability. */
   bootstrap?(options?: RpcClientCallOptions): Promise<RpcCapabilityPointer>;
+  /** Send an RPC call and return the response content bytes. */
   call(
     capability: RpcCapabilityPointer,
     methodOrdinal: number,
     params: Uint8Array,
     options?: RpcClientCallOptions,
   ): Promise<Uint8Array>;
+  /** Send a finish message for a question. */
   finish?(
     questionId: number,
     options?: RpcFinishOptions,
   ): Promise<void> | void;
+  /** Release a capability reference. */
   release?(
     capability: RpcCapabilityPointer,
     referenceCount?: number,
   ): Promise<void> | void;
+  /** Close the underlying connection. */
   close?(): Promise<void> | void;
 }
 
+/**
+ * Configuration for the {@link ReconnectingRpcClientTransport}.
+ */
 export interface ReconnectingRpcClientTransportOptions {
+  /** Factory function that creates a new underlying client transport. */
   connect: () => Promise<RpcClientTransportLike>;
+  /** Reconnection policy and options used when the connection drops. */
   reconnect: ConnectWithReconnectOptions;
+  /**
+   * Whether to automatically retry in-flight calls after a successful reconnect.
+   * Defaults to `true`.
+   */
   retryInFlightCalls?: boolean;
+  /**
+   * Whether to automatically re-bootstrap when the reconnected session needs
+   * to remap the bootstrap capability. Defaults to `true`.
+   */
   rebootstrapOnReconnect?: boolean;
+  /** Options passed to the bootstrap call during reconnection. */
   bootstrapOptions?: RpcClientCallOptions;
+  /**
+   * Custom callback to remap a non-bootstrap capability after reconnection.
+   * Called when a call was targeting a capability other than the bootstrap
+   * capability and the connection was lost. Return a new capability pointer
+   * or `null`/`undefined` to signal that remapping is not possible.
+   */
   remapCapabilityOnReconnect?: (
     context: ReconnectCapabilityRemapContext,
   ) =>
@@ -45,14 +81,27 @@ export interface ReconnectingRpcClientTransportOptions {
     | RpcCapabilityPointer
     | null
     | undefined;
+  /**
+   * Custom predicate to decide whether an error should trigger a reconnect.
+   * Defaults to checking if the error is a {@link TransportError} or {@link SessionError}.
+   */
   shouldReconnectError?: (error: unknown) => boolean;
 }
 
+/**
+ * Context provided to the `remapCapabilityOnReconnect` callback when a
+ * non-bootstrap capability needs to be remapped after reconnection.
+ */
 export interface ReconnectCapabilityRemapContext {
+  /** The original capability that the failed call was targeting. */
   capability: RpcCapabilityPointer;
+  /** The bootstrap capability from the previous (now-dead) connection, or `null`. */
   previousBootstrapCapability: RpcCapabilityPointer | null;
+  /** The bootstrap capability from the new connection, or `null` if not yet bootstrapped. */
   currentBootstrapCapability: RpcCapabilityPointer | null;
+  /** The method ordinal of the call that triggered the reconnect. */
   methodOrdinal: number;
+  /** The error that caused the reconnect. */
   error: unknown;
 }
 
@@ -76,7 +125,39 @@ function normalizeCapability(
   return { capabilityIndex: index };
 }
 
+/**
+ * An RPC client transport wrapper that automatically reconnects when the
+ * underlying connection is lost.
+ *
+ * On the first operation, it lazily establishes a connection using the
+ * configured `connect` factory. If a call fails with a reconnectable error
+ * (as determined by `shouldReconnectError`), the transport closes the old
+ * connection, reconnects using the configured policy, and optionally retries
+ * the failed call.
+ *
+ * For bootstrap capabilities, reconnection automatically re-bootstraps to
+ * obtain a fresh capability index. For non-bootstrap capabilities, the
+ * `remapCapabilityOnReconnect` callback is invoked to translate the old
+ * capability reference into one valid on the new connection.
+ *
+ * All operations are serialized through an internal queue to prevent
+ * concurrent reconnection races.
+ *
+ * @example
+ * ```ts
+ * const client = new ReconnectingRpcClientTransport({
+ *   connect: () => createMyTransport(),
+ *   reconnect: {
+ *     policy: createExponentialBackoffReconnectPolicy(),
+ *   },
+ * });
+ * const cap = await client.bootstrap();
+ * const result = await client.call(cap, 0, new Uint8Array());
+ * await client.close();
+ * ```
+ */
 export class ReconnectingRpcClientTransport {
+  /** The options this transport was configured with. */
   readonly options: ReconnectingRpcClientTransportOptions;
 
   #client: RpcClientTransportLike | null = null;
@@ -88,12 +169,23 @@ export class ReconnectingRpcClientTransport {
     this.options = options;
   }
 
+  /**
+   * The most recently obtained bootstrap capability, or `null` if bootstrap
+   * has not been called or the connection has not been established.
+   */
   get bootstrapCapability(): RpcCapabilityPointer | null {
     return this.#bootstrapCapability
       ? cloneCapability(this.#bootstrapCapability)
       : null;
   }
 
+  /**
+   * Obtain the server's bootstrap capability, connecting first if needed.
+   *
+   * @param options - Call options including timeout and abort signal.
+   * @returns The bootstrap capability pointer.
+   * @throws {SessionError} If connection or bootstrap fails.
+   */
   async bootstrap(
     options: RpcClientCallOptions = {},
   ): Promise<RpcCapabilityPointer> {
@@ -104,6 +196,17 @@ export class ReconnectingRpcClientTransport {
     });
   }
 
+  /**
+   * Send an RPC call, automatically reconnecting and retrying if the
+   * connection drops (when `retryInFlightCalls` is enabled).
+   *
+   * @param capability - The target capability.
+   * @param methodOrdinal - The zero-based method index.
+   * @param params - The raw Cap'n Proto params struct bytes.
+   * @param options - Call options including timeout and abort signal.
+   * @returns The raw content bytes of the response.
+   * @throws {SessionError} If the call fails after all retry attempts.
+   */
   async call(
     capability: RpcCapabilityPointer,
     methodOrdinal: number,
@@ -148,6 +251,14 @@ export class ReconnectingRpcClientTransport {
     });
   }
 
+  /**
+   * Send a `finish` message. Note that finish is NOT retried on reconnect
+   * because question IDs are scoped to a single connection.
+   *
+   * @param questionId - The question ID to finish.
+   * @param options - Finish options.
+   * @throws {SessionError} If the finish fails and the error triggers reconnection.
+   */
   async finish(
     questionId: number,
     options: RpcFinishOptions = {},
@@ -177,6 +288,14 @@ export class ReconnectingRpcClientTransport {
     });
   }
 
+  /**
+   * Release a capability reference. Like `finish`, this is NOT retried on
+   * reconnect because capability references are scoped to a single connection.
+   *
+   * @param capability - The capability to release.
+   * @param referenceCount - Number of references to release. Defaults to 1.
+   * @throws {SessionError} If the release fails and the error triggers reconnection.
+   */
   async release(
     capability: RpcCapabilityPointer,
     referenceCount = 1,
@@ -207,6 +326,7 @@ export class ReconnectingRpcClientTransport {
     });
   }
 
+  /** Close the underlying client transport and prevent further operations. */
   async close(): Promise<void> {
     await this.#enqueue(async () => {
       if (this.#closed) return;

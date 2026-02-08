@@ -20,6 +20,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD",
   "RPC_PROMISED_ANSWER_OP_TAG_NOOP",
   "ReconnectingRpcClientTransport",
+  "RpcPipeline",
   "RpcServerBridge",
   "RpcServerRuntime",
   "RpcSession",

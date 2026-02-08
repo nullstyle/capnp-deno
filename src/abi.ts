@@ -1,5 +1,15 @@
 import { AbiError } from "./errors.ts";
 
+/**
+ * Typed interface describing the raw exports from a Cap'n Proto WASM module.
+ *
+ * Required exports (memory, alloc, free, error, peer management) are
+ * non-optional. Optional exports (host-call bridge, lifecycle helpers,
+ * schema manifest, version negotiation) are marked with `?`.
+ *
+ * Typically obtained via {@link getCapnpWasmExports} rather than constructed
+ * manually.
+ */
 export interface CapnpWasmExports {
   memory: WebAssembly.Memory;
   capnp_alloc(len: number): number;
@@ -87,12 +97,25 @@ export interface CapnpWasmExports {
   ): number;
 }
 
+/**
+ * Options for configuring {@link WasmAbi} version negotiation.
+ */
 export interface WasmAbiOptions {
+  /** Expected ABI version number. Defaults to 1. */
   expectedVersion?: number;
+  /** If true, the WASM module must export a version function or version range. */
   requireVersionExport?: boolean;
 }
 
+/**
+ * Describes which optional capabilities the loaded WASM module supports.
+ *
+ * Populated automatically when constructing a {@link WasmAbi} instance.
+ * Callers can inspect these flags to determine which features are available
+ * before invoking optional ABI methods.
+ */
 export interface WasmAbiCapabilities {
+  /** Whether `capnp_peer_pop_commit` is available for explicit frame commit. */
   hasPeerPopCommit: boolean;
   hasHostCallBridge: boolean;
   hasHostCallReturnFrame: boolean;
@@ -111,21 +134,47 @@ export interface WasmAbiCapabilities {
   featureFlags: bigint;
 }
 
+/**
+ * Represents a single host call extracted from the WASM peer's outbound queue.
+ *
+ * When a WASM peer makes an RPC call that should be handled on the host side,
+ * the call details are returned as a `WasmHostCallRecord` by {@link WasmAbi.popHostCall}.
+ */
 export interface WasmHostCallRecord {
+  /** The question ID identifying this RPC call within the session. */
   questionId: number;
+  /** The Cap'n Proto interface ID for the target interface. */
   interfaceId: bigint;
+  /** The method ordinal within the target interface. */
   methodId: number;
+  /** The serialized Cap'n Proto call frame containing the parameters. */
   frame: Uint8Array;
 }
 
+/**
+ * Options for sending a Finish message through the WASM ABI.
+ */
 export interface WasmSendFinishOptions {
+  /** Whether to release result capabilities. Defaults to true. */
   releaseResultCaps?: boolean;
+  /** Whether to require early cancellation. Defaults to false. */
   requireEarlyCancellation?: boolean;
 }
 
+/**
+ * Error thrown by the WASM ABI layer when a low-level operation fails.
+ *
+ * Extends {@link AbiError} with a numeric `code` field that corresponds to
+ * the error code returned by the WASM module's `capnp_last_error_code` export.
+ */
 export class WasmAbiError extends AbiError {
+  /** Numeric error code from the WASM module. Zero indicates no specific code. */
   readonly code: number;
 
+  /**
+   * @param message - Human-readable error description.
+   * @param code - Numeric error code from the WASM module. Defaults to 0.
+   */
   constructor(message: string, code = 0) {
     super(message);
     this.name = "WasmAbiError";
@@ -240,6 +289,19 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
   };
 }
 
+/**
+ * Extracts and validates the typed Cap'n Proto ABI exports from a
+ * WebAssembly instance.
+ *
+ * This function checks for all required exports (memory, alloc, free, error
+ * management, peer creation) and discovers optional exports (host-call bridge,
+ * lifecycle helpers, version negotiation).
+ *
+ * @param instance - A fully instantiated WebAssembly instance containing the
+ *   Cap'n Proto WASM module.
+ * @returns The validated, typed export bindings.
+ * @throws {WasmAbiError} If any required export is missing or has the wrong type.
+ */
 export function getCapnpWasmExports(
   instance: WebAssembly.Instance,
 ): CapnpWasmExports {
@@ -388,18 +450,66 @@ export function getCapnpWasmExports(
   return exports;
 }
 
+// Layout of the popHostCall scratch region (24 bytes, 4-byte aligned):
+//   offset  0: u32  questionId
+//   offset  4: u64  interfaceId
+//   offset 12: u16  methodId   (+ 2 bytes padding)
+//   offset 16: u32  framePtr
+//   offset 20: u32  frameLen
+const HOST_CALL_SCRATCH_SIZE = 24;
+const HC_OFF_QUESTION_ID = 0;
+const HC_OFF_INTERFACE_ID = 4;
+const HC_OFF_METHOD_ID = 12;
+const HC_OFF_FRAME_PTR = 16;
+const HC_OFF_FRAME_LEN = 20;
+
+/**
+ * High-level wrapper around the Cap'n Proto WASM ABI.
+ *
+ * `WasmAbi` provides a safe, ergonomic TypeScript interface over the raw WASM
+ * function exports. It manages memory allocation, error extraction, peer
+ * lifecycle, frame I/O, and host-call bridging.
+ *
+ * Most users should use {@link WasmPeer} (which wraps `WasmAbi`) or the
+ * higher-level {@link instantiatePeer} function instead of constructing
+ * `WasmAbi` directly.
+ *
+ * @example
+ * ```ts
+ * const exports = getCapnpWasmExports(instance);
+ * const abi = new WasmAbi(exports, { expectedVersion: 1 });
+ * const peerHandle = abi.createPeer();
+ * ```
+ */
 export class WasmAbi {
+  /** The raw typed WASM export bindings. */
   readonly exports: CapnpWasmExports;
+  /** Detected optional capabilities of the loaded WASM module. */
   readonly capabilities: WasmAbiCapabilities;
   #errorTakeScratchPtr: number | null = null;
+  #hostCallScratchPtr: number | null = null;
 
+  /**
+   * Creates a new WasmAbi wrapper around the given exports.
+   *
+   * @param exports - The typed WASM export bindings.
+   * @param options - ABI version negotiation options.
+   * @throws {WasmAbiError} If the ABI version does not match expectations.
+   */
   constructor(exports: CapnpWasmExports, options: WasmAbiOptions = {}) {
     this.exports = exports;
     this.capabilities = detectCapabilities(exports);
     this.initErrorTakeScratch();
+    this.initHostCallScratch();
     this.checkVersion(options);
   }
 
+  /**
+   * Creates a new Cap'n Proto peer in WASM memory.
+   *
+   * @returns The opaque peer handle for use with other ABI methods.
+   * @throws {WasmAbiError} If peer creation fails.
+   */
   createPeer(): number {
     this.clearError();
     const handle = this.exports.capnp_peer_new();
@@ -409,11 +519,23 @@ export class WasmAbi {
     return handle;
   }
 
+  /**
+   * Frees a previously created peer. No-op if the handle is 0.
+   *
+   * @param handle - The peer handle returned by {@link createPeer}.
+   */
   freePeer(handle: number): void {
     if (handle === 0) return;
     this.exports.capnp_peer_free(handle);
   }
 
+  /**
+   * Pushes an inbound Cap'n Proto frame into the peer for processing.
+   *
+   * @param peer - The peer handle.
+   * @param frame - The raw bytes of the inbound Cap'n Proto message.
+   * @throws {WasmAbiError} If the WASM module rejects the frame.
+   */
   pushFrame(peer: number, frame: Uint8Array): void {
     const ptr = this.alloc(frame.byteLength);
     try {
@@ -434,6 +556,13 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Pops a single outbound frame from the peer's output queue.
+   *
+   * @param peer - The peer handle.
+   * @returns The next outbound frame, or null if the queue is empty.
+   * @throws {WasmAbiError} If an error occurs during the pop operation.
+   */
   popOutFrame(peer: number): Uint8Array | null {
     const pairSize = 8;
     const pairPtr = this.alloc(pairSize);
@@ -475,6 +604,12 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Drains all outbound frames from the peer's output queue.
+   *
+   * @param peer - The peer handle.
+   * @returns An array of all pending outbound frames (may be empty).
+   */
   drainOutFrames(peer: number): Uint8Array[] {
     const out: Uint8Array[] = [];
     while (true) {
@@ -484,64 +619,69 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Pops a pending host call from the WASM peer.
+   *
+   * Host calls are RPC calls that the WASM peer wants to dispatch to
+   * host-side handlers. This method requires the host-call bridge capability.
+   *
+   * @param peer - The peer handle.
+   * @returns The next host call record, or null if none are pending.
+   * @throws {WasmAbiError} If the host-call bridge export is missing.
+   */
   popHostCall(peer: number): WasmHostCallRecord | null {
     const fn = this.exports.capnp_peer_pop_host_call;
     if (!fn) {
       throw new WasmAbiError("missing wasm export: capnp_peer_pop_host_call");
     }
 
-    const questionIdPtr = this.alloc(4);
-    const interfaceIdPtr = this.alloc(8);
-    const methodIdPtr = this.alloc(2);
-    const framePtrPtr = this.alloc(4);
-    const frameLenPtr = this.alloc(4);
-    try {
-      this.writeU32(questionIdPtr, 0);
-      this.writeU64(interfaceIdPtr, 0n);
-      this.writeU16(methodIdPtr, 0);
-      this.writeU32(framePtrPtr, 0);
-      this.writeU32(frameLenPtr, 0);
-
-      this.clearError();
-      const hasCall = fn(
-        peer,
-        questionIdPtr,
-        interfaceIdPtr,
-        methodIdPtr,
-        framePtrPtr,
-        frameLenPtr,
-      );
-      if (hasCall === 0) {
-        const maybeErr = this.takeLastError();
-        if (maybeErr) throw maybeErr;
-        return null;
-      }
-      if (hasCall !== 1) {
-        throw new WasmAbiError(
-          `unexpected capnp_peer_pop_host_call result: ${hasCall}`,
-        );
-      }
-
-      const questionId = this.readU32(questionIdPtr);
-      const interfaceId = this.readU64(interfaceIdPtr);
-      const methodId = this.readU16(methodIdPtr);
-      const framePtr = this.readU32(framePtrPtr);
-      const frameLen = this.readU32(frameLenPtr);
-      const frame = this.copyBytes(framePtr, frameLen);
-      this.freeHostCallFrame(peer, framePtr, frameLen);
-      return {
-        questionId,
-        interfaceId,
-        methodId,
-        frame,
-      };
-    } finally {
-      this.free(questionIdPtr, 4);
-      this.free(interfaceIdPtr, 8);
-      this.free(methodIdPtr, 2);
-      this.free(framePtrPtr, 4);
-      this.free(frameLenPtr, 4);
+    // Use the pre-allocated scratch buffer if available, otherwise fall back
+    // to per-call allocation (e.g. if the initial alloc failed during init).
+    const scratch = this.#hostCallScratchPtr;
+    if (scratch === null) {
+      return this.popHostCallFallback(fn, peer);
     }
+
+    const s = scratch;
+    this.writeU32(s + HC_OFF_QUESTION_ID, 0);
+    this.writeU64(s + HC_OFF_INTERFACE_ID, 0n);
+    this.writeU16(s + HC_OFF_METHOD_ID, 0);
+    this.writeU32(s + HC_OFF_FRAME_PTR, 0);
+    this.writeU32(s + HC_OFF_FRAME_LEN, 0);
+
+    this.clearError();
+    const hasCall = fn(
+      peer,
+      s + HC_OFF_QUESTION_ID,
+      s + HC_OFF_INTERFACE_ID,
+      s + HC_OFF_METHOD_ID,
+      s + HC_OFF_FRAME_PTR,
+      s + HC_OFF_FRAME_LEN,
+    );
+    if (hasCall === 0) {
+      const maybeErr = this.takeLastError();
+      if (maybeErr) throw maybeErr;
+      return null;
+    }
+    if (hasCall !== 1) {
+      throw new WasmAbiError(
+        `unexpected capnp_peer_pop_host_call result: ${hasCall}`,
+      );
+    }
+
+    const questionId = this.readU32(s + HC_OFF_QUESTION_ID);
+    const interfaceId = this.readU64(s + HC_OFF_INTERFACE_ID);
+    const methodId = this.readU16(s + HC_OFF_METHOD_ID);
+    const framePtr = this.readU32(s + HC_OFF_FRAME_PTR);
+    const frameLen = this.readU32(s + HC_OFF_FRAME_LEN);
+    const frame = this.copyBytes(framePtr, frameLen);
+    this.freeHostCallFrame(peer, framePtr, frameLen);
+    return {
+      questionId,
+      interfaceId,
+      methodId,
+      frame,
+    };
   }
 
   freeHostCallFrame(peer: number, framePtr: number, frameLen: number): void {
@@ -555,6 +695,14 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Responds to a host call with a successful result payload.
+   *
+   * @param peer - The peer handle.
+   * @param questionId - The question ID from the original host call.
+   * @param payloadFrame - The serialized result payload.
+   * @throws {WasmAbiError} If the export is missing or the response fails.
+   */
   respondHostCallResults(
     peer: number,
     questionId: number,
@@ -583,6 +731,16 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Responds to a host call with a pre-encoded return frame.
+   *
+   * This method uses the newer return-frame ABI which supports cap tables
+   * and non-default return flags. Requires the `hasHostCallReturnFrame` capability.
+   *
+   * @param peer - The peer handle.
+   * @param returnFrame - The pre-encoded Cap'n Proto return frame.
+   * @throws {WasmAbiError} If the export is missing or the response fails.
+   */
   respondHostCallReturnFrame(
     peer: number,
     returnFrame: Uint8Array,
@@ -609,6 +767,14 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Responds to a host call with an exception.
+   *
+   * @param peer - The peer handle.
+   * @param questionId - The question ID from the original host call.
+   * @param reason - The error reason as a string or UTF-8 bytes.
+   * @throws {WasmAbiError} If the export is missing or the response fails.
+   */
   respondHostCallException(
     peer: number,
     questionId: number,
@@ -640,6 +806,15 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Sends a Finish message through the WASM peer to signal that a question's
+   * answer is no longer needed.
+   *
+   * @param peer - The peer handle.
+   * @param questionId - The question ID to finish.
+   * @param options - Options controlling result cap release and early cancellation.
+   * @throws {WasmAbiError} If the lifecycle helper export is missing or the operation fails.
+   */
   sendFinish(
     peer: number,
     questionId: number,
@@ -665,6 +840,15 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Sends a Release message through the WASM peer to decrement a capability's
+   * reference count.
+   *
+   * @param peer - The peer handle.
+   * @param capId - The capability ID to release.
+   * @param referenceCount - Number of references to release. Defaults to 1.
+   * @throws {WasmAbiError} If the lifecycle helper export is missing or the operation fails.
+   */
   sendRelease(peer: number, capId: number, referenceCount = 1): void {
     const fn = this.exports.capnp_peer_send_release;
     if (!fn) {
@@ -680,6 +864,12 @@ export class WasmAbi {
     }
   }
 
+  /**
+   * Retrieves the schema manifest from the WASM module as a JSON string.
+   *
+   * @returns The schema manifest JSON.
+   * @throws {WasmAbiError} If the schema manifest export is missing or the operation fails.
+   */
   schemaManifestJson(): string {
     const fn = this.exports.capnp_schema_manifest_json;
     if (!fn) {
@@ -737,6 +927,13 @@ export class WasmAbi {
     throw new WasmAbiError(fallback);
   }
 
+  /**
+   * Checks whether the WASM module advertises support for a specific feature bit.
+   *
+   * @param bit - Feature bit index (0-63).
+   * @returns True if the feature bit is set in the module's feature flags.
+   * @throws {WasmAbiError} If the bit index is out of range.
+   */
   supportsFeature(bit: number): boolean {
     if (!Number.isInteger(bit) || bit < 0 || bit > 63) {
       throw new WasmAbiError(`feature bit must be in [0, 63], got ${bit}`);
@@ -810,6 +1007,76 @@ export class WasmAbi {
       return;
     }
     this.#errorTakeScratchPtr = ptr;
+  }
+
+  private initHostCallScratch(): void {
+    if (!this.capabilities.hasHostCallBridge) return;
+    this.clearError();
+    const ptr = this.exports.capnp_alloc(HOST_CALL_SCRATCH_SIZE);
+    if (ptr === 0) {
+      // Allocation failed; popHostCall will fall back to per-call allocation.
+      return;
+    }
+    this.#hostCallScratchPtr = ptr;
+  }
+
+  /** Fallback path for popHostCall when the scratch buffer is unavailable. */
+  private popHostCallFallback(
+    fn: NonNullable<CapnpWasmExports["capnp_peer_pop_host_call"]>,
+    peer: number,
+  ): WasmHostCallRecord | null {
+    const questionIdPtr = this.alloc(4);
+    const interfaceIdPtr = this.alloc(8);
+    const methodIdPtr = this.alloc(2);
+    const framePtrPtr = this.alloc(4);
+    const frameLenPtr = this.alloc(4);
+    try {
+      this.writeU32(questionIdPtr, 0);
+      this.writeU64(interfaceIdPtr, 0n);
+      this.writeU16(methodIdPtr, 0);
+      this.writeU32(framePtrPtr, 0);
+      this.writeU32(frameLenPtr, 0);
+
+      this.clearError();
+      const hasCall = fn(
+        peer,
+        questionIdPtr,
+        interfaceIdPtr,
+        methodIdPtr,
+        framePtrPtr,
+        frameLenPtr,
+      );
+      if (hasCall === 0) {
+        const maybeErr = this.takeLastError();
+        if (maybeErr) throw maybeErr;
+        return null;
+      }
+      if (hasCall !== 1) {
+        throw new WasmAbiError(
+          `unexpected capnp_peer_pop_host_call result: ${hasCall}`,
+        );
+      }
+
+      const questionId = this.readU32(questionIdPtr);
+      const interfaceId = this.readU64(interfaceIdPtr);
+      const methodId = this.readU16(methodIdPtr);
+      const framePtr = this.readU32(framePtrPtr);
+      const frameLen = this.readU32(frameLenPtr);
+      const frame = this.copyBytes(framePtr, frameLen);
+      this.freeHostCallFrame(peer, framePtr, frameLen);
+      return {
+        questionId,
+        interfaceId,
+        methodId,
+        frame,
+      };
+    } finally {
+      this.free(questionIdPtr, 4);
+      this.free(interfaceIdPtr, 8);
+      this.free(methodIdPtr, 2);
+      this.free(framePtrPtr, 4);
+      this.free(frameLenPtr, 4);
+    }
   }
 
   private takeLastErrorViaExport(): WasmAbiError | null {

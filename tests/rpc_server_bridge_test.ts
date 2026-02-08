@@ -168,7 +168,7 @@ Deno.test("RpcServerBridge returns exception for unknown capability", async () =
   }
 });
 
-Deno.test("RpcServerBridge returns exception for promisedAnswer call targets", async () => {
+Deno.test("RpcServerBridge returns exception for promisedAnswer targeting unknown question", async () => {
   const bridge = new RpcServerBridge();
   const callFrame = encodeCallRequestFrame({
     questionId: 2,
@@ -194,7 +194,7 @@ Deno.test("RpcServerBridge returns exception for promisedAnswer call targets", a
   assertEquals(decoded.answerId, 2);
   if (decoded.kind === "exception") {
     assert(
-      /does not support promisedAnswer call targets/i.test(decoded.reason),
+      /promisedAnswer references unknown question/i.test(decoded.reason),
       `unexpected exception reason: ${decoded.reason}`,
     );
   }
@@ -748,4 +748,460 @@ Deno.test("RpcServerBridge string dispatch throws become exception reasons", asy
   assertEquals(seenUnhandled.length, 1);
   assertEquals(seenUnhandled[0].questionId, 23);
   assertEquals(seenUnhandled[0].message, "string explosion");
+});
+
+// --- Promise Pipelining (Level 2 RPC) Tests ---
+
+Deno.test("RpcServerBridge pipelining: dispatches promisedAnswer call to resolved capability", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Register a "factory" capability at index 5 that returns a cap in its result.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodOrdinal, _params, _ctx) =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(100),
+        capTable: [{ tag: 1, id: 10 }], // senderHosted cap at id=10
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Register the target capability at index 10 that the pipelined call will reach.
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: (_methodOrdinal, _params, _ctx) =>
+      Promise.resolve(encodeSingleU32StructMessage(999)),
+  }, { capabilityIndex: 10 });
+
+  // Step 1: Make the initial call (question 1) to the factory capability.
+  const factoryCallFrame = encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  });
+  const factoryResponse = await bridge.handleFrame(factoryCallFrame);
+  if (!factoryResponse) {
+    throw new Error("expected factory response frame");
+  }
+  const factoryDecoded = decodeReturnFrame(factoryResponse);
+  assertEquals(factoryDecoded.kind, "results");
+  assertEquals(factoryDecoded.answerId, 1);
+
+  // Step 2: Make a pipelined call (question 2) targeting the result of question 1.
+  const pipelinedCallFrame = encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 3,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(42),
+  });
+  const pipelinedResponse = await bridge.handleFrame(pipelinedCallFrame);
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const pipelinedDecoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(pipelinedDecoded.kind, "results");
+  assertEquals(pipelinedDecoded.answerId, 2);
+  if (pipelinedDecoded.kind === "results") {
+    assertEquals(
+      decodeSingleU32StructMessage(pipelinedDecoded.contentBytes),
+      999,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: uses getPointerField transform to select capability", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Factory returns multiple capabilities in the cap table.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(100),
+        capTable: [
+          { tag: 1, id: 20 }, // pointer field 0
+          { tag: 1, id: 21 }, // pointer field 1
+          { tag: 1, id: 22 }, // pointer field 2
+        ],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Register the capability at index 22 (pointer field 2).
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(777)),
+  }, { capabilityIndex: 22 });
+
+  // Call the factory first.
+  const factoryResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(factoryResponse !== null, "expected factory response");
+
+  // Pipelined call with getPointerField(2) transform.
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 7,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [{ tag: 1, pointerIndex: 2 }],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 777);
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: returns exception when target question resolved with exception", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Register a capability that throws.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => {
+      throw new Error("factory failed");
+    },
+  }, { capabilityIndex: 5 });
+
+  // Call the factory - it will fail.
+  const factoryResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(factoryResponse !== null, "expected factory response");
+  const factoryDecoded = decodeReturnFrame(factoryResponse);
+  assertEquals(factoryDecoded.kind, "exception");
+
+  // Pipelined call targeting question 1 should fail because the answer was an exception.
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assert(
+      /promisedAnswer target question resolved with exception/i.test(
+        decoded.reason,
+      ),
+      `unexpected exception reason: ${decoded.reason}`,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: returns exception when result has no cap table", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Factory returns no capabilities in the cap table.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(42)),
+  }, { capabilityIndex: 5 });
+
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assert(
+      /no capabilities in cap table/i.test(decoded.reason),
+      `unexpected exception reason: ${decoded.reason}`,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: returns exception when getPointerField out of range", async () => {
+  const bridge = new RpcServerBridge();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(42),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Try getPointerField(5) when cap table only has 1 entry.
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [{ tag: 1, pointerIndex: 5 }],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assert(
+      /getPointerField\(5\) is out of range/i.test(decoded.reason),
+      `unexpected exception reason: ${decoded.reason}`,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: finish cleans up answer table entry", async () => {
+  const bridge = new RpcServerBridge();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(42),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Make a call.
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Send finish - should clean up the answer table.
+  await bridge.handleFrame(
+    encodeFinishFrame({ questionId: 1 }),
+  );
+
+  assertEquals(bridge.answerTableSize, 0);
+
+  // Now a pipelined call targeting question 1 should fail with unknown question.
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assert(
+      /promisedAnswer references unknown question/i.test(decoded.reason),
+      `unexpected exception reason: ${decoded.reason}`,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: noop transform ops are skipped", async () => {
+  const bridge = new RpcServerBridge();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(100),
+        capTable: [
+          { tag: 1, id: 30 },
+          { tag: 1, id: 31 },
+        ],
+      }),
+  }, { capabilityIndex: 5 });
+
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(888)),
+  }, { capabilityIndex: 31 });
+
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Transform: noop, then getPointerField(1)
+  const pipelinedResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [
+          { tag: 0 }, // noop
+          { tag: 1, pointerIndex: 1 }, // getPointerField(1) -> cap id 31
+        ],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!pipelinedResponse) {
+    throw new Error("expected pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 888);
+  }
+});
+
+Deno.test("RpcServerBridge pipelining: chained pipelining through multiple answers", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Step 1 capability: returns cap id 10
+  bridge.exportCapability({
+    interfaceId: 0x1111n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Step 2 capability (at id 10): returns cap id 20
+  bridge.exportCapability({
+    interfaceId: 0x2222n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(2),
+        capTable: [{ tag: 1, id: 20 }],
+      }),
+  }, { capabilityIndex: 10 });
+
+  // Step 3 capability (at id 20): returns the final result
+  bridge.exportCapability({
+    interfaceId: 0x3333n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(42)),
+  }, { capabilityIndex: 20 });
+
+  // Question 1: call step 1
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1111n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Question 2: pipelined call on question 1's result -> dispatches to cap 10
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x2222n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Question 3: pipelined call on question 2's result -> dispatches to cap 20
+  const finalResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 3,
+    interfaceId: 0x3333n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 2,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!finalResponse) {
+    throw new Error("expected final pipelined response frame");
+  }
+  const decoded = decodeReturnFrame(finalResponse);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 3);
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 42);
+  }
 });

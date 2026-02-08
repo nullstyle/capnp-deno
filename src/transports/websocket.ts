@@ -16,19 +16,47 @@ interface PendingOutboundFrame {
   reject: (error: unknown) => void;
 }
 
+/**
+ * Configuration options for {@link WebSocketTransport}.
+ */
 export interface WebSocketTransportOptions {
+  /**
+   * Error handler invoked when the transport encounters an error.
+   * If not provided, errors are thrown.
+   */
   onError?: (error: unknown) => void | Promise<void>;
+  /**
+   * Whether to reject WebSocket text frames. Cap'n Proto uses binary only.
+   * Defaults to `true`.
+   */
   rejectTextFrames?: boolean;
+  /** Cap'n Proto frame validation limits applied to inbound frames. */
   frameLimits?: CapnpFrameLimitsOptions;
+  /** Maximum allowed size in bytes for a single inbound frame. */
   maxInboundFrameBytes?: number;
+  /** Maximum allowed size in bytes for a single outbound frame. */
   maxOutboundFrameBytes?: number;
+  /** Maximum number of outbound frames that can be queued. */
   maxQueuedOutboundFrames?: number;
+  /** Maximum total bytes across all queued outbound frames. */
   maxQueuedOutboundBytes?: number;
+  /**
+   * Maximum bytes the WebSocket is allowed to have buffered before the
+   * transport applies backpressure (waits before sending more).
+   */
   maxSocketBufferedAmountBytes?: number;
+  /** Maximum time in milliseconds for a send operation before timing out. */
   sendTimeoutMs?: number;
+  /** Maximum time in milliseconds to wait for the WebSocket connection to open. */
   connectTimeoutMs?: number;
+  /** Maximum time in milliseconds to wait for the WebSocket to close gracefully. */
   closeTimeoutMs?: number;
+  /**
+   * Interval in milliseconds between backpressure checks when waiting for
+   * the socket's buffered amount to drain. Defaults to 4.
+   */
   outboundDrainIntervalMs?: number;
+  /** Observability provider for emitting transport events. */
   observability?: RpcObservability;
 }
 
@@ -58,8 +86,29 @@ function toBinary(
   throw new TransportError("unsupported websocket message payload");
 }
 
+/**
+ * An {@link RpcTransport} implementation that communicates over a WebSocket connection.
+ *
+ * Binary frames are sent and received via the standard `WebSocket` API with
+ * `binaryType` set to `"arraybuffer"`. Outbound frames are queued and drained
+ * asynchronously with backpressure based on the socket's `bufferedAmount`.
+ *
+ * Use the static {@link connect} factory method to establish a new WebSocket
+ * connection, or pass an already-open `WebSocket` directly to the constructor.
+ *
+ * @example
+ * ```ts
+ * const transport = await WebSocketTransport.connect("ws://localhost:8080/rpc", undefined, {
+ *   connectTimeoutMs: 5000,
+ *   maxSocketBufferedAmountBytes: 1_000_000,
+ * });
+ * transport.start((frame) => handleFrame(frame));
+ * ```
+ */
 export class WebSocketTransport implements RpcTransport {
+  /** The underlying WebSocket connection. */
   readonly socket: WebSocket;
+  /** The options this transport was configured with. */
   readonly options: WebSocketTransportOptions;
 
   #started = false;
@@ -120,6 +169,15 @@ export class WebSocketTransport implements RpcTransport {
     this.socket.binaryType = "arraybuffer";
   }
 
+  /**
+   * Open a new WebSocket connection and wrap it in a {@link WebSocketTransport}.
+   *
+   * @param url - The WebSocket URL to connect to (e.g. `"ws://localhost:8080/rpc"`).
+   * @param protocols - Optional sub-protocol(s) to request during the handshake.
+   * @param options - Transport options including connect timeout.
+   * @returns A new `WebSocketTransport` wrapping the opened connection.
+   * @throws {TransportError} If the connection fails or times out.
+   */
   static async connect(
     url: string | URL,
     protocols?: string | string[],

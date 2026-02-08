@@ -81,6 +81,23 @@ Deno.test("CapnpFrameFramer enforces maxSegmentCount", () => {
   );
 });
 
+Deno.test("CapnpFrameFramer reuses buffer capacity across frames (growth-factor)", () => {
+  const framer = new CapnpFrameFramer();
+
+  // Push 10 frames one byte at a time to stress incremental growth.
+  // With the old exact-fit allocator this would be O(n^2) allocations.
+  for (let round = 0; round < 10; round++) {
+    const frame = buildSingleSegmentFrame(round & 0xff);
+    for (let i = 0; i < frame.byteLength; i++) {
+      framer.push(frame.subarray(i, i + 1));
+    }
+    const out = framer.popFrame();
+    if (!out) throw new Error(`expected frame on round ${round}`);
+    assertBytes(out, Array.from(frame));
+    assertEquals(framer.bufferedBytes(), 0);
+  }
+});
+
 Deno.test("CapnpFrameFramer enforces maxBufferedBytes", () => {
   const frame = buildSingleSegmentFrame(0x66);
   const framer = new CapnpFrameFramer({

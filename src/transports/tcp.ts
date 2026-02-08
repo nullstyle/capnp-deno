@@ -12,17 +12,40 @@ interface PendingOutboundFrame {
   reject: (error: unknown) => void;
 }
 
+/**
+ * Configuration options for {@link TcpTransport}.
+ */
 export interface TcpTransportOptions {
+  /** Size of the read buffer in bytes. Defaults to 64 KB. */
   readBufferSize?: number;
+  /**
+   * Cap'n Proto frame framing and validation limits. These are applied
+   * incrementally as data is read from the TCP stream.
+   */
   frameLimits?: CapnpFrameFramerOptions;
+  /** Maximum allowed size in bytes for a single outbound frame. */
   maxOutboundFrameBytes?: number;
+  /** Maximum number of outbound frames that can be queued. */
   maxQueuedOutboundFrames?: number;
+  /** Maximum total bytes across all queued outbound frames. */
   maxQueuedOutboundBytes?: number;
+  /** Maximum time in milliseconds to wait for the TCP connection to be established. */
   connectTimeoutMs?: number;
+  /**
+   * Maximum idle time in milliseconds between reads. If no data is received
+   * within this period, the read loop throws a timeout error.
+   */
   readIdleTimeoutMs?: number;
+  /** Maximum time in milliseconds to wait for a single write to complete. */
   sendTimeoutMs?: number;
+  /** Maximum time in milliseconds to wait for the close operation to complete. */
   closeTimeoutMs?: number;
+  /**
+   * Error handler invoked when the transport encounters an error.
+   * If not provided, errors are thrown.
+   */
   onError?: (error: unknown) => void | Promise<void>;
+  /** Observability provider for emitting transport events. */
   observability?: RpcObservability;
 }
 
@@ -33,8 +56,30 @@ function isTimeoutError(error: unknown): boolean {
   );
 }
 
+/**
+ * An {@link RpcTransport} implementation that communicates over a TCP connection
+ * using Deno's `Deno.Conn` API.
+ *
+ * Uses a {@link CapnpFrameFramer} to incrementally assemble complete Cap'n Proto
+ * frames from the TCP byte stream. Outbound frames are queued and written
+ * sequentially with full backpressure.
+ *
+ * Use the static {@link connect} factory method to establish a new TCP connection,
+ * or pass an existing `Deno.Conn` directly to the constructor.
+ *
+ * @example
+ * ```ts
+ * const transport = await TcpTransport.connect("localhost", 4000, {
+ *   connectTimeoutMs: 5000,
+ *   readIdleTimeoutMs: 30000,
+ * });
+ * transport.start((frame) => handleFrame(frame));
+ * ```
+ */
 export class TcpTransport implements RpcTransport {
+  /** The underlying Deno TCP connection. */
   readonly conn: Deno.Conn;
+  /** The options this transport was configured with. */
   readonly options: TcpTransportOptions;
 
   #started = false;
@@ -54,6 +99,15 @@ export class TcpTransport implements RpcTransport {
     this.#framer = new CapnpFrameFramer(options.frameLimits);
   }
 
+  /**
+   * Establish a new TCP connection and wrap it in a {@link TcpTransport}.
+   *
+   * @param hostname - The TCP hostname to connect to.
+   * @param port - The TCP port to connect to.
+   * @param options - Transport options including connect timeout.
+   * @returns A new `TcpTransport` wrapping the established connection.
+   * @throws {TransportError} If the connection fails or times out.
+   */
   static async connect(
     hostname: string,
     port: number,
