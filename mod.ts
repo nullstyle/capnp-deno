@@ -21,6 +21,8 @@ export {
 
 export {
   type CapnpWasmExports,
+  DEFAULT_MAX_DRAIN_FRAMES,
+  type DrainOutFramesResult,
   getCapnpWasmExports,
   WasmAbi,
   type WasmAbiCapabilities,
@@ -95,6 +97,10 @@ export {
 
 export {
   type CapnpFrameLimitsOptions,
+  DEFAULT_MAX_FRAME_BYTES,
+  DEFAULT_MAX_NESTING_DEPTH,
+  DEFAULT_MAX_SEGMENT_COUNT,
+  DEFAULT_MAX_TRAVERSAL_WORDS,
   validateCapnpFrame,
 } from "./src/frame_limits.ts";
 

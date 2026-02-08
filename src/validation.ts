@@ -5,8 +5,30 @@
  * numeric configuration values are out of range. They are used by
  * reconnect, connection pool, circuit breaker, and other modules.
  *
- * All validators throw a plain {@link Error} so they are not tied to any
- * specific error subclass (TransportError, SessionError, etc.).
+ * **Design decision — plain `Error` vs. `CapnpError`:**
+ *
+ * All validators intentionally throw a plain {@link Error} rather than a
+ * {@link CapnpError} subclass. This reflects the distinction between two
+ * categories of errors in the library:
+ *
+ * - **Argument validation errors** (this module): These indicate programmer
+ *   mistakes — invalid configuration values passed at construction time.
+ *   They are analogous to `TypeError` or `RangeError` in the standard
+ *   library: deterministic, immediately thrown, and fixable by correcting
+ *   the calling code. They should **not** be caught by a blanket
+ *   `catch (e) { if (e instanceof CapnpError) ... }` handler, because
+ *   they represent bugs, not recoverable runtime conditions.
+ *
+ * - **Runtime / wire-format errors** (`CapnpError` hierarchy): These
+ *   indicate problems discovered at runtime — malformed frames
+ *   ({@link ProtocolError}), network failures ({@link TransportError}),
+ *   session lifecycle issues ({@link SessionError}), etc. Callers are
+ *   expected to catch and handle these.
+ *
+ * Keeping argument validation as plain `Error` ensures callers cannot
+ * accidentally swallow configuration bugs inside a `CapnpError` catch
+ * block, and keeps these helpers decoupled from any specific error
+ * subclass.
  *
  * @module
  */
@@ -16,7 +38,9 @@
  *
  * @param value - The number to validate.
  * @param name - A human-readable name for the parameter (used in the error message).
- * @throws {Error} If `value` is not a positive integer.
+ * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
+ *   positive integer. Plain `Error` is used because this validates
+ *   programmer-supplied arguments, not runtime wire data.
  */
 export function assertPositiveInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 1) {
@@ -29,7 +53,9 @@ export function assertPositiveInteger(value: number, name: string): void {
  *
  * @param value - The number to validate.
  * @param name - A human-readable name for the parameter (used in the error message).
- * @throws {Error} If `value` is not a non-negative integer.
+ * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
+ *   non-negative integer. Plain `Error` is used because this validates
+ *   programmer-supplied arguments, not runtime wire data.
  */
 export function assertNonNegativeInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 0) {
@@ -44,7 +70,9 @@ export function assertNonNegativeInteger(value: number, name: string): void {
  *
  * @param value - The number to validate.
  * @param name - A human-readable name for the parameter (used in the error message).
- * @throws {Error} If `value` is negative or non-finite.
+ * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is negative
+ *   or non-finite. Plain `Error` is used because this validates
+ *   programmer-supplied arguments, not runtime wire data.
  */
 export function assertNonNegativeFinite(value: number, name: string): void {
   if (!Number.isFinite(value) || value < 0) {
@@ -59,7 +87,9 @@ export function assertNonNegativeFinite(value: number, name: string): void {
  *
  * @param value - The number to validate.
  * @param name - A human-readable name for the parameter (used in the error message).
- * @throws {Error} If `value` is not a positive finite number.
+ * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
+ *   positive finite number. Plain `Error` is used because this validates
+ *   programmer-supplied arguments, not runtime wire data.
  */
 export function assertPositiveFinite(value: number, name: string): void {
   if (!Number.isFinite(value) || value <= 0) {

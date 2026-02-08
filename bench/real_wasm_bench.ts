@@ -209,7 +209,7 @@ Deno.bench({
     const frame = unknownCapFrames[unknownCapCursor];
     unknownCapCursor = (unknownCapCursor + 1) % unknownCapFrames.length;
 
-    const outbound = runtime.peer.pushFrame(frame);
+    const { frames: outbound } = runtime.peer.pushFrame(frame);
     if (outbound.length !== 1) {
       throw new Error("expected single outbound return frame");
     }
@@ -232,7 +232,9 @@ Deno.bench({
     successfulLifecycleCursor = (successfulLifecycleCursor + 1) %
       successfulLifecycleFrames.length;
 
-    const bootstrapOutbound = runtime.peer.pushFrame(frameSet.bootstrapFrame);
+    const { frames: bootstrapOutbound } = runtime.peer.pushFrame(
+      frameSet.bootstrapFrame,
+    );
     if (bootstrapOutbound.length !== 1) {
       throw new Error("expected single bootstrap return frame");
     }
@@ -251,7 +253,7 @@ Deno.bench({
       throw new Error("unexpected bootstrap capability id");
     }
 
-    const callOutbound = runtime.peer.pushFrame(frameSet.callFrame);
+    const { frames: callOutbound } = runtime.peer.pushFrame(frameSet.callFrame);
     if (callOutbound.length !== 0) {
       throw new Error("expected host-call bridge to buffer outbound response");
     }
@@ -266,7 +268,7 @@ Deno.bench({
       lifecycleResponsePayload,
     );
 
-    const postResponseFrames = runtime.peer.drainOutgoingFrames();
+    const { frames: postResponseFrames } = runtime.peer.drainOutgoingFrames();
     if (postResponseFrames.length !== 1) {
       throw new Error("expected single host-call response frame");
     }
@@ -278,17 +280,19 @@ Deno.bench({
       throw new Error("call answer id mismatch");
     }
 
-    const finishCall = runtime.peer.pushFrame(frameSet.callFinishFrame);
+    const { frames: finishCall } = runtime.peer.pushFrame(
+      frameSet.callFinishFrame,
+    );
     if (finishCall.length !== 0) {
       throw new Error("expected no outbound frames for call finish");
     }
-    const finishBootstrap = runtime.peer.pushFrame(
+    const { frames: finishBootstrap } = runtime.peer.pushFrame(
       frameSet.bootstrapFinishFrame,
     );
     if (finishBootstrap.length !== 0) {
       throw new Error("expected no outbound frames for bootstrap finish");
     }
-    const releaseBootstrap = runtime.peer.pushFrame(
+    const { frames: releaseBootstrap } = runtime.peer.pushFrame(
       encodeReleaseFrame({
         id: bootstrapCapId,
         referenceCount: 1,
@@ -297,7 +301,7 @@ Deno.bench({
     if (releaseBootstrap.length !== 0) {
       throw new Error("expected no outbound frames for bootstrap release");
     }
-    if (runtime.peer.drainOutgoingFrames().length !== 0) {
+    if (runtime.peer.drainOutgoingFrames().frames.length !== 0) {
       throw new Error("unexpected residual outbound frames");
     }
 

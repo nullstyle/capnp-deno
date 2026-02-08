@@ -6,6 +6,10 @@
  */
 
 import { ProtocolError } from "../errors.ts";
+
+// Cached TextDecoder instance to avoid repeated allocation on the hot path.
+const TEXT_DECODER = new TextDecoder();
+
 import type {
   ByteListRef,
   PointerLocation,
@@ -654,5 +658,5 @@ export function readTextFromPointer(
   const payload = bytes.byteLength > 0 && bytes[bytes.byteLength - 1] === 0
     ? bytes.subarray(0, bytes.byteLength - 1)
     : bytes;
-  return new TextDecoder().decode(payload);
+  return TEXT_DECODER.decode(payload);
 }

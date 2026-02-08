@@ -12,6 +12,6 @@ const { peer } = await instantiatePeer(source, {}, {
 });
 
 console.log(`Loaded capnp-deno wasm peer handle: ${peer.handle}`);
-const outbound = peer.drainOutgoingFrames();
+const { frames: outbound } = peer.drainOutgoingFrames();
 console.log(`Initial outbound frame count: ${outbound.length}`);
 peer.close();

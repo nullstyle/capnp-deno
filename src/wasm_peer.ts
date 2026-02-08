@@ -1,5 +1,7 @@
 import {
   type CapnpWasmExports,
+  DEFAULT_MAX_DRAIN_FRAMES,
+  type DrainOutFramesResult,
   getCapnpWasmExports,
   WasmAbi,
   type WasmAbiOptions,
@@ -91,14 +93,20 @@ export class WasmPeer {
    * response frames.
    *
    * @param frame - The raw bytes of the inbound Cap'n Proto message.
-   * @returns An array of outbound frames produced by processing the inbound frame.
+   * @param maxFrames - Maximum outbound frames to drain. Defaults to
+   *   {@link DEFAULT_MAX_DRAIN_FRAMES}.
+   * @returns A {@link DrainOutFramesResult} with the drained frames and a
+   *   truncation flag.
    * @throws {ProtocolError} If the peer is closed.
    * @throws {WasmAbiError} If the WASM module rejects the frame.
    */
-  pushFrame(frame: Uint8Array): Uint8Array[] {
+  pushFrame(
+    frame: Uint8Array,
+    maxFrames: number = DEFAULT_MAX_DRAIN_FRAMES,
+  ): DrainOutFramesResult {
     this.assertOpen();
     this.abi.pushFrame(this.handle, frame);
-    return this.abi.drainOutFrames(this.handle);
+    return this.abi.drainOutFrames(this.handle, maxFrames);
   }
 
   /**
@@ -113,14 +121,19 @@ export class WasmPeer {
   }
 
   /**
-   * Drains all outbound frames from the peer's output queue.
+   * Drains outbound frames from the peer's output queue, up to a limit.
    *
-   * @returns An array of all pending outbound frames (may be empty).
+   * @param maxFrames - Maximum number of frames to drain. Defaults to
+   *   {@link DEFAULT_MAX_DRAIN_FRAMES}.
+   * @returns A {@link DrainOutFramesResult} with the drained frames and a
+   *   truncation flag.
    * @throws {ProtocolError} If the peer is closed.
    */
-  drainOutgoingFrames(): Uint8Array[] {
+  drainOutgoingFrames(
+    maxFrames: number = DEFAULT_MAX_DRAIN_FRAMES,
+  ): DrainOutFramesResult {
     this.assertOpen();
-    return this.abi.drainOutFrames(this.handle);
+    return this.abi.drainOutFrames(this.handle, maxFrames);
   }
 
   /**

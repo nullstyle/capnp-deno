@@ -1097,7 +1097,7 @@ Deno.test("RpcServerBridge: pipelined call to unknown question returns exception
   }
 });
 
-Deno.test("RpcServerBridge: multiple getPointerField transforms select correct capability", async () => {
+Deno.test("RpcServerBridge: multiple getPointerField transforms are rejected as unsupported", async () => {
   const bridge = new RpcServerBridge();
 
   // Factory that returns nested structure with capabilities
@@ -1116,16 +1116,7 @@ Deno.test("RpcServerBridge: multiple getPointerField transforms select correct c
       }),
   }, { capabilityIndex: 1 });
 
-  let calledCapIndex = -1;
-  bridge.exportCapability({
-    interfaceId: 0xBBBBn,
-    dispatch: (_method, _params, ctx) => {
-      calledCapIndex = ctx.capability.capabilityIndex;
-      return encodeSingleU32StructMessage(0);
-    },
-  }, { capabilityIndex: 40 });
-
-  // Call the factory
+  // Call the factory to populate the answer table.
   await bridge.handleFrame(
     encodeCallRequestFrame({
       questionId: 1,
@@ -1136,8 +1127,9 @@ Deno.test("RpcServerBridge: multiple getPointerField transforms select correct c
     }),
   );
 
-  // Pipelined call with multiple getPointerField ops (last one wins)
-  await bridge.handleFrame(
+  // Pipelined call with multiple getPointerField ops should be rejected
+  // because multi-step transforms are not yet supported.
+  const response = await bridge.handleFrame(
     encodeCallRequestFrame({
       questionId: 2,
       interfaceId: 0xBBBBn,
@@ -1157,42 +1149,18 @@ Deno.test("RpcServerBridge: multiple getPointerField transforms select correct c
     }),
   );
 
-  // Should have called capability at index 1 (id: 20) since last getPointerField(1)
-  // Actually, based on the code, it overwrites pointerIndex on each getPointerField
-  // So the final pointerIndex should be 1, which maps to id 20
-  // But we exported capability 40, not 20. Let me re-read the logic...
-  // Looking at resolvePromisedAnswerCapability: it iterates through ops and sets pointerIndex
-  // So final pointerIndex is 1, and capTable[1] has id: 20
-  // We need to export capability 20 for this test
-  bridge.exportCapability({
-    interfaceId: 0xBBBBn,
-    dispatch: (_method, _params, ctx) => {
-      calledCapIndex = ctx.capability.capabilityIndex;
-      return encodeSingleU32StructMessage(0);
-    },
-  }, { capabilityIndex: 20 });
-
-  // Re-run the test
-  calledCapIndex = -1;
-  await bridge.handleFrame(
-    encodeCallRequestFrame({
-      questionId: 3,
-      interfaceId: 0xBBBBn,
-      methodId: 0,
-      target: {
-        tag: 1,
-        promisedAnswer: {
-          questionId: 1,
-          transform: [
-            { tag: 1, pointerIndex: 0 },
-            { tag: 1, pointerIndex: 3 },
-            { tag: 1, pointerIndex: 1 },
-          ],
-        },
-      },
-      paramsContent: encodeSingleU32StructMessage(0),
-    }),
+  assert(
+    response !== null,
+    "expected exception return for multi-step transform",
   );
-
-  assertEquals(calledCapIndex, 20);
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assert(
+      /multi-step promisedAnswer transforms.*not yet supported/i.test(
+        decoded.reason,
+      ),
+      `expected multi-step transform error, got: ${decoded.reason}`,
+    );
+  }
 });

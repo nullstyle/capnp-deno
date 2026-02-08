@@ -1,6 +1,9 @@
 import { ProtocolError } from "./errors.ts";
 import {
   type CapnpFrameLimitsOptions,
+  DEFAULT_MAX_FRAME_BYTES,
+  DEFAULT_MAX_SEGMENT_COUNT,
+  DEFAULT_MAX_TRAVERSAL_WORDS,
   validateCapnpFrame,
 } from "./frame_limits.ts";
 
@@ -106,11 +109,9 @@ export class CapnpFrameFramer {
     if (segmentCount < 1) {
       throw new ProtocolError("invalid capnp frame segment count");
     }
-    const maxSegmentCount = this.options.maxSegmentCount;
-    if (
-      maxSegmentCount !== undefined &&
-      segmentCount > maxSegmentCount
-    ) {
+    const maxSegmentCount = this.options.maxSegmentCount ??
+      DEFAULT_MAX_SEGMENT_COUNT;
+    if (segmentCount > maxSegmentCount) {
       throw new ProtocolError(
         `capnp frame segment count ${segmentCount} exceeds configured limit ${maxSegmentCount}`,
       );
@@ -127,8 +128,9 @@ export class CapnpFrameFramer {
       const wordCount = view.getUint32(4 + i * 4, true);
       totalWords += wordCount;
     }
-    const maxTraversalWords = this.options.maxTraversalWords;
-    if (maxTraversalWords !== undefined && totalWords > maxTraversalWords) {
+    const maxTraversalWords = this.options.maxTraversalWords ??
+      DEFAULT_MAX_TRAVERSAL_WORDS;
+    if (totalWords > maxTraversalWords) {
       throw new ProtocolError(
         `capnp frame traversal words ${totalWords} exceeds configured limit ${maxTraversalWords}`,
       );
@@ -142,8 +144,8 @@ export class CapnpFrameFramer {
   }
 
   private assertFrameBytes(totalBytes: number): void {
-    const maxFrameBytes = this.options.maxFrameBytes;
-    if (maxFrameBytes !== undefined && totalBytes > maxFrameBytes) {
+    const maxFrameBytes = this.options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    if (totalBytes > maxFrameBytes) {
       throw new ProtocolError(
         `capnp frame size ${totalBytes} exceeds configured limit ${maxFrameBytes}`,
       );

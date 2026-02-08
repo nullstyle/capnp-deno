@@ -296,6 +296,13 @@ export interface SessionRpcClientTransportOptions {
  *
  * This transport is primarily useful for unit and integration tests where
  * no real network connection is desired.
+ *
+ * **Ownership model**: {@link send} is the only method that defensively copies
+ * its input, because the caller (the session) may reuse the buffer.  After that
+ * single copy the frame is owned by the transport.  {@link emitInbound} passes
+ * the caller-provided buffer straight through — the caller is expected to not
+ * mutate it afterwards.  {@link nextOutboundFrame} transfers ownership of the
+ * already-copied buffer to the caller without an additional copy.
  */
 export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
@@ -337,14 +344,14 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   async emitInbound(frame: Uint8Array): Promise<void> {
     if (this.#closed) throw new SessionError("transport is closed");
     if (!this.#onFrame) throw new SessionError("transport is not started");
-    await this.#onFrame(new Uint8Array(frame));
+    await this.#onFrame(frame);
   }
 
   async nextOutboundFrame(
     options: RpcClientCallOptions = {},
   ): Promise<Uint8Array> {
     if (this.#outboundQueue.length > 0) {
-      return new Uint8Array(this.#outboundQueue.shift()!);
+      return this.#outboundQueue.shift()!;
     }
     if (this.#closed) {
       throw new SessionError("transport is closed");

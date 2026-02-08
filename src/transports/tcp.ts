@@ -114,13 +114,12 @@ export class TcpTransport implements RpcTransport {
     port: number,
     options: TcpTransportOptions = {},
   ): Promise<TcpTransport> {
-    const connect =
-      (Deno as unknown as { connect: typeof Deno.connect }).connect;
-    if (typeof connect !== "function") {
+    if (!("connect" in Deno) || typeof Deno.connect !== "function") {
       throw new TransportError(
         "Deno.connect is unavailable; run with a runtime that supports TCP connect",
       );
     }
+    const connect = Deno.connect;
 
     const connectPromise = connect({ hostname, port, transport: "tcp" });
     const connectTimeoutMs = options.connectTimeoutMs;
@@ -138,10 +137,15 @@ export class TcpTransport implements RpcTransport {
       return new TcpTransport(conn, options);
     }
 
-    let timedOut = false;
+    // Atomic flag to prevent the race where the connection succeeds at the
+    // exact moment the timeout fires. Without this, the timeout handler could
+    // close a connection that Promise.race already resolved with.
+    let resolved = false;
+
     const timed = new Promise<Deno.Conn>((_resolve, reject) => {
       const timer = setTimeout(() => {
-        timedOut = true;
+        if (resolved) return;
+        resolved = true;
         reject(
           new TransportError(
             `tcp connect timed out after ${connectTimeoutMs}ms (${hostname}:${port})`,
@@ -155,7 +159,7 @@ export class TcpTransport implements RpcTransport {
     });
 
     void connectPromise.then((conn) => {
-      if (timedOut) {
+      if (resolved) {
         try {
           conn.close();
         } catch {
@@ -169,6 +173,7 @@ export class TcpTransport implements RpcTransport {
     let conn: Deno.Conn;
     try {
       conn = await Promise.race([connectPromise, timed]);
+      resolved = true;
     } catch (error) {
       throw normalizeTransportError(
         error,
@@ -302,11 +307,11 @@ export class TcpTransport implements RpcTransport {
 
   private async readChunk(buffer: Uint8Array): Promise<number | null> {
     const idleTimeoutMs = this.options.readIdleTimeoutMs;
-    const deadlineConn = this.conn as unknown as {
-      setReadDeadline?: (deadline?: number | Date) => void;
-    };
-    if (idleTimeoutMs !== undefined) {
-      deadlineConn.setReadDeadline?.(new Date(Date.now() + idleTimeoutMs));
+    // deno-lint-ignore no-explicit-any
+    const connRecord = this.conn as any;
+    const hasDeadline = typeof connRecord.setReadDeadline === "function";
+    if (idleTimeoutMs !== undefined && hasDeadline) {
+      connRecord.setReadDeadline(new Date(Date.now() + idleTimeoutMs));
     }
 
     try {
@@ -319,8 +324,8 @@ export class TcpTransport implements RpcTransport {
       }
       throw normalizeTransportError(error, "tcp read failed");
     } finally {
-      if (idleTimeoutMs !== undefined) {
-        deadlineConn.setReadDeadline?.();
+      if (idleTimeoutMs !== undefined && hasDeadline) {
+        connRecord.setReadDeadline();
       }
     }
   }
@@ -398,14 +403,23 @@ export class TcpTransport implements RpcTransport {
     }
 
     return await new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(onTimeout(timeoutMs)), timeoutMs);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(onTimeout(timeoutMs));
+      }, timeoutMs);
       void promise.then(
         (value) => {
           clearTimeout(timer);
+          if (settled) return;
+          settled = true;
           resolve(value);
         },
         (error) => {
           clearTimeout(timer);
+          if (settled) return;
+          settled = true;
           reject(error);
         },
       );

@@ -140,7 +140,7 @@ export class RpcSession {
     const startedAt = performance.now();
     this.assertOpen();
     try {
-      const outbound = this.peer.pushFrame(frame);
+      const { frames: outbound } = this.peer.pushFrame(frame);
       let outboundBytes = 0;
       for (const out of outbound) {
         outboundBytes += out.byteLength;

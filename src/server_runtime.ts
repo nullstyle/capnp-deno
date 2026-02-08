@@ -338,7 +338,7 @@ export class RpcServerRuntime {
   }
 
   async #flushPeerOutboundFrames(): Promise<void> {
-    const outbound = this.peer.drainOutgoingFrames();
+    const { frames: outbound } = this.peer.drainOutgoingFrames();
     for (const frame of outbound) {
       await this.session.transport.send(frame);
     }

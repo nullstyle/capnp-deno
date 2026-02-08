@@ -149,7 +149,7 @@ function assertUnknownCapabilityCall(
     paramsCapTable: Array<{ tag: number; id: number }>;
   },
 ): void {
-  const outbound = peer.pushFrame(
+  const { frames: outbound } = peer.pushFrame(
     encodeCallRequestFrame({
       questionId,
       interfaceId: callTemplate.interfaceId,
@@ -174,7 +174,7 @@ function assertUnknownCapabilityCall(
 
 Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () => {
   await withPeer((_instance, peer) => {
-    const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_INBOUND);
+    const { frames: bootstrapOutbound } = peer.pushFrame(BOOTSTRAP_Q1_INBOUND);
     assertEquals(bootstrapOutbound.length, 1);
     const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
     assertEquals(bootstrap.kind, "results");
@@ -187,7 +187,9 @@ Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () =
     assertEquals(bootstrap.capTable[0].id, 0);
     assertEquals(bootstrap.noFinishNeeded, false);
 
-    const callOutbound = peer.pushFrame(CALL_UNKNOWN_CAP_Q2_INBOUND);
+    const { frames: callOutbound } = peer.pushFrame(
+      CALL_UNKNOWN_CAP_Q2_INBOUND,
+    );
     assertEquals(callOutbound.length, 1);
     const call = decodeReturnFrame(callOutbound[0]);
     assertEquals(call.kind, "exception");
@@ -197,7 +199,7 @@ Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () =
     assertEquals(call.answerId, 2);
     assertEquals(call.reason, "unknown capability");
 
-    assertEquals(peer.drainOutgoingFrames().length, 0);
+    assertEquals(peer.drainOutgoingFrames().frames.length, 0);
   });
 });
 
@@ -205,7 +207,9 @@ Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", asyn
   await withPeer((instance, peer) => {
     const bootstrapStubExportId = enableBootstrapStub(instance, peer);
 
-    const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
+    const { frames: bootstrapOutbound } = peer.pushFrame(
+      BOOTSTRAP_Q1_SUCCESS_INBOUND,
+    );
     assertEquals(bootstrapOutbound.length, 1);
     const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
     assertEquals(bootstrap.kind, "results");
@@ -217,7 +221,9 @@ Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", asyn
     assertEquals(bootstrap.capTable[0].tag, 1);
     assertEquals(bootstrap.capTable[0].id, bootstrapStubExportId);
 
-    const callOutbound = peer.pushFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+    const { frames: callOutbound } = peer.pushFrame(
+      CALL_BOOTSTRAP_CAP_Q2_INBOUND,
+    );
     assertEquals(callOutbound.length, 1);
     const call = decodeReturnFrame(callOutbound[0]);
     assertEquals(call.kind, "exception");
@@ -269,7 +275,9 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
       paramsCapTable: fixtureCall.paramsCapTable,
     };
 
-    const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
+    const { frames: bootstrapOutbound } = peer.pushFrame(
+      BOOTSTRAP_Q1_SUCCESS_INBOUND,
+    );
     assertEquals(bootstrapOutbound.length, 1);
     const bootstrap = decodeReturnFrame(bootstrapOutbound[0]);
     assertEquals(bootstrap.kind, "results");
@@ -289,7 +297,7 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
       paramsContent: callTemplate.paramsContent,
       paramsCapTable: callTemplate.paramsCapTable,
     });
-    const callOutbound = peer.pushFrame(hostBridgeCall);
+    const { frames: callOutbound } = peer.pushFrame(hostBridgeCall);
     assertEquals(callOutbound.length, 0);
 
     const hostCall = peer.abi.popHostCall(peer.handle);
@@ -301,7 +309,7 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
       hostCall.questionId,
       responsePayload,
     );
-    const postResponseFrames = peer.drainOutgoingFrames();
+    const { frames: postResponseFrames } = peer.drainOutgoingFrames();
     assertEquals(postResponseFrames.length, 1);
     const postResponse = decodeReturnFrame(postResponseFrames[0]);
     assertEquals(postResponse.kind, "results");
@@ -315,7 +323,7 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
     );
     const returnedCapIds = postResponse.capTable.map((entry) => entry.id);
 
-    const finishOutbound = peer.pushFrame(
+    const { frames: finishOutbound } = peer.pushFrame(
       encodeFinishFrame({
         questionId: 2,
         releaseResultCaps: true,
@@ -332,16 +340,16 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
     }
 
     for (const capId of returnedCapIds) {
-      const releaseReturned = peer.pushFrame(
+      const { frames: releaseReturned } = peer.pushFrame(
         encodeReleaseFrame({ id: capId, referenceCount: 1 }),
       );
       assertEquals(releaseReturned.length, 0);
     }
 
-    const releaseOutbound = peer.pushFrame(
+    const { frames: releaseOutbound } = peer.pushFrame(
       encodeReleaseFrame({ id: bootstrapCapId, referenceCount: 1 }),
     );
     assertEquals(releaseOutbound.length, 0);
-    assertEquals(peer.drainOutgoingFrames().length, 0);
+    assertEquals(peer.drainOutgoingFrames().frames.length, 0);
   });
 });

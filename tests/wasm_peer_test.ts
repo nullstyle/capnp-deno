@@ -18,11 +18,12 @@ Deno.test("WasmPeer.pushFrame drains all outbound frames", () => {
   });
 
   using peer = WasmPeer.fromExports(fake.exports);
-  const outbound = peer.pushFrame(new Uint8Array([0xaa]));
+  const result = peer.pushFrame(new Uint8Array([0xaa]));
 
-  assertEquals(outbound.length, 2, "expected two outbound frames");
-  assertBytes(outbound[0], [0x01]);
-  assertBytes(outbound[1], [0x02]);
+  assertEquals(result.frames.length, 2, "expected two outbound frames");
+  assertEquals(result.truncated, false, "should not be truncated");
+  assertBytes(result.frames[0], [0x01]);
+  assertBytes(result.frames[1], [0x02]);
   assertEquals(fake.commitCalls.length, 2, "expected one commit per frame");
 });
 
@@ -60,10 +61,11 @@ Deno.test("WasmPeer.popOutgoingFrame and drainOutgoingFrames expose queued frame
   assert(first !== null, "expected first frame");
   assertBytes(first, [0x11]);
 
-  const remaining = peer.drainOutgoingFrames();
-  assertEquals(remaining.length, 2);
-  assertBytes(remaining[0], [0x22]);
-  assertBytes(remaining[1], [0x33]);
+  const result = peer.drainOutgoingFrames();
+  assertEquals(result.frames.length, 2);
+  assertEquals(result.truncated, false);
+  assertBytes(result.frames[0], [0x22]);
+  assertBytes(result.frames[1], [0x33]);
 
   assertEquals(peer.popOutgoingFrame(), null);
 });
@@ -77,7 +79,7 @@ Deno.test("WasmPeer.fromInstance accepts WebAssembly instance exports", () => {
   } as unknown as WebAssembly.Instance;
 
   using peer = WasmPeer.fromInstance(instance, { expectedVersion: 1 });
-  const outbound = peer.pushFrame(new Uint8Array([0x01]));
-  assertEquals(outbound.length, 1);
-  assertBytes(outbound[0], [0xfe]);
+  const result = peer.pushFrame(new Uint8Array([0x01]));
+  assertEquals(result.frames.length, 1);
+  assertBytes(result.frames[0], [0xfe]);
 });

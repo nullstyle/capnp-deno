@@ -82,7 +82,11 @@ function toOtelAttributes(
 }
 
 function readDenoTelemetry(): DenoTelemetryNamespace | undefined {
-  return (Deno as unknown as { telemetry?: DenoTelemetryNamespace }).telemetry;
+  if ("telemetry" in Deno) {
+    // deno-lint-ignore no-explicit-any
+    return (Deno as any).telemetry as DenoTelemetryNamespace | undefined;
+  }
+  return undefined;
 }
 
 /**

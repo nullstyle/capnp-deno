@@ -6,6 +6,10 @@
  */
 
 import { ProtocolError } from "../errors.ts";
+
+// Cached TextEncoder instance to avoid repeated allocation on the encode path.
+const TEXT_ENCODER = new TextEncoder();
+
 import type {
   RpcBootstrapRequest,
   RpcCallFrameRequest,
@@ -613,7 +617,7 @@ export function encodeReturnExceptionFrame(
   const answerId = ensureU32(request.answerId, "answerId");
   const releaseParamCaps = request.releaseParamCaps ?? true;
   const noFinishNeeded = request.noFinishNeeded ?? false;
-  const reasonBytes = new TextEncoder().encode(request.reason);
+  const reasonBytes = TEXT_ENCODER.encode(request.reason);
 
   const builder = new MessageBuilder();
   const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }

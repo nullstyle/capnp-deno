@@ -6,10 +6,51 @@ const MASK_29 = 0x1fff_ffffn;
 const MASK_30 = 0x3fff_ffffn;
 
 /**
+ * Default maximum number of segments allowed in a single Cap'n Proto frame.
+ *
+ * Applied when {@link CapnpFrameLimitsOptions.maxSegmentCount} is omitted.
+ * 512 segments is generous for virtually all real-world messages while still
+ * preventing degenerate inputs from allocating unbounded segment tables.
+ */
+export const DEFAULT_MAX_SEGMENT_COUNT = 512;
+
+/**
+ * Default maximum total frame size in bytes (header + all segments).
+ *
+ * Applied when {@link CapnpFrameLimitsOptions.maxFrameBytes} is omitted.
+ * 64 MiB is large enough for bulk data transfers yet prevents a single
+ * malicious frame from exhausting process memory.
+ */
+export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024; // 64 MiB
+
+/**
+ * Default maximum total word count across all segments.
+ *
+ * Applied when {@link CapnpFrameLimitsOptions.maxTraversalWords} is omitted.
+ * 8 M words (64 MiB of payload) mirrors {@link DEFAULT_MAX_FRAME_BYTES}
+ * expressed in 8-byte words.
+ */
+export const DEFAULT_MAX_TRAVERSAL_WORDS = 64 * 1024 * 1024 / 8; // 8M words
+
+/**
+ * Default maximum pointer nesting depth.
+ *
+ * Applied when {@link CapnpFrameLimitsOptions.maxNestingDepth} is omitted.
+ * 64 levels of nesting accommodates deeply nested schemas without risking
+ * stack overflows during the pointer-tree walk.
+ */
+export const DEFAULT_MAX_NESTING_DEPTH = 64;
+
+/**
  * Options for limiting the size and complexity of Cap'n Proto frames.
  *
  * These limits protect against excessively large or deeply nested messages
  * that could cause out-of-memory errors or stack overflows.
+ *
+ * All fields are optional. When omitted, secure defaults are applied
+ * automatically (see {@link DEFAULT_MAX_SEGMENT_COUNT},
+ * {@link DEFAULT_MAX_FRAME_BYTES}, {@link DEFAULT_MAX_TRAVERSAL_WORDS},
+ * and {@link DEFAULT_MAX_NESTING_DEPTH}).
  */
 export interface CapnpFrameLimitsOptions {
   /** Maximum number of segments allowed in a single frame. */
@@ -228,8 +269,8 @@ function parseFrame(
 
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const segmentCount = view.getUint32(0, true) + 1;
-  const maxSegmentCount = limits.maxSegmentCount;
-  if (maxSegmentCount !== undefined && segmentCount > maxSegmentCount) {
+  const maxSegmentCount = limits.maxSegmentCount ?? DEFAULT_MAX_SEGMENT_COUNT;
+  if (segmentCount > maxSegmentCount) {
     throw new ProtocolError(
       `capnp frame segment count ${segmentCount} exceeds configured limit ${maxSegmentCount}`,
     );
@@ -249,16 +290,17 @@ function parseFrame(
     totalWords += words;
   }
 
-  const maxTraversalWords = limits.maxTraversalWords;
-  if (maxTraversalWords !== undefined && totalWords > maxTraversalWords) {
+  const maxTraversalWords = limits.maxTraversalWords ??
+    DEFAULT_MAX_TRAVERSAL_WORDS;
+  if (totalWords > maxTraversalWords) {
     throw new ProtocolError(
       `capnp frame traversal words ${totalWords} exceeds configured limit ${maxTraversalWords}`,
     );
   }
 
   const totalBytes = headerBytes + totalWords * WORD_BYTES;
-  const maxFrameBytes = limits.maxFrameBytes;
-  if (maxFrameBytes !== undefined && totalBytes > maxFrameBytes) {
+  const maxFrameBytes = limits.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+  if (totalBytes > maxFrameBytes) {
     throw new ProtocolError(
       `capnp frame size ${totalBytes} exceeds configured limit ${maxFrameBytes}`,
     );
@@ -450,11 +492,17 @@ function enforceNestingDepth(
 /**
  * Validates a Cap'n Proto frame against the provided size and complexity limits.
  *
- * Parses the frame header, checks segment counts and sizes, and optionally
- * walks the pointer tree to enforce a maximum nesting depth.
+ * Parses the frame header, checks segment counts and sizes, and walks the
+ * pointer tree to enforce a maximum nesting depth.
+ *
+ * When any limit option is omitted, a secure default is applied automatically:
+ * - `maxSegmentCount` defaults to {@link DEFAULT_MAX_SEGMENT_COUNT} (512)
+ * - `maxFrameBytes` defaults to {@link DEFAULT_MAX_FRAME_BYTES} (64 MiB)
+ * - `maxTraversalWords` defaults to {@link DEFAULT_MAX_TRAVERSAL_WORDS} (8M words)
+ * - `maxNestingDepth` defaults to {@link DEFAULT_MAX_NESTING_DEPTH} (64)
  *
  * @param frame - The complete Cap'n Proto frame bytes to validate.
- * @param limits - The limits to enforce. An empty object performs only basic structural validation.
+ * @param limits - The limits to enforce. When omitted or empty, secure defaults are used.
  * @throws {ProtocolError} If any limit is exceeded or the frame is malformed.
  */
 export function validateCapnpFrame(
@@ -462,14 +510,12 @@ export function validateCapnpFrame(
   limits: CapnpFrameLimitsOptions = {},
 ): void {
   const parsed = parseFrame(frame, limits);
-  if (limits.maxNestingDepth !== undefined) {
-    enforceNestingDepth(parsed.segments, limits.maxNestingDepth);
-  }
+  const maxNestingDepth = limits.maxNestingDepth ?? DEFAULT_MAX_NESTING_DEPTH;
+  enforceNestingDepth(parsed.segments, maxNestingDepth);
 
-  const maxTraversalWords = limits.maxTraversalWords;
-  if (
-    maxTraversalWords !== undefined && parsed.totalWords > maxTraversalWords
-  ) {
+  const maxTraversalWords = limits.maxTraversalWords ??
+    DEFAULT_MAX_TRAVERSAL_WORDS;
+  if (parsed.totalWords > maxTraversalWords) {
     throw new ProtocolError(
       `capnp frame traversal words ${parsed.totalWords} exceeds configured limit ${maxTraversalWords}`,
     );

@@ -157,6 +157,28 @@ export interface WasmHostCallRecord {
 }
 
 /**
+ * Default maximum number of frames that {@link WasmAbi.drainOutFrames} will
+ * pop in a single call. This guards against a buggy or malicious WASM module
+ * that generates an unbounded number of outbound frames, which could cause
+ * out-of-memory on the host.
+ */
+export const DEFAULT_MAX_DRAIN_FRAMES = 1024;
+
+/**
+ * Result returned by {@link WasmAbi.drainOutFrames}.
+ *
+ * When the `maxFrames` limit is reached before the output queue is empty,
+ * `truncated` is set to `true` so callers can detect the condition and
+ * take appropriate action (e.g. log a warning, close the peer).
+ */
+export interface DrainOutFramesResult {
+  /** The frames that were drained (may be fewer than the total available). */
+  frames: Uint8Array[];
+  /** True if draining stopped because the `maxFrames` limit was reached. */
+  truncated: boolean;
+}
+
+/**
  * Options for sending a Finish message through the WASM ABI.
  */
 export interface WasmSendFinishOptions {
@@ -616,18 +638,30 @@ export class WasmAbi {
   }
 
   /**
-   * Drains all outbound frames from the peer's output queue.
+   * Drains outbound frames from the peer's output queue, up to a limit.
+   *
+   * If the queue contains more frames than `maxFrames`, draining stops early
+   * and the returned result has `truncated: true`. This prevents a buggy or
+   * malicious WASM module from causing unbounded memory growth on the host.
    *
    * @param peer - The peer handle.
-   * @returns An array of all pending outbound frames (may be empty).
+   * @param maxFrames - Maximum number of frames to drain. Defaults to
+   *   {@link DEFAULT_MAX_DRAIN_FRAMES} (1024).
+   * @returns A {@link DrainOutFramesResult} with the drained frames and a
+   *   truncation flag.
    */
-  drainOutFrames(peer: number): Uint8Array[] {
+  drainOutFrames(
+    peer: number,
+    maxFrames: number = DEFAULT_MAX_DRAIN_FRAMES,
+  ): DrainOutFramesResult {
     const out: Uint8Array[] = [];
-    while (true) {
+    while (out.length < maxFrames) {
       const frame = this.popOutFrame(peer);
-      if (frame === null) return out;
+      if (frame === null) return { frames: out, truncated: false };
       out.push(frame);
     }
+    // We hit the limit — there may still be frames queued in the WASM peer.
+    return { frames: out, truncated: true };
   }
 
   /**

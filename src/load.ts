@@ -108,7 +108,7 @@ async function instantiateFromUrl(
  *   { expectedVersion: 1 },
  * );
  * try {
- *   const outbound = peer.pushFrame(inboundFrame);
+ *   const { frames: outbound } = peer.pushFrame(inboundFrame);
  *   // ... process outbound frames
  * } finally {
  *   peer.close();

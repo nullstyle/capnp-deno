@@ -376,9 +376,34 @@ function resolvePromisedAnswerCapability(
   }
 
   // Apply getPointerField operations to select the capability.
+  //
+  // In full Cap'n Proto RPC, transform operations compose: each
+  // getPointerField(n) navigates one level deeper into a nested
+  // capability structure.  However, this implementation resolves
+  // capabilities through a flat export table, so only a single
+  // getPointerField step is meaningful.  To avoid silently
+  // discarding earlier steps (which would be a correctness bug),
+  // we reject multi-step transforms with an explicit error.
+  //
+  // To support full multi-step transforms, the resolution logic
+  // would need to deserialize the result struct and walk nested
+  // pointer fields, resolving intermediate capabilities at each
+  // level -- essentially implementing Cap'n Proto struct traversal.
   let pointerIndex = 0;
+  let getPointerFieldCount = 0;
   for (const op of ops) {
     if (op.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
+      getPointerFieldCount += 1;
+      if (getPointerFieldCount > 1) {
+        throw new ProtocolError(
+          "multi-step promisedAnswer transforms (multiple getPointerField operations) are not yet supported; " +
+            `got ${
+              ops.filter((o) =>
+                o.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD
+              ).length
+            } getPointerField steps`,
+        );
+      }
       pointerIndex = op.pointerIndex ?? 0;
     }
     // noop ops are simply skipped
@@ -699,12 +724,19 @@ export class RpcServerBridge {
               paramsContent: new Uint8Array(0),
               paramsCapTable: [],
             };
-            // Fire and forget - don't await to avoid blocking the timer.
-            Promise.resolve(this.#onUnhandledError(error, syntheticCall)).catch(
-              () => {
-                // Silently ignore errors from the error handler itself.
-              },
-            );
+            // Fire and forget — don't await to avoid blocking the timer.
+            // Wrap in try/catch so that a synchronous throw from
+            // onUnhandledError is also caught, then .catch() handles
+            // the async-rejection path.
+            try {
+              Promise.resolve(this.#onUnhandledError(error, syntheticCall))
+                .catch((_handlerError) => {
+                  // Error handler itself failed — nothing more we can do.
+                  // The original error has already been reported above.
+                });
+            } catch (_handlerError) {
+              // Error handler threw synchronously — nothing more we can do.
+            }
           }
           return;
         }
@@ -999,7 +1031,12 @@ export class RpcServerBridge {
       }
 
       if (this.#onUnhandledError) {
-        await this.#onUnhandledError(error, call);
+        try {
+          await this.#onUnhandledError(error, call);
+        } catch (_handlerError) {
+          // Error handler itself failed — nothing more we can do.
+          // The original error has already been handled/logged by the caller.
+        }
       }
       const reason = error instanceof Error ? error.message : String(error);
       return { kind: "exception", reason };

@@ -101,7 +101,7 @@ Deno.bench({
   warmup: 1_000,
   fn() {
     abiSingle.pushFrame(abiSinglePeer, inboundFrame);
-    const out = abiSingle.drainOutFrames(abiSinglePeer);
+    const { frames: out } = abiSingle.drainOutFrames(abiSinglePeer);
     consumeBytes(out);
   },
 });
@@ -113,7 +113,7 @@ Deno.bench({
   warmup: 1_000,
   fn() {
     abiMulti.pushFrame(abiMultiPeer, inboundFrame);
-    const out = abiMulti.drainOutFrames(abiMultiPeer);
+    const { frames: out } = abiMulti.drainOutFrames(abiMultiPeer);
     consumeBytes(out);
   },
 });

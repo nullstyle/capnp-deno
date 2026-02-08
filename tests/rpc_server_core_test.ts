@@ -4,6 +4,8 @@ import {
   encodeCallRequestFrame,
   encodeFinishFrame,
   encodeReleaseFrame,
+  RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+  RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   RpcServerBridge,
 } from "../mod.ts";
 import { assert, assertEquals } from "./test_utils.ts";
@@ -875,4 +877,85 @@ Deno.test("server core: exception dispatch still creates answer table entry", as
   // Finishing it should clear the table.
   await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
   assertEquals(bridge.answerTableSize, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Multi-step promisedAnswer transform rejection
+// ---------------------------------------------------------------------------
+
+Deno.test("server core: multi-step promisedAnswer transform throws ProtocolError", async () => {
+  const bridge = new RpcServerBridge();
+
+  // Export a capability whose dispatch returns a response with a cap table,
+  // so that a subsequent pipelined call can reference it.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => ({
+      content: encodeSingleU32StructMessage(1),
+      capTable: [{ tag: 1, id: 10 }, { tag: 1, id: 20 }],
+    }),
+  }, { capabilityIndex: 0 });
+
+  // Also export the capabilities that would be resolved by the transform,
+  // so that the error comes from the transform validation, not from a
+  // missing capability.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(99),
+  }, { capabilityIndex: 10 });
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(99),
+  }, { capabilityIndex: 20 });
+
+  // Make the initial call that populates the answer table.
+  const r1 = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r1 !== null, "expected response for initial call");
+  assertEquals(decodeReturnFrame(r1).kind, "results");
+
+  // Now make a pipelined call with a multi-step transform:
+  // [getPointerField(1), getPointerField(0)]
+  // This should be rejected because multi-step transforms are not supported.
+  const pipelinedFrame = encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    target: {
+      tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [
+          {
+            tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+            pointerIndex: 1,
+          },
+          {
+            tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+            pointerIndex: 0,
+          },
+        ],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  });
+
+  const r2 = await bridge.handleFrame(pipelinedFrame);
+  assert(r2 !== null, "expected exception return for multi-step transform");
+  const decoded = decodeReturnFrame(r2);
+  assertEquals(decoded.kind, "exception");
+  assertEquals(decoded.answerId, 2);
+  if (decoded.kind === "exception") {
+    assert(
+      /multi-step promisedAnswer transforms.*not yet supported/i.test(
+        decoded.reason,
+      ),
+      `expected multi-step transform error, got: ${decoded.reason}`,
+    );
+  }
 });
