@@ -5,6 +5,22 @@ import {
 } from "../mod.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
+function expectError(
+  fn: () => void,
+  messagePattern: RegExp,
+): void {
+  let thrown: unknown;
+  try {
+    fn();
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof Error && messagePattern.test(thrown.message),
+    `expected Error ${messagePattern}, got: ${String(thrown)}`,
+  );
+}
+
 function expectTransportError(
   fn: () => void,
   messagePattern: RegExp,
@@ -22,15 +38,15 @@ function expectTransportError(
 }
 
 Deno.test("createExponentialBackoffReconnectPolicy validates option ranges", () => {
-  expectTransportError(
+  expectError(
     () => createExponentialBackoffReconnectPolicy({ maxAttempts: -1 }),
     /maxAttempts must be a non-negative integer/i,
   );
-  expectTransportError(
+  expectError(
     () => createExponentialBackoffReconnectPolicy({ initialDelayMs: -1 }),
     /initialDelayMs must be a non-negative finite number/i,
   );
-  expectTransportError(
+  expectError(
     () => createExponentialBackoffReconnectPolicy({ maxDelayMs: 0 }),
     /maxDelayMs must be a positive finite number/i,
   );
@@ -56,7 +72,7 @@ Deno.test("createExponentialBackoffReconnectPolicy validates option ranges", () 
       }),
     /initialDelayMs 500 exceeds maxDelayMs 100/i,
   );
-  expectTransportError(
+  expectError(
     () => createExponentialBackoffReconnectPolicy({ maxElapsedMs: 1.25 }),
     /maxElapsedMs must be a non-negative integer/i,
   );
@@ -68,11 +84,11 @@ Deno.test("createExponentialBackoffReconnectPolicy validates policy context and 
     random: () => 1,
   });
 
-  expectTransportError(
+  expectError(
     () => policy.shouldRetry({ attempt: -1, elapsedMs: 0, error: null }),
     /context\.attempt must be a non-negative integer/i,
   );
-  expectTransportError(
+  expectError(
     () => policy.shouldRetry({ attempt: 1, elapsedMs: -1, error: null }),
     /context\.elapsedMs must be a non-negative integer/i,
   );

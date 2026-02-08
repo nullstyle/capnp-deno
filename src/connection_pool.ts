@@ -1,5 +1,10 @@
 import { SessionError } from "./errors.ts";
 import type { RpcClientTransportLike } from "./reconnecting_client.ts";
+import {
+  assertNonNegativeFinite,
+  assertNonNegativeInteger,
+  assertPositiveInteger,
+} from "./validation.ts";
 
 /**
  * Configuration options for {@link RpcConnectionPool}.
@@ -55,6 +60,8 @@ interface PendingAcquire {
   resolve: (conn: RpcClientTransportLike) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Whether this entry has already been resolved or rejected. */
+  settled: boolean;
 }
 
 /**
@@ -96,7 +103,7 @@ export class RpcConnectionPool implements Disposable {
   ) => boolean | Promise<boolean>;
   readonly #healthCheckIdleMs: number;
 
-  #idle: IdleEntry[] = [];
+  #idle: Map<RpcClientTransportLike, IdleEntry> = new Map();
   #active: Set<RpcClientTransportLike> = new Set();
   #pending: PendingAcquire[] = [];
   #closed = false;
@@ -112,6 +119,12 @@ export class RpcConnectionPool implements Disposable {
     this.#acquireTimeoutMs = options.acquireTimeoutMs ?? 5000;
     this.#healthCheck = options.healthCheck;
     this.#healthCheckIdleMs = options.healthCheckIdleMs ?? 10000;
+
+    assertNonNegativeInteger(this.#minConnections, "minConnections");
+    assertPositiveInteger(this.#maxConnections, "maxConnections");
+    assertNonNegativeFinite(this.#idleTimeoutMs, "idleTimeoutMs");
+    assertNonNegativeFinite(this.#acquireTimeoutMs, "acquireTimeoutMs");
+    assertNonNegativeFinite(this.#healthCheckIdleMs, "healthCheckIdleMs");
 
     if (this.#minConnections > this.#maxConnections) {
       throw new SessionError(
@@ -129,8 +142,8 @@ export class RpcConnectionPool implements Disposable {
    */
   get stats(): RpcConnectionPoolStats {
     return {
-      total: this.#idle.length + this.#active.size,
-      idle: this.#idle.length,
+      total: this.#idle.size + this.#active.size,
+      idle: this.#idle.size,
       active: this.#active.size,
       pending: this.#pending.length,
     };
@@ -152,9 +165,12 @@ export class RpcConnectionPool implements Disposable {
       throw new SessionError("connection pool is closed");
     }
 
-    // Try to reuse an idle connection.
-    while (this.#idle.length > 0) {
-      const entry = this.#idle.shift()!;
+    // Try to reuse an idle connection (Map iteration is insertion-ordered / FIFO).
+    while (this.#idle.size > 0) {
+      const { value: entry } = this.#idle.values().next() as {
+        value: IdleEntry;
+      };
+      this.#idle.delete(entry.conn);
       clearTimeout(entry.timer);
 
       // If a health check is configured and the connection has been idle
@@ -188,17 +204,22 @@ export class RpcConnectionPool implements Disposable {
 
     // At capacity -- wait for a release.
     return await new Promise<RpcClientTransportLike>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = this.#pending.indexOf(entry);
-        if (idx !== -1) this.#pending.splice(idx, 1);
-        reject(
-          new SessionError(
-            `connection pool acquire timed out after ${this.#acquireTimeoutMs}ms`,
-          ),
-        );
-      }, this.#acquireTimeoutMs);
-
-      const entry: PendingAcquire = { resolve, reject, timer };
+      const entry: PendingAcquire = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          if (entry.settled) return;
+          entry.settled = true;
+          const idx = this.#pending.indexOf(entry);
+          if (idx !== -1) this.#pending.splice(idx, 1);
+          reject(
+            new SessionError(
+              `connection pool acquire timed out after ${this.#acquireTimeoutMs}ms`,
+            ),
+          );
+        }, this.#acquireTimeoutMs),
+        settled: false,
+      };
       this.#pending.push(entry);
     });
   }
@@ -224,9 +245,12 @@ export class RpcConnectionPool implements Disposable {
       return;
     }
 
-    // Hand off to a pending waiter if one exists.
+    // Hand off to a pending waiter if one exists, skipping any that
+    // have already been settled (e.g. by a concurrent timeout).
     while (this.#pending.length > 0) {
       const waiter = this.#pending.shift()!;
+      if (waiter.settled) continue;
+      waiter.settled = true;
       clearTimeout(waiter.timer);
       this.#active.add(conn);
       waiter.resolve(conn);
@@ -237,7 +261,7 @@ export class RpcConnectionPool implements Disposable {
     const timer = setTimeout(() => {
       this.#evictIdle(conn);
     }, this.#idleTimeoutMs);
-    this.#idle.push({ conn, timer, lastUsedAt: Date.now() });
+    this.#idle.set(conn, { conn, timer, lastUsedAt: Date.now() });
   }
 
   /**
@@ -257,7 +281,8 @@ export class RpcConnectionPool implements Disposable {
     }
 
     // Close all idle connections.
-    const idleCopy = this.#idle.splice(0);
+    const idleCopy = [...this.#idle.values()];
+    this.#idle.clear();
     const closePromises: Promise<void>[] = [];
     for (const entry of idleCopy) {
       clearTimeout(entry.timer);
@@ -305,13 +330,13 @@ export class RpcConnectionPool implements Disposable {
   }
 
   #evictIdle(conn: RpcClientTransportLike): void {
-    const idx = this.#idle.findIndex((e) => e.conn === conn);
-    if (idx === -1) return;
-    const [entry] = this.#idle.splice(idx, 1);
+    const entry = this.#idle.get(conn);
+    if (!entry) return;
+    this.#idle.delete(conn);
     clearTimeout(entry.timer);
 
     // Only close if we are above minConnections.
-    const total = this.#idle.length + this.#active.size;
+    const total = this.#idle.size + this.#active.size;
     if (total >= this.#minConnections) {
       this.#closeConnection(conn);
     } else {
@@ -319,7 +344,7 @@ export class RpcConnectionPool implements Disposable {
       const timer = setTimeout(() => {
         this.#evictIdle(conn);
       }, this.#idleTimeoutMs);
-      this.#idle.push({ conn, timer, lastUsedAt: entry.lastUsedAt });
+      this.#idle.set(conn, { conn, timer, lastUsedAt: entry.lastUsedAt });
     }
   }
 
@@ -335,7 +360,7 @@ export class RpcConnectionPool implements Disposable {
           const timer = setTimeout(() => {
             this.#evictIdle(conn);
           }, this.#idleTimeoutMs);
-          this.#idle.push({ conn, timer, lastUsedAt: Date.now() });
+          this.#idle.set(conn, { conn, timer, lastUsedAt: Date.now() });
         },
         () => {
           // Warm-up failures are silently ignored -- connections will be

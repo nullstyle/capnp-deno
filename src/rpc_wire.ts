@@ -1609,6 +1609,118 @@ export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   throw new ProtocolError(`unsupported return tag: ${tag}`);
 }
 
+/** String tag for a bootstrap RPC message in the discriminated union. */
+export type RpcMessageTagBootstrap = "bootstrap";
+/** String tag for a call RPC message in the discriminated union. */
+export type RpcMessageTagCall = "call";
+/** String tag for a return RPC message in the discriminated union. */
+export type RpcMessageTagReturn = "return";
+/** String tag for a finish RPC message in the discriminated union. */
+export type RpcMessageTagFinish = "finish";
+/** String tag for a release RPC message in the discriminated union. */
+export type RpcMessageTagRelease = "release";
+
+/**
+ * Discriminated union of all Cap'n Proto RPC message types.
+ *
+ * The `tag` field is a human-readable string discriminator that enables
+ * exhaustive type-narrowing in switch statements and pattern matching.
+ * The `data` field contains the fully decoded message payload.
+ */
+export type RpcMessage =
+  | { tag: RpcMessageTagBootstrap; data: RpcBootstrapRequest }
+  | { tag: RpcMessageTagCall; data: RpcCallRequest }
+  | { tag: RpcMessageTagReturn; data: RpcReturnMessage }
+  | { tag: RpcMessageTagFinish; data: RpcFinishRequest }
+  | { tag: RpcMessageTagRelease; data: RpcReleaseRequest };
+
+/**
+ * Handler interface for exhaustive RPC message dispatch.
+ *
+ * Each property is a callback that handles one variant of the
+ * {@link RpcMessage} discriminated union. The type parameter `T`
+ * is the return type of every handler, ensuring uniform results.
+ */
+export interface RpcMessageHandlers<T> {
+  /** Called when the message is a Bootstrap request. */
+  bootstrap(data: RpcBootstrapRequest): T;
+  /** Called when the message is a Call request. */
+  call(data: RpcCallRequest): T;
+  /** Called when the message is a Return message. */
+  return(data: RpcReturnMessage): T;
+  /** Called when the message is a Finish message. */
+  finish(data: RpcFinishRequest): T;
+  /** Called when the message is a Release message. */
+  release(data: RpcReleaseRequest): T;
+}
+
+/**
+ * Decodes a raw Cap'n Proto RPC frame into a type-safe discriminated union.
+ *
+ * Unlike {@link decodeRpcMessageTag} (which returns only the numeric tag),
+ * this function fully decodes the frame body and returns an {@link RpcMessage}
+ * whose `tag` field enables exhaustive type-narrowing.
+ *
+ * @param frame - The raw frame bytes.
+ * @returns A discriminated union with `tag` and `data` fields.
+ * @throws {ProtocolError} If the frame is malformed or has an unknown tag.
+ */
+export function decodeRpcMessage(frame: Uint8Array): RpcMessage {
+  const numericTag = decodeRpcMessageTag(frame);
+  switch (numericTag) {
+    case RPC_MESSAGE_TAG_BOOTSTRAP:
+      return { tag: "bootstrap", data: decodeBootstrapRequestFrame(frame) };
+    case RPC_MESSAGE_TAG_CALL:
+      return { tag: "call", data: decodeCallRequestFrame(frame) };
+    case RPC_MESSAGE_TAG_RETURN:
+      return { tag: "return", data: decodeReturnFrame(frame) };
+    case RPC_MESSAGE_TAG_FINISH:
+      return { tag: "finish", data: decodeFinishFrame(frame) };
+    case RPC_MESSAGE_TAG_RELEASE:
+      return { tag: "release", data: decodeReleaseFrame(frame) };
+    default:
+      throw new ProtocolError(`unknown rpc message tag: ${numericTag}`);
+  }
+}
+
+/**
+ * Dispatches a decoded {@link RpcMessage} to the appropriate handler in
+ * the provided {@link RpcMessageHandlers} object.
+ *
+ * This function performs exhaustive dispatch: every message variant is
+ * covered, and the TypeScript compiler will error if a new variant is
+ * added to {@link RpcMessage} without a corresponding handler.
+ *
+ * @param message - The decoded RPC message to dispatch.
+ * @param handlers - An object with one handler per message variant.
+ * @returns The value returned by the matched handler.
+ * @throws {ProtocolError} If the message tag is unrecognized (should be
+ *   unreachable if the message was produced by {@link decodeRpcMessage}).
+ */
+export function dispatchRpcMessage<T>(
+  message: RpcMessage,
+  handlers: RpcMessageHandlers<T>,
+): T {
+  switch (message.tag) {
+    case "bootstrap":
+      return handlers.bootstrap(message.data);
+    case "call":
+      return handlers.call(message.data);
+    case "return":
+      return handlers.return(message.data);
+    case "finish":
+      return handlers.finish(message.data);
+    case "release":
+      return handlers.release(message.data);
+    default: {
+      const _exhaustive: never = message;
+      throw new ProtocolError(
+        `unknown rpc message tag: ${(_exhaustive as RpcMessage).tag}`,
+      );
+    }
+  }
+}
+
 /**
  * Extracts the bootstrap capability index from a Return results message.
  *

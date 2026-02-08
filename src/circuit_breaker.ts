@@ -1,4 +1,5 @@
 import { TransportError } from "./errors.ts";
+import { assertPositiveFinite, assertPositiveInteger } from "./validation.ts";
 
 /**
  * The three states a circuit breaker can be in.
@@ -96,19 +97,8 @@ export class CircuitBreaker<T> {
     const maxConsecutiveFailures = options.maxConsecutiveFailures ?? 5;
     const cooldownMs = options.cooldownMs ?? 30_000;
 
-    if (
-      !Number.isInteger(maxConsecutiveFailures) ||
-      maxConsecutiveFailures < 1
-    ) {
-      throw new TransportError(
-        `maxConsecutiveFailures must be a positive integer, got ${maxConsecutiveFailures}`,
-      );
-    }
-    if (!Number.isFinite(cooldownMs) || cooldownMs <= 0) {
-      throw new TransportError(
-        `cooldownMs must be a positive finite number, got ${cooldownMs}`,
-      );
-    }
+    assertPositiveInteger(maxConsecutiveFailures, "maxConsecutiveFailures");
+    assertPositiveFinite(cooldownMs, "cooldownMs");
 
     this.#maxConsecutiveFailures = maxConsecutiveFailures;
     this.#cooldownMs = cooldownMs;

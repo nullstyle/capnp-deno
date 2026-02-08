@@ -1,4 +1,9 @@
 import { normalizeTransportError, TransportError } from "./errors.ts";
+import {
+  assertNonNegativeFinite,
+  assertNonNegativeInteger,
+  assertPositiveFinite,
+} from "./validation.ts";
 
 /**
  * Context passed to a {@link ReconnectPolicy} when deciding whether to retry
@@ -88,30 +93,6 @@ export interface ConnectWithReconnectOptions {
    * Defaults to `Date.now`. Useful for testing.
    */
   now?: () => number;
-}
-
-function assertNonNegativeInteger(value: number, name: string): void {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new TransportError(
-      `${name} must be a non-negative integer, got ${value}`,
-    );
-  }
-}
-
-function assertNonNegativeFinite(value: number, name: string): void {
-  if (!Number.isFinite(value) || value < 0) {
-    throw new TransportError(
-      `${name} must be a non-negative finite number, got ${value}`,
-    );
-  }
-}
-
-function assertPositiveFinite(value: number, name: string): void {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new TransportError(
-      `${name} must be a positive finite number, got ${value}`,
-    );
-  }
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

@@ -41,9 +41,11 @@ export {
 export { type RpcTransport } from "./src/transport.ts";
 export { WasmPeer } from "./src/wasm_peer.ts";
 export {
+  type ClientMiddlewareContext,
   InMemoryRpcHarnessTransport,
   type RpcClientCallOptions,
   type RpcClientCallResult,
+  type RpcClientMiddleware,
   type RpcFinishOptions,
   RpcPipeline,
   type RpcSessionHarnessTransport,
@@ -63,7 +65,9 @@ export {
   decodeFinishFrame,
   decodeReleaseFrame,
   decodeReturnFrame,
+  decodeRpcMessage,
   decodeRpcMessageTag,
+  dispatchRpcMessage,
   EMPTY_STRUCT_MESSAGE,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
@@ -87,6 +91,13 @@ export {
   type RpcCallTarget,
   type RpcCapDescriptor,
   type RpcFinishRequest,
+  type RpcMessage,
+  type RpcMessageHandlers,
+  type RpcMessageTagBootstrap,
+  type RpcMessageTagCall,
+  type RpcMessageTagFinish,
+  type RpcMessageTagRelease,
+  type RpcMessageTagReturn,
   type RpcPromisedAnswerOp,
   type RpcPromisedAnswerTarget,
   type RpcReleaseRequest,
@@ -183,3 +194,9 @@ export {
   type CircuitBreakerOptions,
   type CircuitBreakerState,
 } from "./src/circuit_breaker.ts";
+export {
+  assertNonNegativeFinite,
+  assertNonNegativeInteger,
+  assertPositiveFinite,
+  assertPositiveInteger,
+} from "./src/validation.ts";

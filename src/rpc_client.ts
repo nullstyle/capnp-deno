@@ -21,6 +21,96 @@ import {
 } from "./rpc_wire.ts";
 
 /**
+ * Context object passed to client middleware hooks.
+ *
+ * Contains metadata about the current outbound call and a mutable `state` map
+ * that middleware can use to pass data between hooks or to downstream middleware.
+ */
+export interface ClientMiddlewareContext {
+  /** The question ID allocated for this call. */
+  readonly questionId: number;
+  /** The Cap'n Proto interface ID for this call. */
+  readonly interfaceId: bigint;
+  /** The method ordinal within the interface. */
+  readonly methodId: number;
+  /**
+   * The target capability ID. For imported-cap targets this is the
+   * capability index; for promised-answer targets this is the
+   * question ID of the promise being pipelined.
+   */
+  readonly targetCapId: number;
+  /**
+   * Mutable key-value map that middleware can use to pass data between hooks
+   * and to downstream middleware in the chain.
+   */
+  readonly state: Map<string, unknown>;
+}
+
+/**
+ * Interceptor that can inspect and transform client-side RPC calls at
+ * various lifecycle stages. Implement one or more hooks to add cross-cutting
+ * behavior such as logging, tracing, metrics, or request rewriting.
+ *
+ * All hooks are optional. Both sync and async returns are supported.
+ *
+ * Middleware hooks:
+ * - `onCall`: Called before a call frame is sent to the server.
+ * - `onResponse`: Called when a successful response is received.
+ * - `onError`: Called when a call fails with an error or server exception.
+ *
+ * @example
+ * ```ts
+ * const logger: RpcClientMiddleware = {
+ *   onCall(ctx) {
+ *     console.log(`call method=${ctx.methodId} iface=${ctx.interfaceId}`);
+ *   },
+ *   onResponse(result, ctx) {
+ *     console.log(`response for question=${ctx.questionId}`);
+ *     return result;
+ *   },
+ * };
+ * const client = new SessionRpcClientTransport(session, transport, {
+ *   interfaceId: 0x1234n,
+ *   middleware: [logger],
+ * });
+ * ```
+ */
+export interface RpcClientMiddleware {
+  /**
+   * Called before a call frame is sent to the server.
+   *
+   * @param context - The call context with question ID, interface, method, and target info.
+   */
+  onCall?: (
+    context: ClientMiddlewareContext,
+  ) => void | Promise<void>;
+
+  /**
+   * Called when a successful response is received from the server.
+   *
+   * @param result - The raw content bytes of the response.
+   * @param context - The call context.
+   * @returns The (possibly transformed) response bytes, or `null` to keep the
+   *   original. Both sync and async returns are accepted.
+   */
+  onResponse?: (
+    result: Uint8Array,
+    context: ClientMiddlewareContext,
+  ) => Uint8Array | null | Promise<Uint8Array | null>;
+
+  /**
+   * Called when a call fails with an error or the server returns an exception.
+   *
+   * @param error - The error that occurred.
+   * @param context - The call context.
+   */
+  onError?: (
+    error: Error,
+    context: ClientMiddlewareContext,
+  ) => void | Promise<void>;
+}
+
+/**
  * Options for the Cap'n Proto RPC `finish` message, which signals to the server
  * that the client is done with a particular question.
  */
@@ -175,6 +265,13 @@ export interface SessionRpcClientTransportOptions {
    * wait indefinitely for a response.
    */
   defaultTimeoutMs?: number;
+  /**
+   * Optional array of middleware interceptors. Middleware hooks are executed
+   * in array order for `onCall`, and in array order for `onResponse` and
+   * `onError`. All hooks run for every call/response/error even if an
+   * earlier middleware transforms the response.
+   */
+  middleware?: RpcClientMiddleware[];
 }
 
 /**
@@ -319,6 +416,7 @@ export class SessionRpcClientTransport {
   #nextQuestionId: number;
   #autoStart: boolean;
   #defaultTimeoutMs: number | undefined;
+  #middleware: RpcClientMiddleware[];
   #opChain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -334,6 +432,7 @@ export class SessionRpcClientTransport {
     this.#nextQuestionId = options.nextQuestionId ?? 1;
     this.#autoStart = options.autoStart ?? true;
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
+    this.#middleware = options.middleware ?? [];
   }
 
   /**
@@ -416,6 +515,15 @@ export class SessionRpcClientTransport {
         tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
         importedCap: capability.capabilityIndex,
       };
+
+      const mwCtx = this.#middleware.length > 0
+        ? this.#buildMiddlewareContext(questionId, methodOrdinal, target)
+        : undefined;
+
+      if (mwCtx) {
+        await this.#runOnCall(mwCtx);
+      }
+
       const frame = encodeCallRequestFrame({
         questionId,
         interfaceId: this.#interfaceId,
@@ -424,18 +532,38 @@ export class SessionRpcClientTransport {
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
       });
-      const message = await this.#request(questionId, frame, options);
+
+      let message;
+      try {
+        message = await this.#request(questionId, frame, options);
+      } catch (error) {
+        if (mwCtx) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          await this.#runOnError(err, mwCtx);
+        }
+        throw error;
+      }
+
       if (message.kind === "exception") {
-        throw new ProtocolError(`rpc call failed: ${message.reason}`);
+        const err = new ProtocolError(`rpc call failed: ${message.reason}`);
+        if (mwCtx) {
+          await this.#runOnError(err, mwCtx);
+        }
+        throw err;
       }
 
       if ((options.autoFinish ?? true) && !message.noFinishNeeded) {
         await this.#sendFinish(questionId, options.finish);
       }
 
+      let contentBytes = new Uint8Array(message.contentBytes);
+      if (mwCtx) {
+        contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
+      }
+
       return {
         answerId: message.answerId,
-        contentBytes: new Uint8Array(message.contentBytes),
+        contentBytes,
         capTable: message.capTable.map((entry) => ({
           tag: entry.tag,
           id: entry.id,
@@ -470,6 +598,15 @@ export class SessionRpcClientTransport {
         tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
         importedCap: capability.capabilityIndex,
       };
+
+      const mwCtx = this.#middleware.length > 0
+        ? this.#buildMiddlewareContext(questionId, methodOrdinal, target)
+        : undefined;
+
+      if (mwCtx) {
+        await this.#runOnCall(mwCtx);
+      }
+
       const frame = encodeCallRequestFrame({
         questionId,
         interfaceId: this.#interfaceId,
@@ -486,8 +623,9 @@ export class SessionRpcClientTransport {
 
       const pipeline = new RpcPipeline(questionId);
 
-      // Create a promise that will collect the response asynchronously.
-      const result = this.#collectResponse(questionId, options);
+      // Create a promise that will collect the response asynchronously,
+      // running middleware hooks on the result.
+      const result = this.#collectResponse(questionId, options, mwCtx);
 
       return { pipeline, result };
     });
@@ -523,6 +661,55 @@ export class SessionRpcClientTransport {
     await this.#enqueue(async () => {
       await this.#sendRelease(capability.capabilityIndex, referenceCount);
     });
+  }
+
+  #buildMiddlewareContext(
+    questionId: number,
+    methodId: number,
+    target: RpcCallTarget,
+  ): ClientMiddlewareContext {
+    const targetCapId = target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP
+      ? target.importedCap
+      : target.promisedAnswer.questionId;
+    return {
+      questionId,
+      interfaceId: this.#interfaceId,
+      methodId,
+      targetCapId,
+      state: new Map(),
+    };
+  }
+
+  async #runOnCall(ctx: ClientMiddlewareContext): Promise<void> {
+    for (const mw of this.#middleware) {
+      if (mw.onCall) {
+        await mw.onCall(ctx);
+      }
+    }
+  }
+
+  async #runOnResponse(
+    contentBytes: Uint8Array,
+    ctx: ClientMiddlewareContext,
+  ): Promise<Uint8Array<ArrayBuffer>> {
+    let result: Uint8Array<ArrayBuffer> = new Uint8Array(contentBytes);
+    for (const mw of this.#middleware) {
+      if (mw.onResponse) {
+        const transformed = await mw.onResponse(result, ctx);
+        if (transformed !== null) {
+          result = new Uint8Array(transformed);
+        }
+      }
+    }
+    return result;
+  }
+
+  async #runOnError(error: Error, ctx: ClientMiddlewareContext): Promise<void> {
+    for (const mw of this.#middleware) {
+      if (mw.onError) {
+        await mw.onError(error, ctx);
+      }
+    }
   }
 
   #allocQuestionId(): number {
@@ -577,6 +764,7 @@ export class SessionRpcClientTransport {
   async #collectResponse(
     questionId: number,
     options: RpcClientCallOptions,
+    mwCtx?: ClientMiddlewareContext,
   ): Promise<RpcClientCallResult> {
     const effectiveTimeout = options.timeoutMs ?? this.#defaultTimeoutMs;
     const started = Date.now();
@@ -584,10 +772,19 @@ export class SessionRpcClientTransport {
       const remaining = effectiveTimeout === undefined
         ? undefined
         : Math.max(0, effectiveTimeout - (Date.now() - started));
-      const outbound = await this.transport.nextOutboundFrame({
-        signal: options.signal,
-        timeoutMs: remaining,
-      });
+      let outbound;
+      try {
+        outbound = await this.transport.nextOutboundFrame({
+          signal: options.signal,
+          timeoutMs: remaining,
+        });
+      } catch (error) {
+        if (mwCtx) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          await this.#runOnError(err, mwCtx);
+        }
+        throw error;
+      }
       let decoded;
       try {
         decoded = decodeReturnFrame(outbound);
@@ -598,11 +795,21 @@ export class SessionRpcClientTransport {
         continue;
       }
       if (decoded.kind === "exception") {
-        throw new ProtocolError(`rpc call failed: ${decoded.reason}`);
+        const err = new ProtocolError(`rpc call failed: ${decoded.reason}`);
+        if (mwCtx) {
+          await this.#runOnError(err, mwCtx);
+        }
+        throw err;
       }
+
+      let contentBytes = new Uint8Array(decoded.contentBytes);
+      if (mwCtx) {
+        contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
+      }
+
       return {
         answerId: decoded.answerId,
-        contentBytes: new Uint8Array(decoded.contentBytes),
+        contentBytes,
         capTable: decoded.capTable.map((entry) => ({
           tag: entry.tag,
           id: entry.id,
