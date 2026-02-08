@@ -105,6 +105,12 @@ export class WasmSerde {
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
 
+  // Cached views over WASM linear memory. Invalidated when the underlying
+  // ArrayBuffer detaches (which happens on WebAssembly.Memory.grow()).
+  #cachedBuffer: ArrayBuffer | SharedArrayBuffer | null = null;
+  #cachedBytes: Uint8Array | null = null;
+  #cachedView: DataView | null = null;
+
   /** Persistent 8-byte scratch buffer in WASM memory for out_ptr/out_len pairs. */
   private scratchPairPtr: number;
 
@@ -477,10 +483,22 @@ export class WasmSerde {
   }
 
   private bytes(): Uint8Array {
-    return new Uint8Array(this.abi.exports.memory.buffer);
+    const buf = this.abi.exports.memory.buffer;
+    if (this.#cachedBuffer !== buf || this.#cachedBytes === null) {
+      this.#cachedBuffer = buf;
+      this.#cachedBytes = new Uint8Array(buf);
+      this.#cachedView = new DataView(buf);
+    }
+    return this.#cachedBytes;
   }
 
   private view(): DataView {
-    return new DataView(this.abi.exports.memory.buffer);
+    const buf = this.abi.exports.memory.buffer;
+    if (this.#cachedBuffer !== buf || this.#cachedView === null) {
+      this.#cachedBuffer = buf;
+      this.#cachedBytes = new Uint8Array(buf);
+      this.#cachedView = new DataView(buf);
+    }
+    return this.#cachedView;
   }
 }

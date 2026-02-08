@@ -13,6 +13,21 @@ export interface RpcConnectionPoolOptions {
   idleTimeoutMs?: number;
   /** Time in milliseconds to wait for a connection when the pool is exhausted. Defaults to 5000. */
   acquireTimeoutMs?: number;
+  /**
+   * Optional callback to validate that an idle connection is still healthy
+   * before reusing it. Return `true` if the connection is healthy, `false`
+   * otherwise. May be synchronous or asynchronous.
+   */
+  healthCheck?: (
+    conn: RpcClientTransportLike,
+  ) => boolean | Promise<boolean>;
+  /**
+   * Time in milliseconds a connection must have been idle before a health
+   * check is performed on acquire. Connections idle for less than this
+   * duration are assumed healthy and returned immediately. Defaults to 10000.
+   * Only meaningful when {@link healthCheck} is configured.
+   */
+  healthCheckIdleMs?: number;
 }
 
 /**
@@ -32,6 +47,8 @@ export interface RpcConnectionPoolStats {
 interface IdleEntry {
   conn: RpcClientTransportLike;
   timer: ReturnType<typeof setTimeout>;
+  /** Timestamp (ms since epoch) when the connection was placed into the idle pool. */
+  lastUsedAt: number;
 }
 
 interface PendingAcquire {
@@ -74,6 +91,10 @@ export class RpcConnectionPool implements Disposable {
   readonly #maxConnections: number;
   readonly #idleTimeoutMs: number;
   readonly #acquireTimeoutMs: number;
+  readonly #healthCheck?: (
+    conn: RpcClientTransportLike,
+  ) => boolean | Promise<boolean>;
+  readonly #healthCheckIdleMs: number;
 
   #idle: IdleEntry[] = [];
   #active: Set<RpcClientTransportLike> = new Set();
@@ -89,6 +110,8 @@ export class RpcConnectionPool implements Disposable {
     this.#maxConnections = options.maxConnections ?? 8;
     this.#idleTimeoutMs = options.idleTimeoutMs ?? 30000;
     this.#acquireTimeoutMs = options.acquireTimeoutMs ?? 5000;
+    this.#healthCheck = options.healthCheck;
+    this.#healthCheckIdleMs = options.healthCheckIdleMs ?? 10000;
 
     if (this.#minConnections > this.#maxConnections) {
       throw new SessionError(
@@ -133,6 +156,27 @@ export class RpcConnectionPool implements Disposable {
     while (this.#idle.length > 0) {
       const entry = this.#idle.shift()!;
       clearTimeout(entry.timer);
+
+      // If a health check is configured and the connection has been idle
+      // longer than the threshold, validate it before handing it out.
+      if (this.#healthCheck) {
+        const idleDuration = Date.now() - entry.lastUsedAt;
+        if (idleDuration >= this.#healthCheckIdleMs) {
+          let healthy: boolean;
+          try {
+            healthy = await this.#healthCheck(entry.conn);
+          } catch {
+            healthy = false;
+          }
+
+          if (!healthy) {
+            // Discard the unhealthy connection and try the next idle one.
+            this.#closeConnection(entry.conn);
+            continue;
+          }
+        }
+      }
+
       this.#active.add(entry.conn);
       return entry.conn;
     }
@@ -193,7 +237,7 @@ export class RpcConnectionPool implements Disposable {
     const timer = setTimeout(() => {
       this.#evictIdle(conn);
     }, this.#idleTimeoutMs);
-    this.#idle.push({ conn, timer });
+    this.#idle.push({ conn, timer, lastUsedAt: Date.now() });
   }
 
   /**
@@ -275,7 +319,7 @@ export class RpcConnectionPool implements Disposable {
       const timer = setTimeout(() => {
         this.#evictIdle(conn);
       }, this.#idleTimeoutMs);
-      this.#idle.push({ conn, timer });
+      this.#idle.push({ conn, timer, lastUsedAt: entry.lastUsedAt });
     }
   }
 
@@ -291,7 +335,7 @@ export class RpcConnectionPool implements Disposable {
           const timer = setTimeout(() => {
             this.#evictIdle(conn);
           }, this.#idleTimeoutMs);
-          this.#idle.push({ conn, timer });
+          this.#idle.push({ conn, timer, lastUsedAt: Date.now() });
         },
         () => {
           // Warm-up failures are silently ignored -- connections will be

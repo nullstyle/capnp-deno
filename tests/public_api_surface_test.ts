@@ -5,6 +5,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "AbiError",
   "CapnpError",
   "CapnpFrameFramer",
+  "CircuitBreaker",
   "EMPTY_STRUCT_MESSAGE",
   "InMemoryRpcHarnessTransport",
   "InstantiationError",

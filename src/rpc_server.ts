@@ -28,6 +28,133 @@ export interface CapabilityPointer {
 }
 
 /**
+ * Context object passed to server middleware hooks.
+ *
+ * Contains metadata about the current dispatch and a mutable `state` map
+ * that middleware can use to pass data to later hooks or downstream middleware.
+ */
+export interface ServerMiddlewareContext {
+  /** The question ID of the incoming call. */
+  readonly questionId: number;
+  /** The Cap'n Proto interface ID. */
+  readonly interfaceId: bigint;
+  /** The method ordinal within the interface. */
+  readonly methodOrdinal: number;
+  /** The capability index being called. */
+  readonly capabilityIndex: number;
+  /**
+   * Mutable key-value map that middleware can use to pass data between hooks
+   * and to downstream middleware in the chain.
+   */
+  readonly state: Map<string, unknown>;
+}
+
+/**
+ * Result of a server middleware `onIncomingFrame` hook.
+ * Return the (possibly transformed) frame to continue processing,
+ * or `null` to silently drop the frame.
+ */
+export type ServerMiddlewareFrameResult = Uint8Array | null;
+
+/**
+ * Result of a server middleware `onDispatch` hook.
+ * Return the (possibly transformed) params to continue processing,
+ * or `null` to skip further dispatch (returning an empty result).
+ */
+export type ServerMiddlewareDispatchResult = Uint8Array | null;
+
+/**
+ * Interceptor that can inspect and transform server-side RPC dispatch at
+ * various lifecycle stages. Implement one or more hooks to add cross-cutting
+ * behavior such as logging, authentication, metrics, or rate limiting.
+ *
+ * All hooks are optional. Both sync and async returns are supported.
+ *
+ * Middleware hooks:
+ * - `onIncomingFrame`: Called for every inbound frame before dispatch routing.
+ * - `onDispatch`: Called after the target capability is resolved but before
+ *   the dispatch handler runs.
+ * - `onResponse`: Called after the dispatch handler returns successfully.
+ * - `onError`: Called when a dispatch handler throws or an error occurs
+ *   during dispatch processing.
+ *
+ * @example
+ * ```ts
+ * const logger: RpcServerMiddleware = {
+ *   onDispatch(method, params, ctx) {
+ *     console.log(`dispatch method=${method} iface=${ctx.interfaceId}`);
+ *     return params;
+ *   },
+ *   onResponse(result, ctx) {
+ *     console.log(`response for question=${ctx.questionId}`);
+ *     return result;
+ *   },
+ * };
+ * const bridge = new RpcServerBridge({ middleware: [logger] });
+ * ```
+ */
+export interface RpcServerMiddleware {
+  /**
+   * Called for every inbound frame before dispatch routing.
+   *
+   * @param frame - The raw inbound frame bytes.
+   * @param context - Partial context (only `state` is available at this stage).
+   * @returns The frame to continue processing, or `null` to drop it.
+   */
+  onIncomingFrame?: (
+    frame: Uint8Array,
+    context: Pick<ServerMiddlewareContext, "state">,
+  ) =>
+    | ServerMiddlewareFrameResult
+    | Promise<ServerMiddlewareFrameResult>;
+
+  /**
+   * Called after the target capability is resolved, before the dispatch
+   * handler runs.
+   *
+   * @param method - The method ordinal being called.
+   * @param params - The serialized parameter bytes.
+   * @param context - Full dispatch context.
+   * @returns The params to pass to the handler, or `null` to skip dispatch.
+   */
+  onDispatch?: (
+    method: number,
+    params: Uint8Array,
+    context: ServerMiddlewareContext,
+  ) =>
+    | ServerMiddlewareDispatchResult
+    | Promise<ServerMiddlewareDispatchResult>;
+
+  /**
+   * Called after the dispatch handler returns successfully.
+   *
+   * @param result - The dispatch outcome.
+   * @param context - Full dispatch context.
+   * @returns The (possibly transformed) result to send back.
+   */
+  onResponse?: (
+    result: RpcCallResponse,
+    context: ServerMiddlewareContext,
+  ) => RpcCallResponse | Promise<RpcCallResponse>;
+
+  /**
+   * Called when a dispatch handler throws or an error occurs during
+   * dispatch processing.
+   *
+   * @param error - The error that occurred.
+   * @param context - Full dispatch context (may be partial if the error
+   *   occurred before full context was available).
+   * @returns void -- the error is still propagated after all middleware runs.
+   */
+  onError?: (
+    error: unknown,
+    context:
+      & Partial<ServerMiddlewareContext>
+      & Pick<ServerMiddlewareContext, "state">,
+  ) => void | Promise<void>;
+}
+
+/**
  * Context provided to server dispatch handlers for each incoming RPC call.
  *
  * Contains the full call metadata including target, capability, method,
@@ -112,6 +239,13 @@ export interface RpcServerBridgeOptions {
    * Set to a positive finite number to enable automatic eviction.
    */
   answerEvictionTimeoutMs?: number;
+  /**
+   * Optional array of server-side middleware interceptors. Middleware
+   * hooks are executed in array order for `onIncomingFrame`, `onDispatch`,
+   * and `onError`. For `onResponse`, middleware is executed in reverse
+   * order (innermost first, outermost last).
+   */
+  middleware?: RpcServerMiddleware[];
 }
 
 /**
@@ -274,6 +408,7 @@ export class RpcServerBridge {
   #answerTable = new Map<number, AnswerTableEntry>();
   #maxAnswerTableSize: number;
   #answerEvictionTimeoutMs: number;
+  #middleware: readonly RpcServerMiddleware[];
 
   constructor(options: RpcServerBridgeOptions = {}) {
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
@@ -281,6 +416,7 @@ export class RpcServerBridge {
     this.#onFinish = options.onFinish;
     this.#maxAnswerTableSize = options.maxAnswerTableSize ?? 4096;
     this.#answerEvictionTimeoutMs = options.answerEvictionTimeoutMs ?? Infinity;
+    this.#middleware = options.middleware ? [...options.middleware] : [];
   }
 
   exportCapability(
@@ -367,16 +503,29 @@ export class RpcServerBridge {
   }
 
   async handleFrame(frame: Uint8Array): Promise<Uint8Array | null> {
-    const tag = decodeRpcMessageTag(frame);
+    // Run onIncomingFrame middleware chain.
+    let currentFrame: Uint8Array | null = frame;
+    const middlewareState = new Map<string, unknown>();
+    for (const mw of this.#middleware) {
+      if (currentFrame === null) break;
+      if (mw.onIncomingFrame) {
+        currentFrame = await mw.onIncomingFrame(currentFrame, {
+          state: middlewareState,
+        });
+      }
+    }
+    if (currentFrame === null) return null;
+
+    const tag = decodeRpcMessageTag(currentFrame);
 
     if (tag === RPC_MESSAGE_TAG_RELEASE) {
-      const release = decodeReleaseFrame(frame);
+      const release = decodeReleaseFrame(currentFrame);
       this.releaseCapability(release.id, release.referenceCount);
       return null;
     }
 
     if (tag === RPC_MESSAGE_TAG_FINISH) {
-      const finish = decodeFinishFrame(frame);
+      const finish = decodeFinishFrame(currentFrame);
       // Clean up the answer table entry for this question.
       const entry = this.#answerTable.get(finish.questionId);
       if (entry?.evictionTimer !== undefined) {
@@ -395,7 +544,10 @@ export class RpcServerBridge {
       );
     }
 
-    return await this.#handleCall(decodeCallRequestFrame(frame));
+    return await this.#handleCall(
+      decodeCallRequestFrame(currentFrame),
+      middlewareState,
+    );
   }
 
   async pumpWasmHostCalls(
@@ -424,7 +576,10 @@ export class RpcServerBridge {
     return handled;
   }
 
-  async #handleCall(call: RpcCallRequest): Promise<Uint8Array> {
+  async #handleCall(
+    call: RpcCallRequest,
+    middlewareState?: Map<string, unknown>,
+  ): Promise<Uint8Array> {
     // Enforce answer table size limit to prevent unbounded growth.
     if (
       this.#maxAnswerTableSize > 0 &&
@@ -449,7 +604,10 @@ export class RpcServerBridge {
     };
     this.#answerTable.set(call.questionId, entry);
 
-    const outcome = await this.#dispatchCall(call);
+    const outcome = await this.#dispatchCall(
+      call,
+      middlewareState ?? new Map<string, unknown>(),
+    );
 
     // Store the resolved outcome and resolve the promise.
     (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
@@ -541,7 +699,10 @@ export class RpcServerBridge {
       return;
     }
 
-    const outcome = await this.#dispatchCall(call);
+    const outcome = await this.#dispatchCall(
+      call,
+      new Map<string, unknown>(),
+    );
     if (outcome.kind === "exception") {
       wasmHost.abi.respondHostCallException(
         wasmHost.handle,
@@ -594,10 +755,13 @@ export class RpcServerBridge {
     );
   }
 
-  async #dispatchCall(call: RpcCallRequest): Promise<RpcDispatchOutcome> {
+  async #dispatchCall(
+    call: RpcCallRequest,
+    middlewareState: Map<string, unknown>,
+  ): Promise<RpcDispatchOutcome> {
     // Handle promisedAnswer targets (Level 2 RPC / promise pipelining).
     if (call.target.tag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
-      return await this.#dispatchPipelinedCall(call);
+      return await this.#dispatchPipelinedCall(call, middlewareState);
     }
 
     if (call.target.tag !== RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
@@ -610,7 +774,11 @@ export class RpcServerBridge {
     }
 
     const capabilityIndex = call.target.importedCap;
-    return await this.#dispatchToCapability(capabilityIndex, call);
+    return await this.#dispatchToCapability(
+      capabilityIndex,
+      call,
+      middlewareState,
+    );
   }
 
   /**
@@ -621,6 +789,7 @@ export class RpcServerBridge {
    */
   async #dispatchPipelinedCall(
     call: RpcCallRequest,
+    middlewareState: Map<string, unknown>,
   ): Promise<RpcDispatchOutcome> {
     if (call.target.tag !== RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
       return {
@@ -667,7 +836,11 @@ export class RpcServerBridge {
       }
 
       // Dispatch to the resolved capability.
-      return await this.#dispatchToCapability(capabilityIndex, call);
+      return await this.#dispatchToCapability(
+        capabilityIndex,
+        call,
+        middlewareState,
+      );
     } finally {
       answerEntry.pipelineRefCount -= 1;
     }
@@ -680,6 +853,7 @@ export class RpcServerBridge {
   async #dispatchToCapability(
     capabilityIndex: number,
     call: RpcCallRequest,
+    middlewareState: Map<string, unknown>,
   ): Promise<RpcDispatchOutcome> {
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
@@ -697,6 +871,14 @@ export class RpcServerBridge {
       };
     }
 
+    const mwCtx: ServerMiddlewareContext = {
+      questionId: call.questionId,
+      interfaceId: call.interfaceId,
+      methodOrdinal: call.methodId,
+      capabilityIndex,
+      state: middlewareState,
+    };
+
     const ctx: RpcCallContext = {
       target: call.target,
       capability: { capabilityIndex },
@@ -710,15 +892,55 @@ export class RpcServerBridge {
     };
 
     try {
-      const response = normalizeCallResponse(
+      // Run onDispatch middleware chain.
+      let currentParams: Uint8Array | null = call.paramsContent;
+      for (const mw of this.#middleware) {
+        if (currentParams === null) break;
+        if (mw.onDispatch) {
+          currentParams = await mw.onDispatch(
+            call.methodId,
+            currentParams,
+            mwCtx,
+          );
+        }
+      }
+
+      if (currentParams === null) {
+        // Middleware dropped the dispatch; return an empty result.
+        const emptyResponse: RpcCallResponse = {};
+        return { kind: "results", response: emptyResponse };
+      }
+
+      let response = normalizeCallResponse(
         await registered.dispatch.dispatch(
           call.methodId,
-          call.paramsContent,
+          currentParams,
           ctx,
         ),
       );
+
+      // Run onResponse middleware chain (reverse order).
+      for (let i = this.#middleware.length - 1; i >= 0; i--) {
+        const mw = this.#middleware[i];
+        if (mw.onResponse) {
+          response = await mw.onResponse(response, mwCtx);
+        }
+      }
+
       return { kind: "results", response };
     } catch (error) {
+      // Run onError middleware chain.
+      for (const mw of this.#middleware) {
+        if (mw.onError) {
+          try {
+            await mw.onError(error, mwCtx);
+          } catch {
+            // Errors from onError middleware are silently swallowed to
+            // avoid masking the original dispatch error.
+          }
+        }
+      }
+
       if (this.#onUnhandledError) {
         await this.#onUnhandledError(error, call);
       }

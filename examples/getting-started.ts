@@ -10,6 +10,8 @@
  * 5. Using the server runtime for host-call dispatching
  * 6. Error handling
  * 7. Cleanup
+ * 8. Middleware (logging, frame size limits, metrics)
+ * 9. Connection pool for managing multiple connections
  *
  * Prerequisites:
  * - A compiled Cap'n Proto WASM module (`.wasm` file)
@@ -23,10 +25,17 @@ import {
   type CapnpError,
   // Reconnection
   createExponentialBackoffReconnectPolicy,
+  // Middleware
+  createFrameSizeLimitMiddleware,
+  createLoggingMiddleware,
+  createRpcMetricsMiddleware,
   // Client-side RPC
   InMemoryRpcHarnessTransport,
   instantiatePeer,
+  MiddlewareTransport,
   ReconnectingRpcClientTransport,
+  // Connection pool
+  RpcConnectionPool,
   // Server-side RPC
   RpcServerBridge,
   type RpcServerDispatch,
@@ -37,6 +46,7 @@ import {
   TransportError,
   // Serialization
   WasmSerde,
+  withConnection,
   // Transports (for reference)
   // TcpTransport,          // TCP transport for Deno
   // WebSocketTransport,    // WebSocket transport for browsers and Deno
@@ -322,6 +332,120 @@ function errorHandlingExample() {
 }
 
 // ---------------------------------------------------------------------------
+// 8. Middleware: logging, frame size limits, and metrics
+// ---------------------------------------------------------------------------
+//
+// The MiddlewareTransport wraps any RpcTransport with a stack of
+// interceptors that can observe, transform, or reject frames flowing
+// through the transport. capnp-deno ships with several built-in
+// middleware factories.
+
+function middlewareExample() {
+  // Create the underlying transport (using in-memory for this example)
+  const inner = new InMemoryRpcHarnessTransport();
+
+  // Set up metrics collection with periodic snapshots every 50 frames
+  const metrics = createRpcMetricsMiddleware({
+    snapshotIntervalFrames: 50,
+    onSnapshot: (snap) => {
+      console.log(
+        `[metrics snapshot] sent=${snap.totalFramesSent} recv=${snap.totalFramesReceived}`,
+      );
+    },
+  });
+
+  // Wrap the transport with logging, a 1 MB frame size limit, and metrics
+  const transport = new MiddlewareTransport(inner, [
+    createLoggingMiddleware({ prefix: "[my-service]" }),
+    createFrameSizeLimitMiddleware(1024 * 1024), // 1 MB max
+    metrics.middleware,
+  ]);
+
+  // The wrapped transport is a drop-in replacement for any RpcTransport:
+  //   const session = new RpcSession(peer, transport);
+
+  // Query metrics at any time
+  const snap = metrics.snapshot();
+  console.log(`Frames sent so far: ${snap.totalFramesSent}`);
+  console.log(`Frames received so far: ${snap.totalFramesReceived}`);
+  console.log(`Bytes sent: ${snap.totalBytesSent}`);
+  console.log(`Bytes received: ${snap.totalBytesReceived}`);
+  console.log(
+    `Message breakdown: bootstrap=${snap.framesByType.bootstrap} ` +
+      `call=${snap.framesByType.call} return=${snap.framesByType.return}`,
+  );
+
+  // Reset counters (e.g. after exporting to a monitoring system)
+  metrics.reset();
+
+  // The transport reference is needed so TypeScript does not complain
+  // about unused variables in this illustrative example.
+  console.log(`Middleware stack size: ${transport.middleware.length}`);
+}
+
+// ---------------------------------------------------------------------------
+// 9. Connection pool for managing multiple RPC connections
+// ---------------------------------------------------------------------------
+//
+// RpcConnectionPool manages a set of lazily-created connections, reusing
+// idle ones and closing connections that sit idle too long. Use it when you
+// need to multiplex many concurrent RPC calls across a bounded number of
+// underlying transports.
+
+async function connectionPoolExample() {
+  // Factory that creates a new client transport on demand.
+  // In production this would connect over TCP/WebSocket/etc.
+  function createTransport(): Promise<
+    import("../mod.ts").RpcClientTransportLike
+  > {
+    const transport = new InMemoryRpcHarnessTransport();
+    // Return anything satisfying RpcClientTransportLike
+    return Promise.resolve(
+      transport as unknown as import("../mod.ts").RpcClientTransportLike,
+    );
+  }
+
+  // Create a pool with up to 4 connections, 10 s idle timeout
+  const pool = new RpcConnectionPool(createTransport, {
+    maxConnections: 4,
+    idleTimeoutMs: 10_000,
+    acquireTimeoutMs: 3_000,
+  });
+
+  // Option A: manual acquire / release
+  const conn = await pool.acquire();
+  try {
+    // ... use conn for RPC calls ...
+    console.log(
+      `Acquired connection, pool stats: ${JSON.stringify(pool.stats)}`,
+    );
+  } finally {
+    pool.release(conn);
+  }
+
+  // Option B: use the withConnection helper for automatic release
+  await withConnection(pool, async (c) => {
+    // The connection is automatically released when this function returns
+    // or throws, so you do not need a try/finally block.
+    console.log(
+      `Using connection via withConnection, active=${pool.stats.active}`,
+    );
+    // Simulate some work
+    await Promise.resolve(c);
+  });
+
+  // Inspect pool health at any time
+  const stats = pool.stats;
+  console.log(
+    `Pool: total=${stats.total} idle=${stats.idle} active=${stats.active} pending=${stats.pending}`,
+  );
+
+  // Clean up -- closes all idle and active connections
+  await pool.close();
+  console.log("Connection pool closed.");
+}
+
+// ---------------------------------------------------------------------------
 // Run examples
 // ---------------------------------------------------------------------------
 
@@ -332,6 +456,12 @@ errorHandlingExample();
 
 console.log("\n--- Reconnecting Client Setup ---");
 reconnectingClientExample();
+
+console.log("\n--- Middleware ---");
+middlewareExample();
+
+console.log("\n--- Connection Pool ---");
+await connectionPoolExample();
 
 // The following examples require a WASM module to be present.
 // Uncomment to run them with a real WASM module:

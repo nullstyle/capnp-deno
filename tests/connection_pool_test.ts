@@ -620,3 +620,351 @@ Deno.test("RpcConnectionPool resolves pending acquires in FIFO order", async () 
     await pool.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Health check: healthy connections are reused
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool health check reuses healthy connections", async () => {
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: () => true,
+    // Set threshold to 0 so health check always runs on idle connections.
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+    assertEquals(createCount, 1);
+
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 === conn2,
+      "expected the same healthy connection to be reused",
+    );
+    assertEquals(createCount, 1);
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: unhealthy connections are discarded and a new one is created
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool health check discards unhealthy connection and creates new one", async () => {
+  let createCount = 0;
+  const closedIds: number[] = [];
+  const factory = () => {
+    createCount += 1;
+    const id = createCount;
+    const conn: RpcClientTransportLike & { id: number; closed: boolean } = {
+      id,
+      closed: false,
+      call: () => Promise.resolve(EMPTY),
+      close() {
+        this.closed = true;
+        closedIds.push(id);
+        return Promise.resolve();
+      },
+    };
+    return Promise.resolve(conn);
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: () => false, // All idle connections are "unhealthy".
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    assertEquals(createCount, 1);
+    pool.release(conn1);
+    assertEquals(pool.stats.idle, 1);
+
+    // Acquiring again should discard the unhealthy connection and create a new one.
+    const conn2 = await pool.acquire();
+    assert(conn1 !== conn2, "expected a new connection, not the unhealthy one");
+    assertEquals(createCount, 2);
+    // The old connection should have been closed.
+    assert(closedIds.includes(1), "expected unhealthy connection to be closed");
+    assertEquals(pool.stats.idle, 0);
+    assertEquals(pool.stats.active, 1);
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: only runs after idle threshold is exceeded
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool health check is skipped when idle time is below threshold", async () => {
+  let healthCheckCalls = 0;
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: () => {
+      healthCheckCalls += 1;
+      // Return false to make it obvious if health check runs unexpectedly --
+      // the connection would be discarded.
+      return false;
+    },
+    // Very high threshold so the health check should NOT run.
+    healthCheckIdleMs: 60000,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+
+    // Connection was just released, idle time ~0ms, well below 60000ms threshold.
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 === conn2,
+      "expected same connection since health check should not have run",
+    );
+    assertEquals(
+      healthCheckCalls,
+      0,
+      "health check should not have been called",
+    );
+    assertEquals(createCount, 1, "no new connection should have been created");
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: runs when idle time exceeds threshold
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool health check runs when idle time exceeds threshold", async () => {
+  let healthCheckCalls = 0;
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    idleTimeoutMs: 5000,
+    healthCheck: () => {
+      healthCheckCalls += 1;
+      return true; // Connection is healthy.
+    },
+    healthCheckIdleMs: 30, // Low threshold so it triggers after a short wait.
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+
+    // Wait long enough to exceed the health check idle threshold.
+    await new Promise((r) => setTimeout(r, 60));
+
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 === conn2,
+      "expected same connection since health check passed",
+    );
+    assertEquals(
+      healthCheckCalls,
+      1,
+      "health check should have been called once",
+    );
+    assertEquals(createCount, 1, "no new connection should have been created");
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: async health check support
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool supports async health checks", async () => {
+  let createCount = 0;
+  let healthCheckCalls = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: async () => {
+      healthCheckCalls += 1;
+      // Simulate an async operation (e.g. a ping).
+      await new Promise((r) => setTimeout(r, 5));
+      return true;
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 === conn2,
+      "expected same connection after async health check",
+    );
+    assertEquals(
+      healthCheckCalls,
+      1,
+      "async health check should have been called",
+    );
+    assertEquals(createCount, 1);
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: async health check that fails discards connection
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool async health check failure discards connection", async () => {
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return false;
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 !== conn2,
+      "expected new connection after async health check failure",
+    );
+    assertEquals(createCount, 2);
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: exception in health check treated as failure
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool health check exception is treated as failure", async () => {
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: () => {
+      throw new Error("health check exploded");
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn1 = await pool.acquire();
+    pool.release(conn1);
+
+    const conn2 = await pool.acquire();
+    assert(
+      conn1 !== conn2,
+      "expected new connection after health check exception",
+    );
+    assertEquals(createCount, 2);
+    pool.release(conn2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Health check: multiple idle connections, first unhealthy, second healthy
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool skips unhealthy idle connections until finding a healthy one", async () => {
+  let createCount = 0;
+  const closedIds: number[] = [];
+  const factory = () => {
+    createCount += 1;
+    const id = createCount;
+    const conn: RpcClientTransportLike & { id: number; closed: boolean } = {
+      id,
+      closed: false,
+      call: () => Promise.resolve(EMPTY),
+      close() {
+        this.closed = true;
+        closedIds.push(id);
+        return Promise.resolve();
+      },
+    };
+    return Promise.resolve(conn);
+  };
+
+  // Health check: connection with id=1 is unhealthy, id=2 is healthy.
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 4,
+    healthCheck: (conn) => {
+      const c = conn as RpcClientTransportLike & { id: number };
+      return c.id !== 1;
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    // Create and release two connections so both go idle.
+    const conn1 = await pool.acquire();
+    const conn2 = await pool.acquire();
+    pool.release(conn1); // id=1, goes to idle first
+    pool.release(conn2); // id=2, goes to idle second
+
+    assertEquals(pool.stats.idle, 2);
+
+    // On acquire: conn1 (id=1) fails health check, gets closed.
+    // conn2 (id=2) passes health check, gets returned.
+    const conn3 = await pool.acquire();
+    const c3 = conn3 as RpcClientTransportLike & { id: number };
+    assertEquals(c3.id, 2, "expected conn with id=2 (the healthy one)");
+    assert(closedIds.includes(1), "expected unhealthy conn id=1 to be closed");
+    assertEquals(createCount, 2, "no new connections should have been created");
+    assertEquals(pool.stats.idle, 0);
+    assertEquals(pool.stats.active, 1);
+    pool.release(conn3);
+  } finally {
+    await pool.close();
+  }
+});

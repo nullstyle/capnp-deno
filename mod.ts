@@ -104,7 +104,11 @@ export {
   type RpcServerBridgeOptions,
   type RpcServerBridgePumpHostCallsOptions,
   type RpcServerDispatch,
+  type RpcServerMiddleware,
   type RpcServerWasmHost,
+  type ServerMiddlewareContext,
+  type ServerMiddlewareDispatchResult,
+  type ServerMiddlewareFrameResult,
 } from "./src/rpc_server.ts";
 export {
   type JsonSerdeCodec,
@@ -174,3 +178,8 @@ export {
   type RpcConnectionPoolStats,
   withConnection,
 } from "./src/connection_pool.ts";
+export {
+  CircuitBreaker,
+  type CircuitBreakerOptions,
+  type CircuitBreakerState,
+} from "./src/circuit_breaker.ts";

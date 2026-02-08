@@ -95,8 +95,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: bench/results.json
-          key: bench-results-dont-match
-          restore-keys: bench-results-
+          key: bench-results-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            bench-results-${{ github.ref_name }}-
+            bench-results-main-
 
       - name: Stash previous results
         run: |
@@ -125,7 +127,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: bench/results.json
-          key: bench-results-${{ github.sha }}
+          key: bench-results-${{ github.ref_name }}-${{ github.sha }}
 
       - name: Compare against previous results
         if: always()
