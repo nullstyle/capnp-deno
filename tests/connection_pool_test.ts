@@ -3,7 +3,7 @@ import {
   RpcConnectionPool,
   SessionError,
   withConnection,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertEquals, withTimeout } from "./test_utils.ts";
 
 const EMPTY = new Uint8Array();

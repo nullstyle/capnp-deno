@@ -7,7 +7,7 @@ import {
   RpcServerBridge,
   type RpcServerWasmHost,
   type WasmHostCallRecord,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertEquals, deferred } from "./test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;

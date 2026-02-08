@@ -1,4 +1,9 @@
-import { RpcSession, type RpcTransport, WasmAbi, WasmPeer } from "../mod.ts";
+import {
+  RpcSession,
+  type RpcTransport,
+  WasmAbi,
+  WasmPeer,
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "../tests/fake_wasm.ts";
 
 class SinkTransport implements RpcTransport {

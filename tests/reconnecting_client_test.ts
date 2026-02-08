@@ -3,7 +3,7 @@ import {
   type RpcClientTransportLike,
   SessionError,
   TransportError,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 const EMPTY = new Uint8Array();

@@ -1,4 +1,4 @@
-import { instantiatePeer, WasmSerde } from "../mod.ts";
+import { instantiatePeer, WasmSerde } from "../advanced.ts";
 import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
 const wasmPath = new URL(

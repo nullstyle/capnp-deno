@@ -1,13 +1,13 @@
 # capnp-deno (scaffold)
 
-`capnp-deno` is a Deno-side runtime scaffold for driving the Cap'n Proto RPC
-core over WASM.
+`capnp-deno` is a Deno-side runtime scaffold for driving Cap'n Proto RPC. For
+client/server app code, WASM is loaded internally via Deno static WASM module
+imports.
 
 Current scope:
 
-- wraps low-level WASM ABI exports from `docs/deno_wasm_abi_draft.md`,
-- provides `WasmPeer` for frame push/pop,
-- provides `RpcSession` to wire a Deno transport to a `WasmPeer`,
+- provides `RpcSession.create(...)` and `RpcServerRuntime.create(...)` so app
+  code does not need explicit peer setup,
 - provides `WasmSerde` to call generated schema-specific JSON serde exports,
 - includes real transports:
   - `MessagePortTransport` (worker/message-channel),
@@ -27,12 +27,14 @@ Current scope:
 
 ## Layout
 
-- `src/abi.ts`: typed ABI surface + memory/error helpers.
-- `src/wasm_peer.ts`: peer handle lifecycle and frame pump helpers.
+- `src/abi.ts`: typed ABI surface + memory/error helpers (advanced).
+- `src/wasm_peer.ts`: peer handle lifecycle and frame pump helpers (advanced).
 - `src/session.ts`: transport integration with ordered inbound pumping.
 - `src/serde.ts`: wrapper for calling wasm serde exports (`to_json` /
   `from_json`).
-- `src/load.ts`: wasm instantiation helper that returns a ready `WasmPeer`.
+- `src/load.ts`: dynamic wasm instantiation helper (advanced).
+- `src/runtime_module.ts`: static runtime-module loader used by app-facing
+  factory APIs.
 - `src/rpc_wire.ts`: minimal RPC wire builders/parsers (bootstrap/call/return).
 - `src/rpc_client.ts`: `SessionRpcClientTransport` + in-memory harness transport
   for fixture-style client driving of `RpcSession`.
@@ -77,7 +79,7 @@ Use `onWarning` with `failOnLimit: false` to surface operational alerts.
 ## Example
 
 ```ts
-import { RpcSession, type RpcTransport, WasmPeer } from "./mod.ts";
+import { RpcSession, type RpcTransport } from "./mod.ts";
 
 const transport: RpcTransport = {
   async start(onFrame) {
@@ -89,18 +91,18 @@ const transport: RpcTransport = {
   async close() {},
 };
 
-// instance: WebAssembly.Instance from your compiled capnp wasm module
-const peer = WasmPeer.fromInstance(instance, { expectedVersion: 1 });
-const session = new RpcSession(peer, transport);
-await session.start();
+const session = await RpcSession.create(transport, { autoStart: true });
 ```
 
-JSON serde wrapper usage (requires generated exports in wasm module):
+JSON serde wrapper usage (advanced):
 
 ```ts
-import { WasmSerde } from "./mod.ts";
+import * as runtimeWasmExports from "./generated/capnp_deno.wasm";
+import { WasmSerde } from "./advanced.ts";
 
-const serde = WasmSerde.fromInstance(instance, { expectedVersion: 1 });
+const serde = WasmSerde.fromExports(runtimeWasmExports, {
+  expectedVersion: 1,
+});
 const codec = serde.createJsonCodec<{ id: number }>({
   toJsonExport: "capnp_example_message_to_json",
   fromJsonExport: "capnp_example_message_from_json",
@@ -113,9 +115,12 @@ const value = codec.decode(bytes);
 Auto-discover generated serde codec pairs:
 
 ```ts
-import { WasmSerde } from "./mod.ts";
+import * as runtimeWasmExports from "./generated/capnp_deno.wasm";
+import { WasmSerde } from "./advanced.ts";
 
-const serde = WasmSerde.fromInstance(instance, { expectedVersion: 1 });
+const serde = WasmSerde.fromExports(runtimeWasmExports, {
+  expectedVersion: 1,
+});
 const codecs = serde.listJsonCodecs();
 // [{ key: "example_person", toJsonExport: "..._to_json", fromJsonExport: "..._from_json" }]
 
@@ -142,7 +147,10 @@ const observability = createDenoOtelObservability({
 });
 
 const transport = new MessagePortTransport(port, { observability });
-const session = new RpcSession(peer, transport, { observability });
+const session = await RpcSession.create(transport, {
+  autoStart: true,
+  observability,
+});
 ```
 
 To export telemetry from Deno, configure OTLP env vars (for example):
@@ -183,7 +191,7 @@ const transport = await connectTcpTransportWithReconnect("127.0.0.1", 7000, {
 ```
 
 For session startup flows, use `createRpcSessionWithReconnect(...)` to retry
-transport connection before creating/starting `RpcSession`.
+transport connection and then create/start `RpcSession`.
 
 For generated RPC clients, use `ReconnectingRpcClientTransport` to add
 established-session reconnect behavior for call paths:
@@ -204,8 +212,9 @@ explicitly through `RpcServerRuntime`/`SessionRpcClientTransport`:
 
 ```ts
 const bridge = new RpcServerBridge();
-const runtime = new RpcServerRuntime(peer, transport, bridge);
-await runtime.start();
+const runtime = await RpcServerRuntime.create(transport, bridge, {
+  autoStart: true,
+});
 
 const sessionClient = new SessionRpcClientTransport(
   runtime.session,

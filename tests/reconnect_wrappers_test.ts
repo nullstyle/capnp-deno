@@ -7,10 +7,8 @@ import {
   InMemoryRpcHarnessTransport,
   TcpTransport,
   TransportError,
-  WasmPeer,
   WebSocketTransport,
-} from "../mod.ts";
-import { FakeCapnpWasm } from "./fake_wasm.ts";
+} from "../advanced.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 function reconnectOptions() {
@@ -108,7 +106,6 @@ Deno.test("connectTransportWithReconnect retries generic transport connector", a
 
 Deno.test("createRpcSessionWithReconnect retries connect and starts session", async () => {
   let connectAttempts = 0;
-  let createPeerCalls = 0;
 
   const result = await createRpcSessionWithReconnect({
     connectTransport: () => {
@@ -118,18 +115,12 @@ Deno.test("createRpcSessionWithReconnect retries connect and starts session", as
       }
       return Promise.resolve(new InMemoryRpcHarnessTransport());
     },
-    createPeer: () => {
-      createPeerCalls += 1;
-      const fake = new FakeCapnpWasm();
-      return WasmPeer.fromExports(fake.exports);
-    },
     reconnect: reconnectOptions(),
     autoStart: true,
   });
 
   try {
     assertEquals(connectAttempts, 2);
-    assertEquals(createPeerCalls, 1);
     assertEquals(result.session.started, true);
   } finally {
     await result.session.close();

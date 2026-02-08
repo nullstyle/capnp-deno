@@ -14,7 +14,7 @@ import {
   encodeReturnResultsFrame,
   ProtocolError,
   validateCapnpFrame,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert } from "./test_utils.ts";
 
 const WORD_BYTES = 8;

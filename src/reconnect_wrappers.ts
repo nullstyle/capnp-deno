@@ -14,13 +14,13 @@ import {
 } from "./reconnect.ts";
 import { normalizeSessionError } from "./errors.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
+import type { RpcRuntimeModuleOptions } from "./runtime_module.ts";
 import type { RpcTransport } from "./transport.ts";
 import { TcpTransport, type TcpTransportOptions } from "./transports/tcp.ts";
 import {
   WebSocketTransport,
   type WebSocketTransportOptions,
 } from "./transports/websocket.ts";
-import type { WasmPeer } from "./wasm_peer.ts";
 
 /**
  * Options for {@link connectTcpTransportWithReconnect}.
@@ -54,14 +54,14 @@ export interface CreateRpcSessionWithReconnectOptions<
 > {
   /** Factory function that creates a new transport connection. */
   connectTransport: () => Promise<TTransport>;
-  /** Factory function that creates (or reuses) a WASM peer for the session. */
-  createPeer: () => Promise<WasmPeer> | WasmPeer;
   /** Reconnection policy and options for the transport connection. */
   reconnect: ConnectWithReconnectOptions;
   /** Options forwarded to the {@link RpcSession} constructor. */
   session?: RpcSessionOptions;
   /** Whether to automatically start the session. Defaults to `true`. */
   autoStart?: boolean;
+  /** Optional runtime-module loading overrides for the internal session. */
+  runtimeModule?: RpcRuntimeModuleOptions;
 }
 
 /**
@@ -131,11 +131,12 @@ export async function connectWebSocketTransportWithReconnect(
  * Create a complete {@link RpcSession} with a reconnectable transport.
  *
  * This is a high-level convenience that connects the transport (with retries),
- * creates a WASM peer, constructs an RPC session, and optionally starts it.
- * On failure, partially-created resources are cleaned up automatically.
+ * loads the runtime module internally, constructs an RPC session, and
+ * optionally starts it. On failure, partially-created resources are cleaned
+ * up automatically.
  *
  * @typeParam TTransport - The specific transport type.
- * @param options - Session, peer, transport, and reconnection options.
+ * @param options - Session, transport, runtime-module, and reconnection options.
  * @returns The created session and connected transport.
  * @throws {SessionError} If session creation fails after transport connection.
  */
@@ -149,13 +150,12 @@ export async function createRpcSessionWithReconnect<
     options.reconnect,
   );
 
-  let peer: WasmPeer | null = null;
   try {
-    peer = await options.createPeer();
-    const session = new RpcSession(peer, transport, options.session ?? {});
-    if (options.autoStart ?? true) {
-      await session.start();
-    }
+    const session = await RpcSession.create(transport, {
+      ...(options.session ?? {}),
+      autoStart: options.autoStart ?? true,
+      runtimeModule: options.runtimeModule,
+    });
     return { session, transport };
   } catch (error) {
     try {
@@ -163,15 +163,6 @@ export async function createRpcSessionWithReconnect<
     } catch {
       // no-op while unwinding startup errors.
     }
-
-    if (peer) {
-      try {
-        peer.close();
-      } catch {
-        // no-op while unwinding startup errors.
-      }
-    }
-
     throw normalizeSessionError(error, "failed to create rpc session");
   }
 }

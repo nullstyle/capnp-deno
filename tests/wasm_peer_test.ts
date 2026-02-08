@@ -1,4 +1,4 @@
-import { WasmPeer } from "../mod.ts";
+import { WasmPeer } from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import {
   assert,

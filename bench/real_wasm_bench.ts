@@ -9,7 +9,7 @@ import {
   type JsonSerdeCodec,
   type WasmPeer,
   WasmSerde,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { CALL_BOOTSTRAP_CAP_Q2_INBOUND } from "../tests/fixtures/rpc_frames.ts";
 
 type Person = {

@@ -4,7 +4,6 @@ import type {
   CapnpErrorOptions,
   CapnpFrameFramerOptions,
   CapnpFrameLimitsOptions,
-  CapnpWasmExports,
   ConnectTcpTransportWithReconnectOptions,
   ConnectWebSocketTransportWithReconnectOptions,
   ConnectWithReconnectOptions,
@@ -12,10 +11,6 @@ import type {
   DenoOtelObservabilityOptions,
   ExponentialBackoffReconnectPolicyOptions,
   FrameSizeLimitMiddlewareOptions,
-  JsonSerdeCodec,
-  JsonSerdeCodecLookupOptions,
-  JsonSerdeCodecOptions,
-  JsonSerdeExportBinding,
   LoggingMiddlewareOptions,
   MessagePortTransportOptions,
   MiddlewareResult,
@@ -55,27 +50,27 @@ import type {
   RpcReturnMessage,
   RpcReturnResults,
   RpcReturnResultsFrameRequest,
+  RpcRuntimeModuleOptions,
   RpcServerBridgeOptions,
   RpcServerBridgePumpHostCallsOptions,
   RpcServerCallContext,
   RpcServerCallResponse,
   RpcServerDispatch,
+  RpcServerRuntimeCreateOptions,
   RpcServerRuntimeHostCallPumpOptions,
   RpcServerRuntimeOptions,
   RpcServerRuntimePumpOptions,
   RpcServerRuntimeWarning,
   RpcServerRuntimeWarningCode,
   RpcServerWasmHost,
+  RpcSessionCreateOptions,
   RpcSessionHarnessTransport,
   RpcSessionOptions,
   RpcTransport,
   RpcTransportMiddleware,
+  SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
   TcpTransportOptions,
-  WasmAbiCapabilities,
-  WasmAbiOptions,
-  WasmHostCallRecord,
-  WasmSendFinishOptions,
   WebSocketTransportOptions,
 } from "../mod.ts";
 
@@ -88,7 +83,6 @@ type PublicTypeExportSmoke = {
   capnpErrorOptions: CapnpErrorOptions;
   capnpFrameFramerOptions: CapnpFrameFramerOptions;
   capnpFrameLimitsOptions: CapnpFrameLimitsOptions;
-  capnpWasmExports: CapnpWasmExports;
   frameSizeLimitMiddlewareOptions: FrameSizeLimitMiddlewareOptions;
   loggingMiddlewareOptions: LoggingMiddlewareOptions;
   middlewareResult: MiddlewareResult;
@@ -99,8 +93,6 @@ type PublicTypeExportSmoke = {
   rpcMetricsMiddleware: RpcMetricsMiddleware;
   rpcMetricsMiddlewareOptions: RpcMetricsMiddlewareOptions;
   rpcMetricsSnapshot: RpcMetricsSnapshot;
-  wasmAbiCapabilities: WasmAbiCapabilities;
-  wasmHostCallRecord: WasmHostCallRecord;
   capabilityPointer: CapabilityPointer;
   connectTcpTransportWithReconnectOptions:
     ConnectTcpTransportWithReconnectOptions;
@@ -113,10 +105,6 @@ type PublicTypeExportSmoke = {
   denoOtelObservabilityOptions: DenoOtelObservabilityOptions;
   exponentialBackoffReconnectPolicyOptions:
     ExponentialBackoffReconnectPolicyOptions;
-  jsonSerdeCodec: JsonSerdeCodec<unknown>;
-  jsonSerdeCodecLookupOptions: JsonSerdeCodecLookupOptions<unknown>;
-  jsonSerdeCodecOptions: JsonSerdeCodecOptions<unknown>;
-  jsonSerdeExportBinding: JsonSerdeExportBinding;
   messagePortTransportOptions: MessagePortTransportOptions;
   reconnectCapabilityRemapContext: ReconnectCapabilityRemapContext;
   reconnectPolicy: ReconnectPolicy;
@@ -157,15 +145,18 @@ type PublicTypeExportSmoke = {
   rpcServerBridgePumpHostCallsOptions: RpcServerBridgePumpHostCallsOptions;
   rpcServerCallContext: RpcServerCallContext;
   rpcServerCallResponse: RpcServerCallResponse;
+  rpcServerRuntimeCreateOptions: RpcServerRuntimeCreateOptions;
   rpcServerDispatch: RpcServerDispatch;
   rpcServerWasmHost: RpcServerWasmHost;
+  rpcRuntimeModuleOptions: RpcRuntimeModuleOptions;
+  rpcSessionCreateOptions: RpcSessionCreateOptions;
   rpcSessionHarnessTransport: RpcSessionHarnessTransport;
   rpcSessionOptions: RpcSessionOptions;
   rpcTransport: RpcTransport;
+  sessionRpcClientTransportCreateOptions:
+    SessionRpcClientTransportCreateOptions;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
   tcpTransportOptions: TcpTransportOptions;
-  wasmAbiOptions: WasmAbiOptions;
-  wasmSendFinishOptions: WasmSendFinishOptions;
   webSocketTransportOptions: WebSocketTransportOptions;
 };
 
@@ -232,8 +223,15 @@ type AssertCreateSessionAutoStart = Assert<
   >
 >;
 
-type AssertWasmAbiCapabilitiesHasHostCallReturnFrame = Assert<
-  IsEqual<WasmAbiCapabilities["hasHostCallReturnFrame"], boolean>
+type AssertSessionCreateAutoStart = Assert<
+  IsEqual<RpcSessionCreateOptions["autoStart"], boolean | undefined>
+>;
+
+type AssertClientCreateStartSession = Assert<
+  IsEqual<
+    SessionRpcClientTransportCreateOptions["startSession"],
+    boolean | undefined
+  >
 >;
 
 type AssertRpcConnectionPoolOptionsMaxConnections = Assert<
@@ -255,7 +253,8 @@ type StaticAssertions = [
   AssertRemapReturnAssignable,
   AssertReconnectOnRetrySignature,
   AssertCreateSessionAutoStart,
-  AssertWasmAbiCapabilitiesHasHostCallReturnFrame,
+  AssertSessionCreateAutoStart,
+  AssertClientCreateStartSession,
   AssertRpcConnectionPoolOptionsMaxConnections,
   AssertRpcConnectionPoolStatsTotal,
 ];
@@ -274,8 +273,9 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 13);
+  assert(STATIC_ASSERTIONS.length === 14);
 });

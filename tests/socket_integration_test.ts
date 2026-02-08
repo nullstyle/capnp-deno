@@ -4,7 +4,7 @@ import {
   TcpTransport,
   WasmPeer,
   WebSocketTransport,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import {
   assertBytes,

@@ -5,7 +5,7 @@ import {
   type RpcTransport,
   SessionError,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import { assert, assertBytes, assertEquals } from "./test_utils.ts";
 
@@ -83,6 +83,17 @@ Deno.test("RpcSession.close closes transport and peer", async () => {
 
   assert(transport.closed, "transport should be closed");
   assert(peer.closed, "peer should be closed");
+});
+
+Deno.test("RpcSession.create can create and auto-start without explicit peer wiring", async () => {
+  const transport = new MockTransport();
+  const session = await RpcSession.create(transport, { autoStart: true });
+  try {
+    assertEquals(session.started, true);
+    assertEquals(transport.started, true);
+  } finally {
+    await session.close();
+  }
 });
 
 Deno.test("RpcSession emits observability events", async () => {

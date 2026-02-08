@@ -2,7 +2,7 @@ import {
   ReconnectingRpcClientTransport,
   type RpcClientTransportLike,
   TransportError,
-} from "../mod.ts";
+} from "../advanced.ts";
 
 const EMPTY = new Uint8Array();
 const STEADY_PAYLOAD = new Uint8Array([0x11]);

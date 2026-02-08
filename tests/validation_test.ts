@@ -3,7 +3,7 @@ import {
   assertNonNegativeInteger,
   assertPositiveFinite,
   assertPositiveInteger,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertThrows } from "./test_utils.ts";
 
 // ---------------------------------------------------------------------------

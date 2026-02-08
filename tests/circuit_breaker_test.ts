@@ -2,7 +2,7 @@ import {
   CircuitBreaker,
   type CircuitBreakerState,
   TransportError,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
 // ---------------------------------------------------------------------------

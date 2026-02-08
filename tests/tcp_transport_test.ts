@@ -1,4 +1,4 @@
-import { TcpTransport, TransportError } from "../mod.ts";
+import { TcpTransport, TransportError } from "../advanced.ts";
 import { assert, assertEquals, deferred, withTimeout } from "./test_utils.ts";
 
 interface FakeConnOptions {

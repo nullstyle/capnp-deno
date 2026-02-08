@@ -5,7 +5,7 @@ import {
   type RpcTransport,
   type WasmHostCallRecord,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "../tests/fake_wasm.ts";
 
 function encodeSingleU32StructMessage(value: number): Uint8Array {

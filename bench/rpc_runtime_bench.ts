@@ -16,7 +16,7 @@ import {
   SessionRpcClientTransport,
   type WasmHostCallRecord,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "../tests/fake_wasm.ts";
 
 const MASK_30 = 0x3fff_ffffn;

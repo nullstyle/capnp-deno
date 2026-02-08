@@ -1,4 +1,4 @@
-import { instantiatePeer, InstantiationError } from "../mod.ts";
+import { instantiatePeer, InstantiationError } from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 

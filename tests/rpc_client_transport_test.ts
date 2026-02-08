@@ -16,7 +16,7 @@ import {
   SessionError,
   SessionRpcClientTransport,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import {
   BOOTSTRAP_Q1_SUCCESS_INBOUND,
@@ -686,6 +686,20 @@ Deno.test("SessionRpcClientTransport respects autoStart=false and supports manua
     assertEquals(decodeSingleU32StructMessage(response), 222);
   } finally {
     await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport.create can start internal session without explicit peer wiring", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  const client = await SessionRpcClientTransport.create(transport, {
+    interfaceId: 0x1234n,
+    startSession: true,
+  });
+
+  try {
+    assertEquals(client.session.started, true);
+  } finally {
+    await client.session.close();
   }
 });
 

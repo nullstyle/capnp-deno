@@ -1,4 +1,4 @@
-import { createDenoOtelObservability } from "../mod.ts";
+import { createDenoOtelObservability } from "../advanced.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 type Attributes = Record<string, string | number | boolean>;

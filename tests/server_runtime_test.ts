@@ -7,7 +7,7 @@ import {
   SessionError,
   type WasmHostCallRecord,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
@@ -388,6 +388,21 @@ Deno.test("RpcServerRuntime validates pumpHostCallsNow maxCalls argument", async
         /maxCalls must be a positive integer/i.test(thrown.message),
       `expected pump maxCalls validation error, got: ${String(thrown)}`,
     );
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime.create can auto-start without explicit peer wiring", async () => {
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  const runtime = await RpcServerRuntime.create(transport, bridge, {
+    autoStart: true,
+    hostCallPump: { enabled: false },
+  });
+
+  try {
+    assertEquals(runtime.started, true);
   } finally {
     await runtime.close();
   }

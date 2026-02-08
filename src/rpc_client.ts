@@ -3,8 +3,9 @@ import {
   ProtocolError,
   SessionError,
 } from "./errors.ts";
-import type { RpcSession } from "./session.ts";
+import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
+import type { RpcRuntimeModuleOptions } from "./runtime_module.ts";
 import {
   decodeReturnFrame,
   encodeBootstrapRequestFrame,
@@ -322,6 +323,20 @@ export interface SessionRpcClientTransportOptions {
   middleware?: RpcClientMiddleware[];
 }
 
+/**
+ * Options for creating a {@link SessionRpcClientTransport} via
+ * {@link SessionRpcClientTransport.create}.
+ */
+export interface SessionRpcClientTransportCreateOptions
+  extends SessionRpcClientTransportOptions {
+  /** Options forwarded to the internally-created {@link RpcSession}. */
+  session?: RpcSessionOptions;
+  /** Optional runtime-module loading overrides for the internal session. */
+  runtimeModule?: RpcRuntimeModuleOptions;
+  /** Whether to start the internal session before returning. Defaults to `false`. */
+  startSession?: boolean;
+}
+
 interface PendingReturnWaiter {
   resolve: (message: RpcReturnMessage) => void;
   reject: (error: unknown) => void;
@@ -502,6 +517,24 @@ export class SessionRpcClientTransport {
   #queuedReturns: Map<number, RpcReturnMessage[]> = new Map();
   #responsePump: Promise<void> | null = null;
   #responsePumpAbort: AbortController | null = null;
+
+  /**
+   * Create a client transport with an internally-created session.
+   *
+   * This helper avoids direct WASM peer setup in app code.
+   */
+  static async create(
+    transport: RpcSessionHarnessTransport,
+    options: SessionRpcClientTransportCreateOptions,
+  ): Promise<SessionRpcClientTransport> {
+    const { session, runtimeModule, startSession, ...clientOptions } = options;
+    const rpcSession = await RpcSession.create(transport, {
+      ...(session ?? {}),
+      runtimeModule,
+      autoStart: startSession ?? false,
+    });
+    return new SessionRpcClientTransport(rpcSession, transport, clientOptions);
+  }
 
   constructor(
     session: RpcSession,

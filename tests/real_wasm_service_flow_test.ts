@@ -6,7 +6,7 @@ import {
   RpcServerRuntime,
   SessionRpcClientTransport,
   type WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 const wasmPath = new URL("../generated/capnp_deno.wasm", import.meta.url);

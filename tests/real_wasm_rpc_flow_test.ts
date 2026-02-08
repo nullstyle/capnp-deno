@@ -8,7 +8,7 @@ import {
   RpcSession,
   type RpcTransport,
   type WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import {
   BOOTSTRAP_Q1_INBOUND,
   BOOTSTRAP_Q1_SUCCESS_INBOUND,

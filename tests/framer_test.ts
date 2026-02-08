@@ -1,4 +1,4 @@
-import { CapnpFrameFramer } from "../mod.ts";
+import { CapnpFrameFramer } from "../advanced.ts";
 import { assertBytes, assertEquals, assertThrows } from "./test_utils.ts";
 
 function buildSingleSegmentFrame(firstByte: number): Uint8Array {

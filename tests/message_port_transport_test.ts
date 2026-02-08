@@ -2,7 +2,7 @@ import {
   MessagePortTransport,
   type RpcObservabilityEvent,
   TransportError,
-} from "../mod.ts";
+} from "../advanced.ts";
 import {
   assert,
   assertBytes,

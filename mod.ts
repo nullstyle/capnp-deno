@@ -17,33 +17,6 @@ export {
   assertPositiveInteger,
 } from "./src/validation.ts";
 
-// === WASM & ABI ===
-
-export {
-  type CapnpWasmExports,
-  DEFAULT_MAX_DRAIN_FRAMES,
-  type DrainOutFramesResult,
-  getCapnpWasmExports,
-  WasmAbi,
-  type WasmAbiCapabilities,
-  WasmAbiError,
-  type WasmAbiOptions,
-  type WasmHostCallRecord,
-  type WasmSendFinishOptions,
-} from "./src/abi.ts";
-
-export { WasmPeer } from "./src/wasm_peer.ts";
-
-export { instantiatePeer } from "./src/load.ts";
-
-export {
-  type JsonSerdeCodec,
-  type JsonSerdeCodecLookupOptions,
-  type JsonSerdeCodecOptions,
-  type JsonSerdeExportBinding,
-  WasmSerde,
-} from "./src/serde.ts";
-
 // === Wire Format & Message Routing ===
 
 export {
@@ -113,7 +86,13 @@ export {
 
 export { type RpcTransport } from "./src/transport.ts";
 
-export { RpcSession, type RpcSessionOptions } from "./src/session.ts";
+export { type RpcRuntimeModuleOptions } from "./src/runtime_module.ts";
+
+export {
+  RpcSession,
+  type RpcSessionCreateOptions,
+  type RpcSessionOptions,
+} from "./src/session.ts";
 
 // === RPC Client ===
 
@@ -127,6 +106,7 @@ export {
   RpcPipeline,
   type RpcSessionHarnessTransport,
   SessionRpcClientTransport,
+  type SessionRpcClientTransportCreateOptions,
   type SessionRpcClientTransportOptions,
 } from "./src/rpc_client.ts";
 
@@ -149,6 +129,7 @@ export {
 
 export {
   RpcServerRuntime,
+  type RpcServerRuntimeCreateOptions,
   type RpcServerRuntimeHostCallPumpOptions,
   type RpcServerRuntimeOptions,
   type RpcServerRuntimePumpOptions,

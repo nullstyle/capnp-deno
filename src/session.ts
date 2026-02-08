@@ -3,6 +3,10 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "./observability.ts";
+import {
+  createRuntimePeer,
+  type RpcRuntimeModuleOptions,
+} from "./runtime_module.ts";
 import type { RpcTransport } from "./transport.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
 
@@ -18,6 +22,16 @@ export interface RpcSessionOptions {
   onError?: (error: unknown) => void | Promise<void>;
   /** Observability hook for session lifecycle and frame processing events. */
   observability?: RpcObservability;
+}
+
+/**
+ * Options for creating an {@link RpcSession} via {@link RpcSession.create}.
+ */
+export interface RpcSessionCreateOptions extends RpcSessionOptions {
+  /** Whether to start the session before returning. Defaults to `false`. */
+  autoStart?: boolean;
+  /** Optional runtime-module loading overrides. */
+  runtimeModule?: RpcRuntimeModuleOptions;
 }
 
 /**
@@ -68,6 +82,37 @@ export class RpcSession {
     this.transport = transport;
     this.#onError = options.onError;
     this.#observability = options.observability;
+  }
+
+  /**
+   * Create a session without requiring direct WASM peer wiring.
+   *
+   * This factory loads the default runtime module, creates a peer, and
+   * constructs an {@link RpcSession}. Use the constructor directly only when
+   * supplying your own peer implementation.
+   */
+  static async create(
+    transport: RpcTransport,
+    options: RpcSessionCreateOptions = {},
+  ): Promise<RpcSession> {
+    const peer = await createRuntimePeer(options.runtimeModule);
+    const session = new RpcSession(peer, transport, {
+      onError: options.onError,
+      observability: options.observability,
+    });
+    if (options.autoStart ?? false) {
+      try {
+        await session.start();
+      } catch (error) {
+        try {
+          peer.close();
+        } catch {
+          // no-op while unwinding startup errors.
+        }
+        throw error;
+      }
+    }
+    return session;
   }
 
   /** Whether the session has been started. */

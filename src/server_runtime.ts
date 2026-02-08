@@ -1,5 +1,9 @@
 import { SessionError } from "./errors.ts";
 import type { RpcServerBridge, RpcServerWasmHost } from "./rpc_server.ts";
+import {
+  createRuntimePeer,
+  type RpcRuntimeModuleOptions,
+} from "./runtime_module.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
@@ -114,6 +118,19 @@ export interface RpcServerRuntimeOptions {
   wasmHost?: RpcServerWasmHost;
   /** Options controlling automatic host-call pumping behavior. */
   hostCallPump?: RpcServerRuntimeHostCallPumpOptions;
+}
+
+/**
+ * Options for creating an {@link RpcServerRuntime} via
+ * {@link RpcServerRuntime.create}.
+ */
+export interface RpcServerRuntimeCreateOptions extends RpcServerRuntimeOptions {
+  /**
+   * Whether to start the runtime before returning. Defaults to `true`.
+   */
+  autoStart?: boolean;
+  /** Optional runtime-module loading overrides. */
+  runtimeModule?: RpcRuntimeModuleOptions;
 }
 
 /**
@@ -245,6 +262,40 @@ export class RpcServerRuntime {
       (_frame) => this.#afterInboundFrame(),
     );
     this.session = new RpcSession(peer, hooked, options.session ?? {});
+  }
+
+  /**
+   * Create a server runtime without requiring direct WASM peer wiring.
+   *
+   * This factory loads the default runtime module, creates a peer, and
+   * constructs an {@link RpcServerRuntime}.
+   */
+  static async create(
+    transport: RpcTransport,
+    bridge: RpcServerBridge,
+    options: RpcServerRuntimeCreateOptions = {},
+  ): Promise<RpcServerRuntime> {
+    const { autoStart, runtimeModule, ...runtimeOptions } = options;
+    const peer = await createRuntimePeer(runtimeModule);
+    const runtime = new RpcServerRuntime(
+      peer,
+      transport,
+      bridge,
+      runtimeOptions,
+    );
+    if (autoStart ?? true) {
+      try {
+        await runtime.start();
+      } catch (error) {
+        try {
+          await runtime.close();
+        } catch {
+          // no-op while unwinding startup errors.
+        }
+        throw error;
+      }
+    }
+    return runtime;
   }
 
   /** Whether the underlying session has been started. */

@@ -11,7 +11,7 @@ import {
   SessionError,
   TransportError,
   WasmPeer,
-} from "../mod.ts";
+} from "../advanced.ts";
 import {
   normalizeAbiError,
   normalizeCapnpError,

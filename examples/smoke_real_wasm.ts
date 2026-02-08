@@ -1,4 +1,4 @@
-import { instantiatePeer } from "../mod.ts";
+import { instantiatePeer } from "../advanced.ts";
 
 const defaultWasm = new URL(
   "../generated/capnp_deno.wasm",

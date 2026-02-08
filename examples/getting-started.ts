@@ -3,21 +3,22 @@
  *
  * This tutorial demonstrates the core concepts of the capnp-deno library:
  *
- * 1. Loading a WASM module and creating a peer
- * 2. Creating a transport
- * 3. Setting up an RPC session
- * 4. Making RPC calls using the client transport
- * 5. Using the server runtime for host-call dispatching
- * 6. Error handling
- * 7. Cleanup
+ * 1. Creating a session with internal runtime-module loading
+ * 2. Setting up a basic RPC session
+ * 3. Making RPC calls using the client transport
+ * 4. Using the server runtime for host-call dispatching
+ * 5. JSON serde (advanced/manual runtime access)
+ * 6. Reconnecting client setup
+ * 7. Error handling
  * 8. Middleware (logging, frame size limits, metrics)
  * 9. Connection pool for managing multiple connections
  *
  * Prerequisites:
- * - A compiled Cap'n Proto WASM module (`.wasm` file)
+ * - A compiled Cap'n Proto WASM module (`generated/capnp_deno.wasm`) for the
+ *   advanced/manual serde section
  * - Deno runtime
  *
- * Run: deno run --allow-read --allow-net examples/getting-started.ts
+ * Run: deno run examples/getting-started.ts
  */
 
 import {
@@ -31,7 +32,6 @@ import {
   createRpcMetricsMiddleware,
   // Client-side RPC
   InMemoryRpcHarnessTransport,
-  instantiatePeer,
   MiddlewareTransport,
   ReconnectingRpcClientTransport,
   // Connection pool
@@ -44,70 +44,53 @@ import {
   SessionError,
   SessionRpcClientTransport,
   TransportError,
-  // Serialization
-  WasmSerde,
   withConnection,
   // Transports (for reference)
   // TcpTransport,          // TCP transport for Deno
   // WebSocketTransport,    // WebSocket transport for browsers and Deno
   // MessagePortTransport,  // MessagePort transport for workers
 } from "../mod.ts";
+import { instantiatePeer, WasmSerde } from "../advanced.ts";
 
 // ---------------------------------------------------------------------------
-// 1. Loading a WASM module
+// 1. Creating a session with the bundled runtime module
 // ---------------------------------------------------------------------------
 //
-// The `instantiatePeer` function is the primary entry point for loading a
-// Cap'n Proto WASM module. It handles URL resolution, compilation,
-// instantiation, and peer creation in a single call.
+// App-facing APIs (`RpcSession.create`, `RpcServerRuntime.create`,
+// `SessionRpcClientTransport.create`) load the default runtime module
+// internally through Deno static WASM imports.
 
-async function _loadWasmPeer() {
-  // Load from a URL relative to the current module
-  const wasmUrl = new URL("../generated/capnp_deno.wasm", import.meta.url);
-
-  const { peer, instance } = await instantiatePeer(wasmUrl, {}, {
-    expectedVersion: 1,
-    requireVersionExport: true,
-  });
-
-  console.log(`Peer created with handle: ${peer.handle}`);
-
-  // The peer is now ready to process Cap'n Proto RPC frames.
-  // Always close the peer when done to free WASM resources.
-  peer.close();
-
-  // You can also use `using` for automatic cleanup (Symbol.dispose):
-  // using peer2 = WasmPeer.fromInstance(instance);
-
-  return { instance };
+async function _runtimeModuleSessionExample() {
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = await RpcSession.create(transport, { autoStart: true });
+  try {
+    console.log(`Session started: ${session.started}`);
+    console.log(`Internal runtime peer handle: ${session.peer.handle}`);
+  } finally {
+    await session.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
 // 2. Setting up a basic RPC session
 // ---------------------------------------------------------------------------
 //
-// An RpcSession binds a WasmPeer to a transport, automatically routing
-// inbound frames through the WASM module and sending responses back.
+// An RpcSession binds a runtime peer to a transport, automatically routing
+// inbound frames through the runtime module and sending responses back.
 
 async function _basicSessionExample() {
-  const wasmUrl = new URL("../generated/capnp_deno.wasm", import.meta.url);
-  const { peer } = await instantiatePeer(wasmUrl, {}, {
-    expectedVersion: 1,
-  });
-
   // For this example, we use the InMemoryRpcHarnessTransport which is
   // useful for testing. In production, you would use TcpTransport,
   // WebSocketTransport, or MessagePortTransport.
   const transport = new InMemoryRpcHarnessTransport();
 
-  const session = new RpcSession(peer, transport, {
+  const session = await RpcSession.create(transport, {
+    autoStart: true,
     onError: (error) => {
       console.error("Session error:", error);
     },
   });
 
-  // Start the session to begin processing frames
-  await session.start();
   console.log(`Session started: ${session.started}`);
 
   // Flush ensures all pending inbound frames have been processed
@@ -126,18 +109,13 @@ async function _basicSessionExample() {
 // Cap'n Proto RPC calls: bootstrap, call, callRaw, and callRawPipelined.
 
 async function _clientRpcExample() {
-  const wasmUrl = new URL("../generated/capnp_deno.wasm", import.meta.url);
-  const { peer } = await instantiatePeer(wasmUrl, {}, {
-    expectedVersion: 1,
-  });
-
   const transport = new InMemoryRpcHarnessTransport();
-  const session = new RpcSession(peer, transport);
 
   // Create a client transport for a specific Cap'n Proto interface
   const interfaceId = 0xabcd_1234_5678_9012n; // Your interface's ID
-  const client = new SessionRpcClientTransport(session, transport, {
+  const client = await SessionRpcClientTransport.create(transport, {
     interfaceId,
+    startSession: true,
     autoStart: true, // Automatically starts the session on first call
   });
 
@@ -168,7 +146,7 @@ async function _clientRpcExample() {
       throw error;
     }
   } finally {
-    await session.close();
+    await client.session.close();
   }
 }
 
@@ -181,11 +159,6 @@ async function _clientRpcExample() {
 // frame.
 
 async function _serverRuntimeExample() {
-  const wasmUrl = new URL("../generated/capnp_deno.wasm", import.meta.url);
-  const { peer } = await instantiatePeer(wasmUrl, {}, {
-    expectedVersion: 1,
-  });
-
   // Define a server dispatch handler for a specific interface
   const interfaceId = 0xabcd_1234_5678_9012n;
   const dispatch: RpcServerDispatch = {
@@ -209,7 +182,7 @@ async function _serverRuntimeExample() {
 
   const transport = new InMemoryRpcHarnessTransport();
 
-  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+  const runtime = await RpcServerRuntime.create(transport, bridge, {
     hostCallPump: {
       enabled: true,
       maxCallsPerInboundFrame: 64,
@@ -219,9 +192,8 @@ async function _serverRuntimeExample() {
         console.warn(`Runtime warning [${warning.code}]: ${warning.message}`);
       },
     },
+    autoStart: true,
   });
-
-  await runtime.start();
   console.log(`Server runtime started: ${runtime.started}`);
   console.log(`Host calls pumped: ${runtime.totalHostCallsPumped}`);
 
@@ -362,7 +334,7 @@ function middlewareExample() {
   ]);
 
   // The wrapped transport is a drop-in replacement for any RpcTransport:
-  //   const session = new RpcSession(peer, transport);
+  //   const session = await RpcSession.create(transport, { autoStart: true });
 
   // Query metrics at any time
   const snap = metrics.snapshot();
@@ -463,11 +435,11 @@ middlewareExample();
 console.log("\n--- Connection Pool ---");
 await connectionPoolExample();
 
-// The following examples require a WASM module to be present.
-// Uncomment to run them with a real WASM module:
+// The following examples use the runtime module and/or manual serde exports.
+// Uncomment to run them:
 //
-// console.log("\n--- Loading WASM Peer ---");
-// await _loadWasmPeer();
+// console.log("\n--- Runtime Session Factory ---");
+// await _runtimeModuleSessionExample();
 //
 // console.log("\n--- Basic Session ---");
 // await _basicSessionExample();
