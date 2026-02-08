@@ -10,6 +10,7 @@ jobs:
   # ── Fast checks: fmt, lint, type-check, unit tests, codegen tests ──
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,9 +26,22 @@ jobs:
       - name: Codegen tests
         run: deno task test:codegen
 
+      - name: Generate coverage report
+        run: |
+          deno task test:coverage
+          deno coverage coverage/ --lcov > coverage/lcov.info
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
   # ── Socket integration tests ───────────────────────────────────────
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: verify
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +58,7 @@ jobs:
   # ── Real WASM: build wasm from capnp-zig, run real-wasm tests ─────
   real-wasm:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: verify
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +94,7 @@ jobs:
   # ── Performance benchmarks ────────────────────────────────────────
   bench:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: verify
     if: always() && needs.verify.result == 'success'
     steps:

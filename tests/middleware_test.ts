@@ -1078,3 +1078,376 @@ Deno.test("createRpcMetricsMiddleware does not modify frames", async () => {
 
   await transport.close();
 });
+
+// ---------------------------------------------------------------------------
+// New tests to strengthen observability/metrics middleware coverage
+// ---------------------------------------------------------------------------
+
+Deno.test("createRpcMetricsMiddleware tracks call message errors separately", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  // Send multiple call frames
+  const callFrame = encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  });
+
+  await transport.send(callFrame);
+  await transport.send(callFrame);
+  await transport.send(callFrame);
+
+  const snap = metrics.snapshot();
+  assertEquals(snap.framesByType.call, 3);
+  assertEquals(snap.totalFramesSent, 3);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware state isolation between multiple instances", async () => {
+  const inner1 = new MockTransport();
+  const inner2 = new MockTransport();
+
+  const metrics1 = createRpcMetricsMiddleware();
+  const metrics2 = createRpcMetricsMiddleware();
+
+  const transport1 = new MiddlewareTransport(inner1, [metrics1.middleware]);
+  const transport2 = new MiddlewareTransport(inner2, [metrics2.middleware]);
+
+  await transport1.start(() => {});
+  await transport2.start(() => {});
+
+  // Send different numbers of frames through each transport
+  await transport1.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await transport1.send(encodeBootstrapRequestFrame({ questionId: 2 }));
+
+  await transport2.send(encodeBootstrapRequestFrame({ questionId: 3 }));
+
+  // Verify state isolation
+  const snap1 = metrics1.snapshot();
+  const snap2 = metrics2.snapshot();
+
+  assertEquals(snap1.totalFramesSent, 2);
+  assertEquals(snap2.totalFramesSent, 1);
+  assertEquals(snap1.framesByType.bootstrap, 2);
+  assertEquals(snap2.framesByType.bootstrap, 1);
+
+  await transport1.close();
+  await transport2.close();
+});
+
+Deno.test("createLoggingMiddleware captures call frame details with custom logger", async () => {
+  const inner = new MockTransport();
+  const logs: string[] = [];
+
+  const mw = createLoggingMiddleware({
+    log: (msg) => logs.push(msg),
+    prefix: "[test]",
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const callFrame = encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  });
+
+  await transport.send(callFrame);
+
+  assertEquals(logs.length, 1);
+  assert(
+    logs[0].includes("[test]") && logs[0].includes("send"),
+    `expected log with prefix and direction, got: ${logs[0]}`,
+  );
+  assert(
+    logs[0].includes(String(callFrame.byteLength)),
+    `expected log to include frame size, got: ${logs[0]}`,
+  );
+
+  await transport.close();
+});
+
+Deno.test("createLoggingMiddleware with createRpcMetricsMiddleware compose correctly", async () => {
+  const inner = new MockTransport();
+  const logs: string[] = [];
+
+  const logging = createLoggingMiddleware({
+    log: (msg) => logs.push(msg),
+  });
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [
+    logging,
+    metrics.middleware,
+  ]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  await transport.send(bootstrapFrame);
+
+  // Verify both middleware ran
+  assertEquals(logs.length, 1, "logging middleware should have logged");
+  const snap = metrics.snapshot();
+  assertEquals(
+    snap.totalFramesSent,
+    1,
+    "metrics middleware should have counted",
+  );
+  assertEquals(snap.framesByType.bootstrap, 1);
+
+  await transport.close();
+});
+
+Deno.test("createFrameSizeLimitMiddleware rejects at exact byte over limit", async () => {
+  const inner = new MockTransport();
+
+  const mw = createFrameSizeLimitMiddleware(10);
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  // Exactly 11 bytes should be rejected (limit is 10)
+  let thrown: unknown;
+  try {
+    await transport.send(new Uint8Array(11));
+  } catch (err) {
+    thrown = err;
+  }
+
+  assert(
+    thrown instanceof TransportError &&
+      /exceeds limit/.test(thrown.message) &&
+      /11/.test(thrown.message) &&
+      /10/.test(thrown.message),
+    `expected TransportError with size details, got: ${String(thrown)}`,
+  );
+  assertEquals(inner.sent.length, 0);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware tracks bytes correctly with multiple frame types", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  const callFrame = encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  });
+
+  await transport.send(bootstrapFrame);
+  await transport.send(callFrame);
+
+  const snap = metrics.snapshot();
+  assertEquals(
+    snap.totalBytesSent,
+    bootstrapFrame.byteLength + callFrame.byteLength,
+  );
+  assertEquals(snap.totalFramesSent, 2);
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware captures all message types in bidirectional flow", async () => {
+  const inner = new MockTransport();
+  const events: { type: string; direction: RpcFrameDirection }[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onBootstrap(_frame, dir) {
+      events.push({ type: "bootstrap", direction: dir });
+    },
+    onCall(_frame, dir) {
+      events.push({ type: "call", direction: dir });
+    },
+    onReturn(_frame, dir) {
+      events.push({ type: "return", direction: dir });
+    },
+    onFinish(_frame, dir) {
+      events.push({ type: "finish", direction: dir });
+    },
+    onRelease(_frame, dir) {
+      events.push({ type: "release", direction: dir });
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  // Send frames in both directions
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await inner.emitInbound(encodeReturnResultsFrame({ answerId: 1 }));
+  await transport.send(
+    encodeCallRequestFrame({
+      questionId: 2,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 0,
+    }),
+  );
+  await transport.send(encodeFinishFrame({ questionId: 1 }));
+  await transport.send(encodeReleaseFrame({ id: 0, referenceCount: 1 }));
+
+  assertEquals(events.length, 5);
+  assertEquals(events[0].type, "bootstrap");
+  assertEquals(events[0].direction, "send");
+  assertEquals(events[1].type, "return");
+  assertEquals(events[1].direction, "receive");
+  assertEquals(events[2].type, "call");
+  assertEquals(events[2].direction, "send");
+  assertEquals(events[3].type, "finish");
+  assertEquals(events[3].direction, "send");
+  assertEquals(events[4].type, "release");
+  assertEquals(events[4].direction, "send");
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware onSnapshot not called without interval configured", async () => {
+  const inner = new MockTransport();
+  let snapshotCallCount = 0;
+
+  const metrics = createRpcMetricsMiddleware({
+    onSnapshot() {
+      snapshotCallCount += 1;
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 2 }));
+
+  // onSnapshot should not be called without snapshotIntervalFrames
+  assertEquals(snapshotCallCount, 0);
+
+  await transport.close();
+});
+
+Deno.test("middleware error in onSend propagates correctly", async () => {
+  const inner = new MockTransport();
+
+  const errorMw: RpcTransportMiddleware = {
+    onSend(_frame) {
+      throw new Error("middleware error in onSend");
+    },
+  };
+
+  const transport = new MiddlewareTransport(inner, [errorMw]);
+  await transport.start(() => {});
+
+  let thrown: unknown;
+  try {
+    await transport.send(new Uint8Array([0x01]));
+  } catch (err) {
+    thrown = err;
+  }
+
+  assert(
+    thrown instanceof Error &&
+      /middleware error in onSend/.test(thrown.message),
+    `expected middleware error, got: ${String(thrown)}`,
+  );
+  assertEquals(inner.sent.length, 0, "frame should not reach transport");
+
+  await transport.close();
+});
+
+Deno.test("middleware error in onReceive propagates correctly", async () => {
+  const inner = new MockTransport();
+
+  const errorMw: RpcTransportMiddleware = {
+    onReceive(_frame) {
+      throw new Error("middleware error in onReceive");
+    },
+  };
+
+  const transport = new MiddlewareTransport(inner, [errorMw]);
+  const received: Uint8Array[] = [];
+  await transport.start((frame) => {
+    received.push(new Uint8Array(frame));
+  });
+
+  let thrown: unknown;
+  try {
+    await inner.emitInbound(new Uint8Array([0x01]));
+  } catch (err) {
+    thrown = err;
+  }
+
+  assert(
+    thrown instanceof Error &&
+      /middleware error in onReceive/.test(thrown.message),
+    `expected middleware error, got: ${String(thrown)}`,
+  );
+  assertEquals(received.length, 0, "frame should not reach handler");
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware reset during active traffic does not corrupt state", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  // Send some frames
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 2 }));
+
+  let snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 2);
+
+  // Reset in the middle of activity
+  metrics.reset();
+
+  // Send more frames
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 3 }));
+
+  snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 1, "should only count post-reset frames");
+  assertEquals(snap.framesByType.bootstrap, 1);
+
+  await transport.close();
+});
+
+Deno.test("createLoggingMiddleware handles zero-byte frames", async () => {
+  const inner = new MockTransport();
+  const logs: string[] = [];
+
+  const mw = createLoggingMiddleware({
+    log: (msg) => logs.push(msg),
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  await transport.send(new Uint8Array(0));
+  await inner.emitInbound(new Uint8Array(0));
+
+  assertEquals(logs.length, 2);
+  assert(
+    logs[0].includes("0 bytes"),
+    `expected log to show 0 bytes, got: ${logs[0]}`,
+  );
+  assert(
+    logs[1].includes("0 bytes"),
+    `expected log to show 0 bytes, got: ${logs[1]}`,
+  );
+
+  await transport.close();
+});

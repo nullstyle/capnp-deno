@@ -143,8 +143,21 @@ export interface RpcClientCallOptions {
   onQuestionId?: (questionId: number) => void;
   /**
    * Whether to automatically send a `finish` message after receiving the
-   * response. Defaults to `true`. Set to `false` for pipelined calls where
-   * you need the question to remain open.
+   * response. Defaults to `true`.
+   *
+   * **Conditional behavior**: When `true`, a `finish` message is sent only if
+   * the server's return message has `noFinishNeeded = false`. The server may
+   * set `noFinishNeeded = true` when it has already released resources and
+   * does not need to be notified that the client is done with the answer.
+   *
+   * **Important**: {@link callRawPipelined} NEVER auto-finishes regardless of
+   * this setting, since pipelining requires the question to remain open. You
+   * MUST manually call {@link finish} for pipelined calls to clean up
+   * server-side state.
+   *
+   * **Consequence of disabling**: If you set `autoFinish = false` and never
+   * call {@link finish}, the server's answer table entry for this question
+   * will persist indefinitely, potentially causing resource leaks.
    */
   autoFinish?: boolean;
   /** Options forwarded to the auto-finish message, if `autoFinish` is enabled. */
@@ -579,9 +592,15 @@ export class SessionRpcClientTransport {
    * used to make pipelined calls on the (not-yet-resolved) result, plus
    * a promise for the actual result.
    *
-   * Unlike `callRaw`, this does NOT automatically send a finish frame.
-   * The caller MUST eventually call `finish()` on the returned questionId
-   * to clean up server-side state.
+   * **No auto-finish**: Unlike {@link callRaw}, this method does NOT
+   * automatically send a `finish` message, even if `autoFinish` is `true` in
+   * the options. This is necessary for promise pipelining to work correctly,
+   * as the question must remain open to allow downstream pipelined calls to
+   * reference it.
+   *
+   * The caller MUST eventually call {@link finish} with the returned
+   * `pipeline.questionId` to clean up server-side state and prevent resource
+   * leaks.
    *
    * This is the core method for promise pipelining (Level 2 RPC).
    */

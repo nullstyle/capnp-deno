@@ -1,7 +1,4 @@
-import {
-  type RpcClientTransportLike,
-  RpcConnectionPool,
-} from "../mod.ts";
+import { type RpcClientTransportLike, RpcConnectionPool } from "../mod.ts";
 import { assert, assertEquals, withTimeout } from "./test_utils.ts";
 
 const EMPTY = new Uint8Array();

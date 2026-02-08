@@ -296,11 +296,14 @@ function enforceNestingDepth(
   }
 
   const pending: PointerState[] = [{ segmentId: 0, pointerWord: 0, depth: 1 }];
-  const seen = new Set<string>();
+  const seen = new Set<bigint>();
 
   while (pending.length > 0) {
     const state = pending.pop()!;
-    const stateKey = `${state.segmentId}:${state.pointerWord}:${state.depth}`;
+    // Encode as bigint: segmentId (32 bits) << 45 | pointerWord (29 bits) << 16 | depth (16 bits)
+    // This avoids string allocation and GC pressure on deeply nested structures
+    const stateKey = (BigInt(state.segmentId) << 45n) |
+      (BigInt(state.pointerWord) << 16n) | BigInt(state.depth);
     if (seen.has(stateKey)) continue;
     seen.add(stateKey);
 

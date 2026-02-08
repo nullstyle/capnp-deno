@@ -337,7 +337,7 @@ Deno.test("ServerMiddleware onDispatch hooks execute in array order", async () =
   assertArrayEquals(order, ["dispatch-1", "dispatch-2", "dispatch-3"]);
 });
 
-Deno.test("ServerMiddleware onResponse hooks execute in reverse order", async () => {
+Deno.test("ServerMiddleware onResponse hooks execute in forward order", async () => {
   const order: string[] = [];
 
   const mw1: RpcServerMiddleware = {
@@ -375,7 +375,7 @@ Deno.test("ServerMiddleware onResponse hooks execute in reverse order", async ()
     paramsContent: encodeSingleU32StructMessage(0),
   }));
 
-  assertArrayEquals(order, ["response-3", "response-2", "response-1"]);
+  assertArrayEquals(order, ["response-1", "response-2", "response-3"]);
 });
 
 Deno.test("ServerMiddleware onIncomingFrame hooks execute in array order and early null stops chain", async () => {
@@ -555,9 +555,9 @@ Deno.test("ServerMiddleware full lifecycle ordering across multiple middleware",
     "mw2:frame",
     "mw1:dispatch",
     "mw2:dispatch",
-    // onResponse is in reverse order
-    "mw2:response",
+    // onResponse is in forward order (matching all other hooks)
     "mw1:response",
+    "mw2:response",
   ]);
 });
 

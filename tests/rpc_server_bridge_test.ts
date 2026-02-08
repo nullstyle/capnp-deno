@@ -459,6 +459,84 @@ Deno.test("RpcServerBridge validates capability registration and ref-count opera
   );
 });
 
+Deno.test("RpcServerBridge rejects release when referenceCount exceeds current refCount", () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  }, { capabilityIndex: 10, referenceCount: 5 });
+
+  // Attempting to release more than the current refCount should throw a ProtocolError
+  let excessiveReleaseThrown: unknown;
+  try {
+    bridge.releaseCapability(10, 100);
+  } catch (error) {
+    excessiveReleaseThrown = error;
+  }
+  assert(
+    excessiveReleaseThrown instanceof Error &&
+      /release referenceCount 100 exceeds current refCount 5/i.test(
+        excessiveReleaseThrown.message,
+      ),
+    `expected excessive release error, got: ${String(excessiveReleaseThrown)}`,
+  );
+
+  // Verify the capability is still registered with the original refCount
+  assertEquals(bridge.hasCapability(10), true);
+
+  // A valid release should work
+  assertEquals(bridge.releaseCapability(10, 3), true);
+  assertEquals(bridge.hasCapability(10), true);
+
+  // Another release that exactly matches should work and remove the capability
+  assertEquals(bridge.releaseCapability(10, 2), false);
+  assertEquals(bridge.hasCapability(10), false);
+});
+
+Deno.test("RpcServerBridge rejects malicious release frame with excessive referenceCount", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  }, { capabilityIndex: 10, referenceCount: 5 });
+
+  // Client sends a release frame with referenceCount=100 when refCount is only 5
+  let thrownError: unknown;
+  try {
+    await bridge.handleFrame(
+      encodeReleaseFrame({ id: 10, referenceCount: 100 }),
+    );
+  } catch (error) {
+    thrownError = error;
+  }
+
+  assert(
+    thrownError instanceof Error &&
+      /release referenceCount 100 exceeds current refCount 5/i.test(
+        thrownError.message,
+      ),
+    `expected excessive release error from handleFrame, got: ${
+      String(thrownError)
+    }`,
+  );
+
+  // Verify the capability is still registered with the original refCount
+  assertEquals(bridge.hasCapability(10), true);
+
+  // Valid releases should still work normally
+  const validRelease1 = await bridge.handleFrame(
+    encodeReleaseFrame({ id: 10, referenceCount: 3 }),
+  );
+  assertEquals(validRelease1, null);
+  assertEquals(bridge.hasCapability(10), true);
+
+  const validRelease2 = await bridge.handleFrame(
+    encodeReleaseFrame({ id: 10, referenceCount: 2 }),
+  );
+  assertEquals(validRelease2, null);
+  assertEquals(bridge.hasCapability(10), false);
+});
+
 Deno.test("RpcServerBridge rejects unsupported inbound message tags", async () => {
   const bridge = new RpcServerBridge();
   const bootstrap = encodeBootstrapRequestFrame({ questionId: 1 });

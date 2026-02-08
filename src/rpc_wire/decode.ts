@@ -62,14 +62,14 @@ function decodeCapTableFromPayload(
   }
 
   const stride = capList.dataWordCount + capList.pointerCount;
+  const itemRef: StructRef = {
+    segmentId: capList.segmentId,
+    startWord: 0,
+    dataWordCount: capList.dataWordCount,
+    pointerCount: capList.pointerCount,
+  };
   for (let i = 0; i < capList.elementCount; i += 1) {
-    const itemStart = capList.elementsStartWord + (i * stride);
-    const itemRef: StructRef = {
-      segmentId: capList.segmentId,
-      startWord: itemStart,
-      dataWordCount: capList.dataWordCount,
-      pointerCount: capList.pointerCount,
-    };
+    itemRef.startWord = capList.elementsStartWord + (i * stride);
     capTable.push({
       tag: readU16InStruct(table, itemRef, 0),
       id: readU32InStruct(table, itemRef, 4),

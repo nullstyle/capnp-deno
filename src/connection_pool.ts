@@ -338,41 +338,8 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     this.#closed = true;
 
     // Store the close promise so subsequent calls can await it.
-    this.#closePromise = (async () => {
-      // Wait for warm-up to finish so that any in-flight connections are
-      // captured and cleaned up below rather than being created after close.
-      await this.#warmupComplete;
-
-      // Reject all pending acquires.
-      const pendingCopy = this.#pending.splice(0);
-      this.#pendingSettled = 0;
-      for (const waiter of pendingCopy) {
-        clearTimeout(waiter.timer);
-        if (!waiter.settled) {
-          waiter.reject(new SessionError("connection pool is closed"));
-        }
-      }
-
-      // Close all idle connections.
-      const idleCopy = [...this.#idle.values()];
-      this.#idle.clear();
-      const closePromises: Promise<void>[] = [];
-      for (const entry of idleCopy) {
-        clearTimeout(entry.timer);
-        closePromises.push(this.#closeConnection(entry.conn));
-      }
-
-      // Close all active connections.
-      const activeCopy = [...this.#active];
-      this.#active.clear();
-      for (const conn of activeCopy) {
-        closePromises.push(this.#closeConnection(conn));
-      }
-
-      await Promise.all(closePromises);
-    })();
-
-    return this.#closePromise;
+    this.#closePromise = this.#doClose();
+    await this.#closePromise;
   }
 
   /**
@@ -403,6 +370,40 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
    */
   async [Symbol.asyncDispose](): Promise<void> {
     await this.close();
+  }
+
+  async #doClose(): Promise<void> {
+    // Wait for warm-up to finish so that any in-flight connections are
+    // captured and cleaned up below rather than being created after close.
+    await this.#warmupComplete;
+
+    // Reject all pending acquires.
+    const pendingCopy = this.#pending.splice(0);
+    this.#pendingSettled = 0;
+    for (const waiter of pendingCopy) {
+      clearTimeout(waiter.timer);
+      if (!waiter.settled) {
+        waiter.reject(new SessionError("connection pool is closed"));
+      }
+    }
+
+    // Close all idle connections.
+    const idleCopy = [...this.#idle.values()];
+    this.#idle.clear();
+    const closePromises: Promise<void>[] = [];
+    for (const entry of idleCopy) {
+      clearTimeout(entry.timer);
+      closePromises.push(this.#closeConnection(entry.conn));
+    }
+
+    // Close all active connections.
+    const activeCopy = [...this.#active];
+    this.#active.clear();
+    for (const conn of activeCopy) {
+      closePromises.push(this.#closeConnection(conn));
+    }
+
+    await Promise.all(closePromises);
   }
 
   async #createConnection(): Promise<RpcClientTransportLike> {

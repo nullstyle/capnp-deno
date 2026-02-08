@@ -822,7 +822,8 @@ Deno.test("RpcServerBridge: pipelined call waits for target question to resolve"
 });
 
 Deno.test({
-  name: "RpcServerBridge: pipelineRefCount prevents eviction during in-flight calls",
+  name:
+    "RpcServerBridge: pipelineRefCount prevents eviction during in-flight calls",
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
@@ -830,71 +831,71 @@ Deno.test({
       answerEvictionTimeoutMs: 50,
     });
 
-  let serviceResolve!: () => void;
-  const servicePromise = new Promise<void>((resolve) => {
-    serviceResolve = resolve;
-  });
+    let serviceResolve!: () => void;
+    const servicePromise = new Promise<void>((resolve) => {
+      serviceResolve = resolve;
+    });
 
-  // Factory that returns immediately
-  bridge.exportCapability({
-    interfaceId: 0xCCCCn,
-    dispatch: () => ({
-      content: encodeSingleU32StructMessage(1),
-      capTable: [{ tag: 1, id: 50 }],
-    }),
-  }, { capabilityIndex: 2 });
-
-  // Service with delayed resolution (this is what we pipeline to)
-  bridge.exportCapability({
-    interfaceId: 0xBBBBn,
-    dispatch: async () => {
-      await servicePromise;
-      return encodeSingleU32StructMessage(42);
-    },
-  }, { capabilityIndex: 50 });
-
-  // Call the factory (completes immediately)
-  await bridge.handleFrame(
-    encodeCallRequestFrame({
-      questionId: 1,
+    // Factory that returns immediately
+    bridge.exportCapability({
       interfaceId: 0xCCCCn,
-      methodId: 0,
-      targetImportedCap: 2,
-      paramsContent: encodeSingleU32StructMessage(0),
-    }),
-  );
-  assertEquals(bridge.answerTableSize, 1);
+      dispatch: () => ({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 50 }],
+      }),
+    }, { capabilityIndex: 2 });
 
-  // Start a pipelined call with delayed service (will hold pipelineRefCount > 0)
-  const pipelinedPromise = bridge.handleFrame(
-    encodeCallRequestFrame({
-      questionId: 2,
+    // Service with delayed resolution (this is what we pipeline to)
+    bridge.exportCapability({
       interfaceId: 0xBBBBn,
-      methodId: 0,
-      target: {
-        tag: 1,
-        promisedAnswer: { questionId: 1, transform: [] },
+      dispatch: async () => {
+        await servicePromise;
+        return encodeSingleU32StructMessage(42);
       },
-      paramsContent: encodeSingleU32StructMessage(0),
-    }),
-  );
+    }, { capabilityIndex: 50 });
 
-  // Wait beyond the eviction timeout
-  await new Promise((resolve) => setTimeout(resolve, 100));
+    // Call the factory (completes immediately)
+    await bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 1,
+        interfaceId: 0xCCCCn,
+        methodId: 0,
+        targetImportedCap: 2,
+        paramsContent: encodeSingleU32StructMessage(0),
+      }),
+    );
+    assertEquals(bridge.answerTableSize, 1);
 
-  // Both answer table entries should still exist (pipelined call is in-flight)
-  // Question 1 (the factory) and Question 2 (the pipelined call)
-  assertEquals(bridge.answerTableSize, 2);
+    // Start a pipelined call with delayed service (will hold pipelineRefCount > 0)
+    const pipelinedPromise = bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 2,
+        interfaceId: 0xBBBBn,
+        methodId: 0,
+        target: {
+          tag: 1,
+          promisedAnswer: { questionId: 1, transform: [] },
+        },
+        paramsContent: encodeSingleU32StructMessage(0),
+      }),
+    );
 
-  // Complete the pipelined call
-  serviceResolve();
-  await pipelinedPromise;
+    // Wait beyond the eviction timeout
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
-  // Now wait for eviction
-  await new Promise((resolve) => setTimeout(resolve, 100));
+    // Both answer table entries should still exist (pipelined call is in-flight)
+    // Question 1 (the factory) and Question 2 (the pipelined call)
+    assertEquals(bridge.answerTableSize, 2);
 
-  // Entry should now be evicted
-  assertEquals(bridge.answerTableSize, 0);
+    // Complete the pipelined call
+    serviceResolve();
+    await pipelinedPromise;
+
+    // Now wait for eviction
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Entry should now be evicted
+    assertEquals(bridge.answerTableSize, 0);
   },
 });
 
@@ -952,72 +953,72 @@ Deno.test({
       answerEvictionTimeoutMs: 30,
     });
 
-  let serviceResolve!: () => void;
-  const servicePromise = new Promise<void>((resolve) => {
-    serviceResolve = resolve;
-  });
+    let serviceResolve!: () => void;
+    const servicePromise = new Promise<void>((resolve) => {
+      serviceResolve = resolve;
+    });
 
-  // Factory that returns immediately
-  bridge.exportCapability({
-    interfaceId: 0xAAAAn,
-    dispatch: () =>
-      Promise.resolve({
-        content: encodeSingleU32StructMessage(1),
-        capTable: [{ tag: 1, id: 50 }],
-      }),
-  }, { capabilityIndex: 1 });
-
-  // Service with delayed resolution
-  bridge.exportCapability({
-    interfaceId: 0xBBBBn,
-    dispatch: async () => {
-      await servicePromise;
-      return encodeSingleU32StructMessage(42);
-    },
-  }, { capabilityIndex: 50 });
-
-  // Call the factory
-  await bridge.handleFrame(
-    encodeCallRequestFrame({
-      questionId: 1,
+    // Factory that returns immediately
+    bridge.exportCapability({
       interfaceId: 0xAAAAn,
-      methodId: 0,
-      targetImportedCap: 1,
-      paramsContent: encodeSingleU32StructMessage(0),
-    }),
-  );
-  assertEquals(bridge.answerTableSize, 1);
+      dispatch: () =>
+        Promise.resolve({
+          content: encodeSingleU32StructMessage(1),
+          capTable: [{ tag: 1, id: 50 }],
+        }),
+    }, { capabilityIndex: 1 });
 
-  // Start a long-running pipelined call
-  const pipelinedPromise = bridge.handleFrame(
-    encodeCallRequestFrame({
-      questionId: 2,
+    // Service with delayed resolution
+    bridge.exportCapability({
       interfaceId: 0xBBBBn,
-      methodId: 0,
-      target: {
-        tag: 1,
-        promisedAnswer: { questionId: 1, transform: [] },
+      dispatch: async () => {
+        await servicePromise;
+        return encodeSingleU32StructMessage(42);
       },
-      paramsContent: encodeSingleU32StructMessage(0),
-    }),
-  );
+    }, { capabilityIndex: 50 });
 
-  // Wait for eviction timeout to pass
-  await new Promise((resolve) => setTimeout(resolve, 80));
+    // Call the factory
+    await bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 1,
+        interfaceId: 0xAAAAn,
+        methodId: 0,
+        targetImportedCap: 1,
+        paramsContent: encodeSingleU32StructMessage(0),
+      }),
+    );
+    assertEquals(bridge.answerTableSize, 1);
 
-  // Both entries should still be present (pipelined call is in-flight)
-  // Question 1 and Question 2
-  assertEquals(bridge.answerTableSize, 2);
+    // Start a long-running pipelined call
+    const pipelinedPromise = bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 2,
+        interfaceId: 0xBBBBn,
+        methodId: 0,
+        target: {
+          tag: 1,
+          promisedAnswer: { questionId: 1, transform: [] },
+        },
+        paramsContent: encodeSingleU32StructMessage(0),
+      }),
+    );
 
-  // Now complete the pipelined call
-  serviceResolve();
-  await pipelinedPromise;
+    // Wait for eviction timeout to pass
+    await new Promise((resolve) => setTimeout(resolve, 80));
 
-  // Wait for next eviction timer
-  await new Promise((resolve) => setTimeout(resolve, 80));
+    // Both entries should still be present (pipelined call is in-flight)
+    // Question 1 and Question 2
+    assertEquals(bridge.answerTableSize, 2);
 
-  // Now both should be evicted
-  assertEquals(bridge.answerTableSize, 0);
+    // Now complete the pipelined call
+    serviceResolve();
+    await pipelinedPromise;
+
+    // Wait for next eviction timer
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // Now both should be evicted
+    assertEquals(bridge.answerTableSize, 0);
   },
 });
 

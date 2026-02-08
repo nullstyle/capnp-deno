@@ -248,9 +248,8 @@ export interface RpcServerBridgeOptions {
   maxEvictionRetries?: number;
   /**
    * Optional array of server-side middleware interceptors. Middleware
-   * hooks are executed in array order for `onIncomingFrame`, `onDispatch`,
-   * and `onError`. For `onResponse`, middleware is executed in reverse
-   * order (innermost first, outermost last).
+   * hooks are executed in array order for all hooks: `onIncomingFrame`,
+   * `onDispatch`, `onResponse`, and `onError`.
    */
   middleware?: RpcServerMiddleware[];
 }
@@ -494,6 +493,12 @@ export class RpcServerBridge {
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
       return false;
+    }
+
+    if (referenceCount > registered.refCount) {
+      throw new ProtocolError(
+        `release referenceCount ${referenceCount} exceeds current refCount ${registered.refCount} for capability ${capabilityIndex}`,
+      );
     }
 
     registered.refCount -= referenceCount;
@@ -972,9 +977,8 @@ export class RpcServerBridge {
         ),
       );
 
-      // Run onResponse middleware chain (reverse order).
-      for (let i = this.#middleware.length - 1; i >= 0; i--) {
-        const mw = this.#middleware[i];
+      // Run onResponse middleware chain.
+      for (const mw of this.#middleware) {
         if (mw.onResponse) {
           response = await mw.onResponse(response, mwCtx);
         }

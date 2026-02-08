@@ -401,7 +401,7 @@ Deno.test("server core: release frame decrements refcount and removes capability
   assertEquals(bridge.hasCapability(5), false);
 });
 
-Deno.test("server core: release frame with count larger than refcount removes capability", async () => {
+Deno.test("server core: release frame with count larger than refcount throws ProtocolError", async () => {
   const bridge = new RpcServerBridge();
   bridge.exportCapability({
     interfaceId: 0x1234n,
@@ -410,11 +410,26 @@ Deno.test("server core: release frame with count larger than refcount removes ca
 
   assertEquals(bridge.hasCapability(2), true);
 
-  // Release more references than exist.
-  await bridge.handleFrame(
-    encodeReleaseFrame({ id: 2, referenceCount: 5 }),
+  // Attempting to release more references than exist should throw.
+  let thrownError: unknown;
+  try {
+    await bridge.handleFrame(
+      encodeReleaseFrame({ id: 2, referenceCount: 5 }),
+    );
+  } catch (error) {
+    thrownError = error;
+  }
+
+  assert(
+    thrownError instanceof Error &&
+      /release referenceCount 5 exceeds current refCount 2/i.test(
+        thrownError.message,
+      ),
+    `expected excessive release error, got: ${String(thrownError)}`,
   );
-  assertEquals(bridge.hasCapability(2), false);
+
+  // Verify capability is still registered with its original refCount.
+  assertEquals(bridge.hasCapability(2), true);
 });
 
 Deno.test("server core: release for unknown capability is silently ignored", async () => {
