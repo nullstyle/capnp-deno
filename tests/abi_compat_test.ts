@@ -250,6 +250,7 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
 
   const abi = new WasmAbi(fake.exports);
   assertEquals(abi.capabilities.hasHostCallBridge, true);
+  assertEquals(abi.capabilities.hasHostCallReturnFrame, false);
   assertEquals(abi.capabilities.hasHostCallFrameRelease, true);
   assertEquals(abi.capabilities.hasLifecycleHelpers, true);
   assertEquals(abi.capabilities.hasSchemaManifest, true);
@@ -291,4 +292,31 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
   const manifest = abi.schemaManifestJson();
   assertEquals(manifest, '{"schema":"demo.capnp","serde":[]}');
   assertEquals(manifestFreed, true);
+});
+
+Deno.test("WasmAbi detects and uses optional host-call return-frame export", () => {
+  const seenReturnFrames: Uint8Array[] = [];
+  const fake = new FakeCapnpWasm({
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: undefined,
+      capnp_peer_respond_host_call_return_frame: (
+        _peer: number,
+        framePtr: number,
+        frameLen: number,
+      ) => {
+        seenReturnFrames.push(fake.readBytes(framePtr, frameLen));
+        return 1;
+      },
+      capnp_peer_respond_host_call_exception: () => 1,
+    },
+  });
+
+  const abi = new WasmAbi(fake.exports);
+  assertEquals(abi.capabilities.hasHostCallBridge, true);
+  assertEquals(abi.capabilities.hasHostCallReturnFrame, true);
+
+  abi.respondHostCallReturnFrame(1, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+  assertEquals(seenReturnFrames.length, 1);
+  assertBytes(seenReturnFrames[0], [0xde, 0xad, 0xbe, 0xef]);
 });

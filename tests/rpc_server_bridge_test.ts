@@ -68,6 +68,17 @@ class MockWasmHostAbi {
   }
 }
 
+class MockWasmHostAbiWithReturnFrame extends MockWasmHostAbi {
+  readonly returnFrames: Uint8Array[] = [];
+
+  respondHostCallReturnFrame(
+    _peer: number,
+    returnFrame: Uint8Array,
+  ): void {
+    this.returnFrames.push(new Uint8Array(returnFrame));
+  }
+}
+
 Deno.test("RpcServerBridge dispatches call frames via registered server", async () => {
   const bridge = new RpcServerBridge();
   const expectedParams = encodeSingleU32StructMessage(77);
@@ -153,6 +164,38 @@ Deno.test("RpcServerBridge returns exception for unknown capability", async () =
     assertEquals(
       /unknown capability index/.test(decoded.reason),
       true,
+    );
+  }
+});
+
+Deno.test("RpcServerBridge returns exception for promisedAnswer call targets", async () => {
+  const bridge = new RpcServerBridge();
+  const callFrame = encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  });
+
+  const response = await bridge.handleFrame(callFrame);
+  if (!response) {
+    throw new Error("expected response frame");
+  }
+
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "exception");
+  assertEquals(decoded.answerId, 2);
+  if (decoded.kind === "exception") {
+    assert(
+      /does not support promisedAnswer call targets/i.test(decoded.reason),
+      `unexpected exception reason: ${decoded.reason}`,
     );
   }
 });
@@ -295,6 +338,55 @@ Deno.test("RpcServerBridge host-call pump rejects unsupported cap-table results"
     /does not support response cap tables/i.test(hostAbi.exceptions[0].reason),
     `unexpected exception reason: ${hostAbi.exceptions[0].reason}`,
   );
+});
+
+Deno.test("RpcServerBridge host-call pump uses return-frame bridge for advanced results", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(42),
+        capTable: [{ tag: 1, id: 9 }],
+        releaseParamCaps: false,
+        noFinishNeeded: true,
+      }),
+  }, { capabilityIndex: 2 });
+
+  const hostAbi = new MockWasmHostAbiWithReturnFrame();
+  hostAbi.calls.push({
+    questionId: 18,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 18,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 2,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: hostAbi,
+  });
+  assertEquals(handled, 1);
+  assertEquals(hostAbi.results.length, 0);
+  assertEquals(hostAbi.exceptions.length, 0);
+  assertEquals(hostAbi.returnFrames.length, 1);
+
+  const decoded = decodeReturnFrame(hostAbi.returnFrames[0]);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 18);
+  assertEquals(decoded.releaseParamCaps, false);
+  assertEquals(decoded.noFinishNeeded, true);
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 42);
+    assertEquals(decoded.capTable.length, 1);
+    assertEquals(decoded.capTable[0].tag, 1);
+    assertEquals(decoded.capTable[0].id, 9);
+  }
 });
 
 Deno.test("RpcServerBridge validates capability registration and ref-count operations", () => {

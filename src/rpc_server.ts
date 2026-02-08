@@ -8,10 +8,12 @@ import {
   EMPTY_STRUCT_MESSAGE,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
+  RPC_CALL_TARGET_TAG_IMPORTED_CAP,
   RPC_MESSAGE_TAG_CALL,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
   type RpcCallRequest,
+  type RpcCallTarget,
   type RpcCapDescriptor,
   type RpcFinishRequest,
 } from "./rpc_wire.ts";
@@ -21,6 +23,7 @@ export interface CapabilityPointer {
 }
 
 export interface RpcCallContext {
+  readonly target: RpcCallTarget;
   readonly capability: CapabilityPointer;
   readonly methodOrdinal: number;
   readonly questionId: number;
@@ -56,7 +59,12 @@ export interface RpcServerBridgeOptions {
 export interface RpcServerWasmHost {
   readonly handle: number;
   readonly abi: {
+    supportsHostCallReturnFrame?: boolean;
     popHostCall(peer: number): WasmHostCallRecord | null;
+    respondHostCallReturnFrame?(
+      peer: number,
+      returnFrame: Uint8Array,
+    ): void;
     respondHostCallResults(
       peer: number,
       questionId: number,
@@ -297,6 +305,22 @@ export class RpcServerBridge {
     }
 
     const response = outcome.response;
+    const supportsReturnFrame = wasmHost.abi.supportsHostCallReturnFrame ??
+      true;
+    if (wasmHost.abi.respondHostCallReturnFrame && supportsReturnFrame) {
+      wasmHost.abi.respondHostCallReturnFrame(
+        wasmHost.handle,
+        encodeReturnResultsFrame({
+          answerId: call.questionId,
+          content: response.content,
+          capTable: response.capTable,
+          releaseParamCaps: response.releaseParamCaps,
+          noFinishNeeded: response.noFinishNeeded,
+        }),
+      );
+      return;
+    }
+
     if ((response.capTable?.length ?? 0) > 0) {
       wasmHost.abi.respondHostCallException(
         wasmHost.handle,
@@ -324,11 +348,20 @@ export class RpcServerBridge {
   }
 
   async #dispatchCall(call: RpcCallRequest): Promise<RpcDispatchOutcome> {
-    const registered = this.#dispatchByCapability.get(call.targetImportedCap);
+    if (call.target.tag !== RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
+      return {
+        kind: "exception",
+        reason:
+          "server bridge does not support promisedAnswer call targets yet",
+      };
+    }
+
+    const capabilityIndex = call.target.importedCap;
+    const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
       return {
         kind: "exception",
-        reason: `unknown capability index: ${call.targetImportedCap}`,
+        reason: `unknown capability index: ${capabilityIndex}`,
       };
     }
 
@@ -336,12 +369,13 @@ export class RpcServerBridge {
       return {
         kind: "exception",
         reason:
-          `interface mismatch for capability ${call.targetImportedCap}: expected ${registered.dispatch.interfaceId.toString()} got ${call.interfaceId.toString()}`,
+          `interface mismatch for capability ${capabilityIndex}: expected ${registered.dispatch.interfaceId.toString()} got ${call.interfaceId.toString()}`,
       };
     }
 
     const ctx: RpcCallContext = {
-      capability: { capabilityIndex: call.targetImportedCap },
+      target: call.target,
+      capability: { capabilityIndex },
       methodOrdinal: call.methodId,
       questionId: call.questionId,
       interfaceId: call.interfaceId,

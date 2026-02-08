@@ -18,6 +18,10 @@ Current scope:
     `_from_json`),
   - bootstrap + call success/error fixtures against the real peer state machine
     (success path uses test-only raw wasm hook `capnp_peer_set_bootstrap_stub`).
+  - non-fixture host-call bridge service flow
+    (`bootstrap -> call -> host
+    dispatch -> return`) with guarded soak/fault
+    coverage.
 - includes an early `capnpc-deno` scaffold (`tools/capnpc-deno/`) that parses
   `CodeGeneratorRequest` and emits TypeScript type/codec stubs.
 
@@ -193,6 +197,41 @@ established-session reconnect behavior for call paths:
 - `finish`/`release` failures are surfaced as non-retriable semantic errors
   because IDs are connection-scoped.
 
+## Generated RPC Wiring
+
+Generated `*_rpc.ts` modules are transport-agnostic scaffolds. Wire them
+explicitly through `RpcServerRuntime`/`SessionRpcClientTransport`:
+
+```ts
+const bridge = new RpcServerBridge();
+const runtime = new RpcServerRuntime(peer, transport, bridge);
+await runtime.start();
+
+const sessionClient = new SessionRpcClientTransport(
+  runtime.session,
+  transport,
+  {
+    interfaceId: PingerInterfaceId,
+  },
+);
+const bootstrap = await sessionClient.bootstrap();
+
+bridge.exportCapability(
+  createPingerServer({
+    async ping(params) {
+      return {/* typed result */};
+    },
+  }),
+  { capabilityIndex: bootstrap.capabilityIndex },
+);
+
+const client = createPingerClient(sessionClient, bootstrap);
+await client.ping({/* typed params */});
+```
+
+For explicit lifecycle control, call `SessionRpcClientTransport.callRaw(...)`
+with `{ autoFinish: false }`, then send `finish(...)`/`release(...)` manually.
+
 ## Development
 
 ```sh
@@ -250,8 +289,12 @@ Current scaffold limitations:
   is still scaffold-level (client + generated server dispatch emit implemented;
   full capability lifecycle/bridge integration is pending),
 - `SessionRpcClientTransport` supports non-empty payloads and cap-table
-  metadata, but deeper promise pipelining and fully automatic reconnect loops
-  are still in progress,
+  metadata, and wire helpers now support promisedAnswer call targets; deeper
+  promise pipelining orchestration and fully automatic reconnect loops are still
+  in progress,
+- host-call bridge advanced `Return` responses (result cap tables/non-default
+  return flags) require wasm `respond_host_call_return_frame` or equivalent;
+  current bundled `capnp-zig` ABI does not expose that export yet,
 - plugin invocation defaults to file-emitting mode (cwd output directory);
   `CodeGeneratorResponse` stdout mode is opt-in via `--plugin-response`.
 

@@ -43,6 +43,11 @@ export interface CapnpWasmExports {
     payload_ptr: number,
     payload_len: number,
   ): number;
+  capnp_peer_respond_host_call_return_frame?(
+    peer: number,
+    return_frame_ptr: number,
+    return_frame_len: number,
+  ): number;
   capnp_peer_respond_host_call_exception?(
     peer: number,
     question_id: number,
@@ -90,6 +95,7 @@ export interface WasmAbiOptions {
 export interface WasmAbiCapabilities {
   hasPeerPopCommit: boolean;
   hasHostCallBridge: boolean;
+  hasHostCallReturnFrame: boolean;
   hasHostCallFrameRelease: boolean;
   hasLifecycleHelpers: boolean;
   hasBootstrapStubIdentity: boolean;
@@ -160,6 +166,11 @@ function readOptionalU32(
 }
 
 function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
+  const hasHostCallResults =
+    typeof exports.capnp_peer_respond_host_call_results === "function";
+  const hasHostCallReturnFrame =
+    typeof exports.capnp_peer_respond_host_call_return_frame === "function";
+
   const abiVersion = readOptionalU32(
     exports.capnp_wasm_abi_version,
     "capnp_wasm_abi_version",
@@ -205,8 +216,9 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
   return {
     hasPeerPopCommit: typeof exports.capnp_peer_pop_commit === "function",
     hasHostCallBridge: typeof exports.capnp_peer_pop_host_call === "function" &&
-      typeof exports.capnp_peer_respond_host_call_results === "function" &&
+      (hasHostCallResults || hasHostCallReturnFrame) &&
       typeof exports.capnp_peer_respond_host_call_exception === "function",
+    hasHostCallReturnFrame,
     hasHostCallFrameRelease:
       typeof exports.capnp_peer_free_host_call_frame === "function",
     hasLifecycleHelpers: typeof exports.capnp_peer_send_finish === "function" &&
@@ -280,6 +292,12 @@ export function getCapnpWasmExports(
     exports.capnp_peer_respond_host_call_results = expectFunction(
       raw.capnp_peer_respond_host_call_results,
       "capnp_peer_respond_host_call_results",
+    );
+  }
+  if (raw.capnp_peer_respond_host_call_return_frame !== undefined) {
+    exports.capnp_peer_respond_host_call_return_frame = expectFunction(
+      raw.capnp_peer_respond_host_call_return_frame,
+      "capnp_peer_respond_host_call_return_frame",
     );
   }
   if (raw.capnp_peer_respond_host_call_exception !== undefined) {
@@ -562,6 +580,32 @@ export class WasmAbi {
       }
     } finally {
       this.free(ptr, payloadFrame.byteLength);
+    }
+  }
+
+  respondHostCallReturnFrame(
+    peer: number,
+    returnFrame: Uint8Array,
+  ): void {
+    const fn = this.exports.capnp_peer_respond_host_call_return_frame;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_respond_host_call_return_frame",
+      );
+    }
+
+    const ptr = this.alloc(returnFrame.byteLength);
+    try {
+      if (returnFrame.byteLength > 0) {
+        this.bytes().set(returnFrame, ptr);
+      }
+      this.clearError();
+      const ok = fn(peer, ptr, returnFrame.byteLength);
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_respond_host_call_return_frame failed");
+      }
+    } finally {
+      this.free(ptr, returnFrame.byteLength);
     }
   }
 

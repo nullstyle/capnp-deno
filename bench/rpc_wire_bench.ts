@@ -104,7 +104,7 @@ Deno.bench({
     const decoded = decodeCallRequestFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
     consumeNumber(decoded.questionId);
     consumeNumber(decoded.methodId);
-    consumeNumber(decoded.targetImportedCap);
+    consumeNumber(decoded.targetImportedCap ?? 0);
   },
 });
 

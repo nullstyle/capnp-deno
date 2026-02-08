@@ -12,6 +12,8 @@ import {
   encodeFinishFrame,
   encodeReleaseFrame,
   extractBootstrapCapabilityIndex,
+  RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+  type RpcCallTarget,
   type RpcCapDescriptor,
 } from "./rpc_wire.ts";
 
@@ -27,6 +29,7 @@ export interface RpcClientCallOptions {
   autoFinish?: boolean;
   finish?: RpcFinishOptions;
   paramsCapTable?: RpcCapDescriptor[];
+  target?: RpcCallTarget;
 }
 
 export interface RpcClientCallResult {
@@ -212,11 +215,15 @@ export class SessionRpcClientTransport {
     return await this.#enqueue(async () => {
       const questionId = this.#allocQuestionId();
       options.onQuestionId?.(questionId);
+      const target = options.target ?? {
+        tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+        importedCap: capability.capabilityIndex,
+      };
       const frame = encodeCallRequestFrame({
         questionId,
         interfaceId: this.#interfaceId,
         methodId: methodOrdinal,
-        targetImportedCap: capability.capabilityIndex,
+        target,
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
       });

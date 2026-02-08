@@ -24,6 +24,7 @@ import type {
   RpcBootstrapRequest,
   RpcCallFrameRequest,
   RpcCallRequest,
+  RpcCallTarget,
   RpcCapabilityPointer,
   RpcCapDescriptor,
   RpcClientCallOptions,
@@ -35,6 +36,8 @@ import type {
   RpcObservabilityAttributes,
   RpcObservabilityAttributeValue,
   RpcObservabilityEvent,
+  RpcPromisedAnswerOp,
+  RpcPromisedAnswerTarget,
   RpcReleaseRequest,
   RpcReturnException,
   RpcReturnExceptionFrameRequest,
@@ -101,6 +104,7 @@ type PublicTypeExportSmoke = {
   rpcBootstrapRequest: RpcBootstrapRequest;
   rpcCallFrameRequest: RpcCallFrameRequest;
   rpcCallRequest: RpcCallRequest;
+  rpcCallTarget: RpcCallTarget;
   rpcCapDescriptor: RpcCapDescriptor;
   rpcCapabilityPointer: RpcCapabilityPointer;
   rpcClientCallOptions: RpcClientCallOptions;
@@ -118,6 +122,8 @@ type PublicTypeExportSmoke = {
   rpcReturnMessage: RpcReturnMessage;
   rpcReturnResults: RpcReturnResults;
   rpcReturnResultsFrameRequest: RpcReturnResultsFrameRequest;
+  rpcPromisedAnswerOp: RpcPromisedAnswerOp;
+  rpcPromisedAnswerTarget: RpcPromisedAnswerTarget;
   rpcServerBridgeOptions: RpcServerBridgeOptions;
   rpcServerRuntimeHostCallPumpOptions: RpcServerRuntimeHostCallPumpOptions;
   rpcServerRuntimeOptions: RpcServerRuntimeOptions;
@@ -202,6 +208,10 @@ type AssertCreateSessionAutoStart = Assert<
   >
 >;
 
+type AssertWasmAbiCapabilitiesHasHostCallReturnFrame = Assert<
+  IsEqual<WasmAbiCapabilities["hasHostCallReturnFrame"], boolean>
+>;
+
 type StaticAssertions = [
   AssertTypeExportsExist,
   AssertRpcTransportStartSignature,
@@ -213,6 +223,7 @@ type StaticAssertions = [
   AssertRemapReturnAssignable,
   AssertReconnectOnRetrySignature,
   AssertCreateSessionAutoStart,
+  AssertWasmAbiCapabilitiesHasHostCallReturnFrame,
 ];
 
 const STATIC_ASSERTIONS: StaticAssertions = [
@@ -226,8 +237,9 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 10);
+  assert(STATIC_ASSERTIONS.length === 11);
 });

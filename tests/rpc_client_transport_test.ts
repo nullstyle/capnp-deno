@@ -220,6 +220,70 @@ Deno.test("SessionRpcClientTransport callRaw preserves call/result cap tables", 
   }
 });
 
+Deno.test("SessionRpcClientTransport can override call target with promisedAnswer", async () => {
+  const params = encodeSingleU32StructMessage(7);
+  let seenPromisedTarget = false;
+
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        assertEquals(call.questionId, 1);
+        assertEquals(call.target.tag, 1);
+        if (call.target.tag !== 1) {
+          throw new Error(
+            `expected promisedAnswer target, got: ${call.target.tag}`,
+          );
+        }
+        assertEquals(call.target.promisedAnswer.questionId, 55);
+        assertEquals(call.target.promisedAnswer.transform?.length, 1);
+        assertEquals(call.target.promisedAnswer.transform?.[0].tag, 1);
+        assertEquals(call.target.promisedAnswer.transform?.[0].pointerIndex, 2);
+        seenPromisedTarget = true;
+        return [
+          encodeReturnResultsFrame({
+            answerId: call.questionId,
+            content: encodeSingleU32StructMessage(8),
+          }),
+        ];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    const response = await client.callRaw(
+      { capabilityIndex: 0 },
+      9,
+      params,
+      {
+        target: {
+          tag: 1,
+          promisedAnswer: {
+            questionId: 55,
+            transform: [{ tag: 1, pointerIndex: 2 }],
+          },
+        },
+      },
+    );
+    assertEquals(decodeSingleU32StructMessage(response.contentBytes), 8);
+    assertEquals(seenPromisedTarget, true);
+  } finally {
+    await session.close();
+  }
+});
+
 Deno.test("SessionRpcClientTransport sends release frames", async () => {
   let seenRelease = false;
 

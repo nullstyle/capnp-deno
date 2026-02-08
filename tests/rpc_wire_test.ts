@@ -100,12 +100,51 @@ Deno.test("rpc wire transports non-empty call payload content", () => {
   assertEquals(decoded.interfaceId, 0x1234n);
   assertEquals(decoded.methodId, 9);
   assertEquals(decoded.targetImportedCap, 3);
+  assertEquals(decoded.target.tag, 0);
   assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 77);
   assertEquals(decoded.paramsCapTable.length, 2);
   assertEquals(decoded.paramsCapTable[0].tag, 1);
   assertEquals(decoded.paramsCapTable[0].id, 7);
   assertEquals(decoded.paramsCapTable[1].tag, 3);
   assertEquals(decoded.paramsCapTable[1].id, 9);
+});
+
+Deno.test("rpc wire encodes and decodes promisedAnswer call targets", () => {
+  const params = encodeSingleU32StructMessage(55);
+  const encoded = encodeCallRequestFrame({
+    questionId: 31,
+    interfaceId: 0x1234n,
+    methodId: 2,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 17,
+        transform: [
+          { tag: 0 },
+          { tag: 1, pointerIndex: 3 },
+        ],
+      },
+    },
+    paramsContent: params,
+  });
+
+  const decoded = decodeCallRequestFrame(encoded);
+  assertEquals(decoded.questionId, 31);
+  assertEquals(decoded.interfaceId, 0x1234n);
+  assertEquals(decoded.methodId, 2);
+  assertEquals(decoded.target.tag, 1);
+  if (decoded.target.tag !== 1) {
+    throw new Error(
+      `expected promisedAnswer target, got: ${decoded.target.tag}`,
+    );
+  }
+  assertEquals(decoded.target.promisedAnswer.questionId, 17);
+  assertEquals(decoded.target.promisedAnswer.transform?.length, 2);
+  assertEquals(decoded.target.promisedAnswer.transform?.[0].tag, 0);
+  assertEquals(decoded.target.promisedAnswer.transform?.[1].tag, 1);
+  assertEquals(decoded.target.promisedAnswer.transform?.[1].pointerIndex, 3);
+  assertEquals(decoded.targetImportedCap, undefined);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 55);
 });
 
 Deno.test("rpc wire decodes bootstrap success return and extracts capability index", () => {
@@ -311,13 +350,65 @@ Deno.test("rpc wire rejects unsupported call target tags", () => {
     }),
     (view) => {
       // Target struct is at word 9; target tag is u16 at byte offset 4.
-      view.setUint16(8 + (9 * 8) + 4, 1, true);
+      view.setUint16(8 + (9 * 8) + 4, 99, true);
     },
   );
 
   assertThrows(
     () => decodeCallRequestFrame(frame),
-    /unsupported call target tag: 1/i,
+    /unsupported call target tag: 99/i,
+  );
+});
+
+Deno.test("rpc wire rejects promisedAnswer call targets with null promised pointer", () => {
+  const frame = withFrameMutation(
+    encodeCallRequestFrame({
+      questionId: 12,
+      interfaceId: 0x1234n,
+      methodId: 1,
+      target: {
+        tag: 1,
+        promisedAnswer: {
+          questionId: 7,
+          transform: [],
+        },
+      },
+    }),
+    (view) => {
+      // Target struct pointer slot 0 is at word 10.
+      view.setBigUint64(8 + (10 * 8), 0n, true);
+    },
+  );
+
+  assertThrows(
+    () => decodeCallRequestFrame(frame),
+    /promisedAnswer pointer is null/i,
+  );
+});
+
+Deno.test("rpc wire rejects unsupported promisedAnswer transform op tags", () => {
+  const frame = withFrameMutation(
+    encodeCallRequestFrame({
+      questionId: 12,
+      interfaceId: 0x1234n,
+      methodId: 1,
+      target: {
+        tag: 1,
+        promisedAnswer: {
+          questionId: 7,
+          transform: [{ tag: 0 }],
+        },
+      },
+    }),
+    (view) => {
+      // PromisedAnswer op[0] data word starts at word 14.
+      view.setUint16(8 + (14 * 8), 99, true);
+    },
+  );
+
+  assertThrows(
+    () => decodeCallRequestFrame(frame),
+    /unsupported promisedAnswer op tag: 99/i,
   );
 });
 

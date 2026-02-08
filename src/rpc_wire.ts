@@ -10,6 +10,12 @@ export const RPC_MESSAGE_TAG_FINISH = 4;
 export const RPC_MESSAGE_TAG_RELEASE = 6;
 export const RPC_MESSAGE_TAG_BOOTSTRAP = 8;
 
+export const RPC_CALL_TARGET_TAG_IMPORTED_CAP = 0;
+export const RPC_CALL_TARGET_TAG_PROMISED_ANSWER = 1;
+
+export const RPC_PROMISED_ANSWER_OP_TAG_NOOP = 0;
+export const RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD = 1;
+
 const RETURN_TAG_RESULTS = 0;
 const RETURN_TAG_EXCEPTION = 1;
 
@@ -43,7 +49,8 @@ export interface RpcCallRequest {
   questionId: number;
   interfaceId: bigint;
   methodId: number;
-  targetImportedCap: number;
+  target: RpcCallTarget;
+  targetImportedCap?: number;
   paramsContent: Uint8Array;
   paramsCapTable: RpcCapDescriptor[];
 }
@@ -63,10 +70,31 @@ export interface RpcCallFrameRequest {
   questionId: number;
   interfaceId: bigint;
   methodId: number;
-  targetImportedCap: number;
+  targetImportedCap?: number;
+  target?: RpcCallTarget;
   paramsContent?: Uint8Array;
   paramsCapTable?: RpcCapDescriptor[];
 }
+
+export interface RpcPromisedAnswerOp {
+  tag: number;
+  pointerIndex?: number;
+}
+
+export interface RpcPromisedAnswerTarget {
+  questionId: number;
+  transform?: RpcPromisedAnswerOp[];
+}
+
+export type RpcCallTarget =
+  | {
+    tag: typeof RPC_CALL_TARGET_TAG_IMPORTED_CAP;
+    importedCap: number;
+  }
+  | {
+    tag: typeof RPC_CALL_TARGET_TAG_PROMISED_ANSWER;
+    promisedAnswer: RpcPromisedAnswerTarget;
+  };
 
 export interface RpcCapDescriptor {
   tag: number;
@@ -475,6 +503,168 @@ function ensureU64(value: bigint, name: string): bigint {
   return value;
 }
 
+function normalizeCallTarget(
+  request: RpcCallFrameRequest,
+): RpcCallTarget {
+  if (request.target !== undefined) {
+    if (request.target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
+      return {
+        tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+        importedCap: ensureU32(
+          request.target.importedCap,
+          "target.importedCap",
+        ),
+      };
+    }
+    return {
+      tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+      promisedAnswer: {
+        questionId: ensureU32(
+          request.target.promisedAnswer.questionId,
+          "target.promisedAnswer.questionId",
+        ),
+        transform: request.target.promisedAnswer.transform?.map((op, index) =>
+          normalizePromisedAnswerOp(
+            op,
+            `target.promisedAnswer.transform[${index}]`,
+          )
+        ),
+      },
+    };
+  }
+
+  if (request.targetImportedCap === undefined) {
+    throw new ProtocolError(
+      "encodeCallRequestFrame requires either target or targetImportedCap",
+    );
+  }
+  return {
+    tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+    importedCap: ensureU32(request.targetImportedCap, "targetImportedCap"),
+  };
+}
+
+function normalizePromisedAnswerOp(
+  op: RpcPromisedAnswerOp,
+  name: string,
+): RpcPromisedAnswerOp {
+  if (op.tag === RPC_PROMISED_ANSWER_OP_TAG_NOOP) {
+    return { tag: RPC_PROMISED_ANSWER_OP_TAG_NOOP };
+  }
+  if (op.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
+    if (op.pointerIndex === undefined) {
+      throw new ProtocolError(
+        `${name}.pointerIndex is required for getPointerField`,
+      );
+    }
+    return {
+      tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+      pointerIndex: ensureU16(op.pointerIndex, `${name}.pointerIndex`),
+    };
+  }
+  throw new ProtocolError(`${name}.tag is unsupported: ${op.tag}`);
+}
+
+function encodePromisedAnswerTransform(
+  builder: MessageBuilder,
+  pointerWord: number,
+  transform: RpcPromisedAnswerOp[] | undefined,
+): void {
+  const ops = transform ?? [];
+  if (ops.length === 0) {
+    builder.writeWord(pointerWord, 0n);
+    return;
+  }
+
+  const tagWord = builder.allocWords(1 + ops.length);
+  builder.setListPointer(pointerWord, tagWord, 7, ops.length);
+  builder.writeWord(tagWord, inlineCompositeTag(ops.length, 1, 0));
+  for (let i = 0; i < ops.length; i += 1) {
+    const normalized = normalizePromisedAnswerOp(
+      ops[i],
+      `promisedAnswer.transform[${i}]`,
+    );
+    const elemWord = tagWord + 1 + i;
+    builder.writeU16(
+      elemWord,
+      0,
+      ensureU16(normalized.tag, "promisedAnswer op tag"),
+    );
+    if (normalized.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
+      builder.writeU16(
+        elemWord,
+        2,
+        ensureU16(normalized.pointerIndex!, "promisedAnswer op pointerIndex"),
+      );
+    }
+  }
+}
+
+function decodePromisedAnswerTransform(
+  segment: Uint8Array,
+  pointerWord: number,
+): RpcPromisedAnswerOp[] {
+  const list = decodeStructListPointer(segment, pointerWord);
+  if (!list) return [];
+  const stride = list.dataWordCount + list.pointerCount;
+  const out: RpcPromisedAnswerOp[] = [];
+  for (let i = 0; i < list.elementCount; i += 1) {
+    const elemWord = list.elementsStartWord + (i * stride);
+    const elemRef: StructRef = {
+      startWord: elemWord,
+      dataWordCount: list.dataWordCount,
+      pointerCount: list.pointerCount,
+    };
+    const tag = readU16InStruct(segment, elemRef, 0);
+    if (tag === RPC_PROMISED_ANSWER_OP_TAG_NOOP) {
+      out.push({ tag: RPC_PROMISED_ANSWER_OP_TAG_NOOP });
+      continue;
+    }
+    if (tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
+      out.push({
+        tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+        pointerIndex: readU16InStruct(segment, elemRef, 2),
+      });
+      continue;
+    }
+    throw new ProtocolError(`unsupported promisedAnswer op tag: ${tag}`);
+  }
+  return out;
+}
+
+function decodeCallTarget(
+  segment: Uint8Array,
+  target: StructRef,
+): RpcCallTarget {
+  const targetTag = readU16InStruct(segment, target, 4);
+  if (targetTag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
+    return {
+      tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+      importedCap: readU32InStruct(segment, target, 0),
+    };
+  }
+  if (targetTag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
+    const promisedRef = decodeStructPointer(
+      segment,
+      pointerWordIndex(target, 0),
+    );
+    if (!promisedRef) {
+      throw new ProtocolError("call target promisedAnswer pointer is null");
+    }
+    return {
+      tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+      promisedAnswer: {
+        questionId: readU32InStruct(segment, promisedRef, 0),
+        transform: decodePromisedAnswerTransform(
+          segment,
+          pointerWordIndex(promisedRef, 0),
+        ),
+      },
+    };
+  }
+  throw new ProtocolError(`unsupported call target tag: ${targetTag}`);
+}
+
 function encodeSigned30(value: number): bigint {
   if (!Number.isInteger(value) || value < -(1 << 29) || value > (1 << 29) - 1) {
     throw new ProtocolError(`pointer offset out of signed30 range: ${value}`);
@@ -771,10 +961,7 @@ export function encodeCallRequestFrame(
   const questionId = ensureU32(request.questionId, "questionId");
   const interfaceId = ensureU64(request.interfaceId, "interfaceId");
   const methodId = ensureU16(request.methodId, "methodId");
-  const targetImportedCap = ensureU32(
-    request.targetImportedCap,
-    "targetImportedCap",
-  );
+  const target = normalizeCallTarget(request);
 
   const builder = new MessageBuilder();
 
@@ -791,8 +978,24 @@ export function encodeCallRequestFrame(
 
   const targetWord = builder.allocWords(2); // MessageTarget { data=1, ptrs=1 }
   builder.setStructPointer(callWord + 3, targetWord, 1, 1);
-  builder.writeU32(targetWord, 0, targetImportedCap);
-  builder.writeU16(targetWord, 4, 0); // importedCap
+  if (target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
+    builder.writeU32(targetWord, 0, target.importedCap);
+    builder.writeU16(targetWord, 4, RPC_CALL_TARGET_TAG_IMPORTED_CAP);
+  } else {
+    builder.writeU16(targetWord, 4, RPC_CALL_TARGET_TAG_PROMISED_ANSWER);
+    const promisedWord = builder.allocWords(2); // PromisedAnswer { data=1, ptrs=1 }
+    builder.setStructPointer(targetWord + 1, promisedWord, 1, 1);
+    builder.writeU32(
+      promisedWord,
+      0,
+      target.promisedAnswer.questionId,
+    );
+    encodePromisedAnswerTransform(
+      builder,
+      promisedWord + 1,
+      target.promisedAnswer.transform,
+    );
+  }
 
   const payloadWord = builder.allocWords(2); // Payload { data=0, ptrs=2 }
   builder.setStructPointer(callWord + 4, payloadWord, 0, 2);
@@ -938,10 +1141,7 @@ export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
   if (!call) throw new ProtocolError("call payload pointer is null");
   const target = decodeStructPointer(segment, pointerWordIndex(call, 0));
   if (!target) throw new ProtocolError("call target pointer is null");
-  const targetTag = readU16InStruct(segment, target, 4);
-  if (targetTag !== 0) {
-    throw new ProtocolError(`unsupported call target tag: ${targetTag}`);
-  }
+  const callTarget = decodeCallTarget(segment, target);
 
   let paramsContent = new Uint8Array(EMPTY_STRUCT_MESSAGE);
   let paramsCapTable: RpcCapDescriptor[] = [];
@@ -960,14 +1160,18 @@ export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
     );
   }
 
-  return {
+  const request: RpcCallRequest = {
     questionId: readU32InStruct(segment, call, 0),
     interfaceId: readU64InStruct(segment, call, 8),
     methodId: readU16InStruct(segment, call, 4),
-    targetImportedCap: readU32InStruct(segment, target, 0),
+    target: callTarget,
     paramsContent,
     paramsCapTable,
   };
+  if (callTarget.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
+    request.targetImportedCap = callTarget.importedCap;
+  }
+  return request;
 }
 
 export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {

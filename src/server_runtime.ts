@@ -92,7 +92,20 @@ export class RpcServerRuntime {
     this.bridge = bridge;
     this.#wasmHost = options.wasmHost ??
       (peer.abi.capabilities.hasHostCallBridge
-        ? { handle: peer.handle, abi: peer.abi }
+        ? {
+          handle: peer.handle,
+          abi: {
+            supportsHostCallReturnFrame:
+              peer.abi.capabilities.hasHostCallReturnFrame,
+            popHostCall: (handle) => peer.abi.popHostCall(handle),
+            respondHostCallReturnFrame: (handle, frame) =>
+              peer.abi.respondHostCallReturnFrame(handle, frame),
+            respondHostCallResults: (handle, questionId, payloadFrame) =>
+              peer.abi.respondHostCallResults(handle, questionId, payloadFrame),
+            respondHostCallException: (handle, questionId, reason) =>
+              peer.abi.respondHostCallException(handle, questionId, reason),
+          },
+        }
         : null);
 
     const hostCallPump = options.hostCallPump ?? {};

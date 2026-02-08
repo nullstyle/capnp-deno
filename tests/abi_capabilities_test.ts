@@ -104,6 +104,7 @@ Deno.test("WasmAbi host-call/lifecycle/schema helpers fail cleanly when exports 
   const abi = new WasmAbi(fake.exports);
 
   assertEquals(abi.capabilities.hasHostCallBridge, false);
+  assertEquals(abi.capabilities.hasHostCallReturnFrame, false);
   assertEquals(abi.capabilities.hasLifecycleHelpers, false);
   assertEquals(abi.capabilities.hasSchemaManifest, false);
 
@@ -114,6 +115,10 @@ Deno.test("WasmAbi host-call/lifecycle/schema helpers fail cleanly when exports 
   assertThrows(
     () => abi.respondHostCallResults(1, 1, new Uint8Array()),
     /missing wasm export: capnp_peer_respond_host_call_results/i,
+  );
+  assertThrows(
+    () => abi.respondHostCallReturnFrame(1, new Uint8Array()),
+    /missing wasm export: capnp_peer_respond_host_call_return_frame/i,
   );
   assertThrows(
     () => abi.respondHostCallException(1, 1, "boom"),

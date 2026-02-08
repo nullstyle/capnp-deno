@@ -20,7 +20,7 @@ fi
 capnpc_zig_root="$(cd "$capnpc_zig_root" && pwd)"
 
 cd "$capnpc_zig_root"
-zig build wasm-deno
+zig build wasm-deno -Doptimize=ReleaseSmall
 
 wasm_src_legacy="$capnpc_zig_root/zig-out/bin/capnp_deno.wasm"
 wasm_src_host="$capnpc_zig_root/zig-out/bin/capnp_wasm_host.wasm"
@@ -38,4 +38,20 @@ fi
 
 mkdir -p "$artifacts_dir"
 cp "$wasm_src" "$artifacts_dir/capnp_deno.wasm"
+
+# Optionally post-optimize with Binaryen when available.
+if command -v wasm-opt >/dev/null 2>&1; then
+  wasm_tmp="$artifacts_dir/capnp_deno.wasm.tmp"
+  if wasm-opt --enable-bulk-memory -Oz --strip-debug \
+    -o "$wasm_tmp" \
+    "$artifacts_dir/capnp_deno.wasm"; then
+    mv "$wasm_tmp" "$artifacts_dir/capnp_deno.wasm"
+  else
+    rm -f "$wasm_tmp"
+    echo "wasm-opt failed; keeping unoptimized wasm artifact." >&2
+  fi
+else
+  echo "wasm-opt not found; skipping post-link wasm optimization." >&2
+fi
+
 echo "Wrote $artifacts_dir/capnp_deno.wasm"
