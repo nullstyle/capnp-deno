@@ -3,9 +3,9 @@
   "version": "0.0.0-dev",
   "exports": "./mod.ts",
   "tasks": {
-    "fmt": "deno fmt mod.ts src tests examples docs scripts deno.json README.md AGENTS.md",
+    "fmt": "deno fmt mod.ts src tests bench examples docs scripts deno.json README.md AGENTS.md",
     "lint": "deno lint",
-    "check": "deno check mod.ts src/*.ts src/transports/*.ts tools/capnpc-deno/*.ts tests/*.ts examples/*.ts",
+    "check": "deno check mod.ts src/*.ts src/transports/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
     "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64 tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
@@ -15,6 +15,9 @@
     "test": "deno task test:unit",
     "build:wasm": "bash scripts/build_wasm.sh",
     "smoke:real": "deno run --allow-read examples/smoke_real_wasm.ts",
+    "bench": "deno task bench:fast",
+    "bench:fast": "deno bench bench --ignore=bench/real_wasm_bench.ts",
+    "bench:real": "deno bench bench/real_wasm_bench.ts --allow-read=.artifacts/capnp_deno.wasm",
     "verify": "deno task fmt && deno task lint && deno task check && deno task test:unit",
     "verify:integration": "deno task test:integration",
     "verify:real": "deno task build:wasm && deno task smoke:real && deno task test:integration && deno task test:real"

@@ -45,6 +45,20 @@ function structPointerWord(
     (BigInt(pointerCount & 0xffff) << 48n);
 }
 
+function listPointerWord(
+  offsetWords: number,
+  elementSize: number,
+  elementCount: number,
+): bigint {
+  const signed = offsetWords < 0
+    ? (offsetWords + (1 << 30)) & 0x3fff_ffff
+    : offsetWords & 0x3fff_ffff;
+  return 0x1n |
+    (BigInt(signed) << 2n) |
+    (BigInt(elementSize & 0x7) << 32n) |
+    (BigInt(elementCount & 0x1fff_ffff) << 35n);
+}
+
 function farPointerWord(
   targetSegmentId: number,
   landingPadWord: number,
@@ -178,5 +192,145 @@ Deno.test("validateCapnpFrame supports deep pointer-chain stress cases", () => {
   assertThrows(
     () => validateCapnpFrame(frame, { maxNestingDepth: 63 }),
     /nesting depth .* exceeds configured limit/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects invalid limit option values", () => {
+  const frame = buildPointerChainFrame(1);
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxSegmentCount: -1 }),
+    /maxSegmentCount must be a non-negative integer/i,
+  );
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxFrameBytes: -1 }),
+    /maxFrameBytes must be a non-negative integer/i,
+  );
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxTraversalWords: -1 }),
+    /maxTraversalWords must be a non-negative integer/i,
+  );
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxNestingDepth: -1 }),
+    /maxNestingDepth must be a non-negative integer/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects short and truncated headers", () => {
+  assertThrows(
+    () => validateCapnpFrame(new Uint8Array([0x00, 0x00, 0x00])),
+    /capnp frame is too short/i,
+  );
+
+  const truncatedHeader = new Uint8Array(8);
+  const view = new DataView(truncatedHeader.buffer);
+  view.setUint32(0, 2, true); // segment count = 3; header needs 16 bytes.
+  view.setUint32(4, 1, true);
+  assertThrows(
+    () => validateCapnpFrame(truncatedHeader),
+    /capnp frame header is truncated/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects truncated and trailing payloads", () => {
+  const truncatedPayload = new Uint8Array(16);
+  const truncatedView = new DataView(
+    truncatedPayload.buffer,
+    truncatedPayload.byteOffset,
+    truncatedPayload.byteLength,
+  );
+  truncatedView.setUint32(0, 0, true); // one segment
+  truncatedView.setUint32(4, 2, true); // two words declared (16 bytes payload)
+  // actual payload is only 8 bytes due total frame size.
+  assertThrows(
+    () => validateCapnpFrame(truncatedPayload),
+    /capnp frame payload is truncated/i,
+  );
+
+  const trailingPayload = new Uint8Array(24);
+  const trailingView = new DataView(
+    trailingPayload.buffer,
+    trailingPayload.byteOffset,
+    trailingPayload.byteLength,
+  );
+  trailingView.setUint32(0, 0, true); // one segment
+  trailingView.setUint32(4, 1, true); // one word declared
+  // actual payload has two words (8 trailing bytes).
+  assertThrows(
+    () => validateCapnpFrame(trailingPayload),
+    /capnp frame has trailing bytes/i,
+  );
+});
+
+Deno.test("validateCapnpFrame enforces maxSegmentCount and maxFrameBytes", () => {
+  const frame = buildMessage([
+    new Uint8Array(WORD_BYTES),
+    new Uint8Array(WORD_BYTES),
+  ]);
+
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxSegmentCount: 1 }),
+    /segment count .* exceeds configured limit/i,
+  );
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxFrameBytes: frame.byteLength - 1 }),
+    /frame size .* exceeds configured limit/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects far-pointer chains that exceed hop limit", () => {
+  const segment = new Uint8Array(WORD_BYTES);
+  setWord(segment, 0, farPointerWord(0, 0, false)); // self-referential single-far
+  const frame = buildMessage([segment]);
+
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxNestingDepth: 4 }),
+    /far pointer chain exceeded maximum hop count/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects double-far landing pad with nested far pointer", () => {
+  const segment0 = new Uint8Array(WORD_BYTES);
+  setWord(segment0, 0, farPointerWord(1, 0, true));
+
+  const segment1 = new Uint8Array(2 * WORD_BYTES);
+  setWord(segment1, 0, farPointerWord(2, 0, true)); // invalid: pad[0] must be single-far.
+  setWord(segment1, 1, structPointerWord(0, 0, 0));
+
+  const segment2 = new Uint8Array(WORD_BYTES);
+  const frame = buildMessage([segment0, segment1, segment2]);
+
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxNestingDepth: 4 }),
+    /landing pad\[0\] must be a single-far pointer/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects malformed inline composite payload declarations", () => {
+  const segment = new Uint8Array(2 * WORD_BYTES);
+  setWord(segment, 0, listPointerWord(0, 7, 1));
+  setWord(segment, 1, structPointerWord(2, 0, 1)); // requiredWords=2, declared elementCount=1
+  const frame = buildMessage([segment]);
+
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxNestingDepth: 4 }),
+    /inline composite list payload exceeds declared word count/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects out-of-range struct and list targets", () => {
+  const structSegment = new Uint8Array(2 * WORD_BYTES);
+  setWord(structSegment, 0, structPointerWord(0, 1, 1)); // target requires 2 words starting at word 1
+  const structFrame = buildMessage([structSegment]);
+  assertThrows(
+    () => validateCapnpFrame(structFrame, { maxNestingDepth: 4 }),
+    /struct pointer target out of range/i,
+  );
+
+  const listSegment = new Uint8Array(2 * WORD_BYTES);
+  setWord(listSegment, 0, listPointerWord(0, 5, 3)); // needs 3 words starting at word 1
+  const listFrame = buildMessage([listSegment]);
+  assertThrows(
+    () => validateCapnpFrame(listFrame, { maxNestingDepth: 4 }),
+    /list pointer target out of range/i,
   );
 });

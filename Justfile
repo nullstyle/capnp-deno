@@ -33,6 +33,15 @@ build-wasm:
 smoke-real:
     deno task smoke:real
 
+bench:
+    deno task bench
+
+bench-fast:
+    deno task bench:fast
+
+bench-real:
+    deno task bench:real
+
 verify:
     deno task verify
 

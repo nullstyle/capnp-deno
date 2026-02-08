@@ -1,5 +1,6 @@
 import {
   decodeReturnFrame,
+  encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
   encodeFinishFrame,
   encodeReleaseFrame,
@@ -294,4 +295,217 @@ Deno.test("RpcServerBridge host-call pump rejects unsupported cap-table results"
     /does not support response cap tables/i.test(hostAbi.exceptions[0].reason),
     `unexpected exception reason: ${hostAbi.exceptions[0].reason}`,
   );
+});
+
+Deno.test("RpcServerBridge validates capability registration and ref-count operations", () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  }, { capabilityIndex: 1, referenceCount: 1 });
+
+  let duplicateThrown: unknown;
+  try {
+    bridge.exportCapability({
+      interfaceId: 0x1234n,
+      dispatch: () => encodeSingleU32StructMessage(1),
+    }, { capabilityIndex: 1 });
+  } catch (error) {
+    duplicateThrown = error;
+  }
+  assert(
+    duplicateThrown instanceof Error &&
+      /already has a registered server dispatch/i.test(duplicateThrown.message),
+    `expected duplicate capability error, got: ${String(duplicateThrown)}`,
+  );
+
+  let invalidExportRefCount: unknown;
+  try {
+    bridge.exportCapability({
+      interfaceId: 0x1234n,
+      dispatch: () => encodeSingleU32StructMessage(1),
+    }, { capabilityIndex: 2, referenceCount: 0 });
+  } catch (error) {
+    invalidExportRefCount = error;
+  }
+  assert(
+    invalidExportRefCount instanceof Error &&
+      /referenceCount must be a positive integer/i.test(
+        invalidExportRefCount.message,
+      ),
+    `expected invalid referenceCount error, got: ${
+      String(invalidExportRefCount)
+    }`,
+  );
+
+  let retainUnknown: unknown;
+  try {
+    bridge.retainCapability(99, 1);
+  } catch (error) {
+    retainUnknown = error;
+  }
+  assert(
+    retainUnknown instanceof Error &&
+      /unknown capability 99/i.test(retainUnknown.message),
+    `expected unknown capability retain error, got: ${String(retainUnknown)}`,
+  );
+
+  let invalidReleaseRefCount: unknown;
+  try {
+    bridge.releaseCapability(1, 0);
+  } catch (error) {
+    invalidReleaseRefCount = error;
+  }
+  assert(
+    invalidReleaseRefCount instanceof Error &&
+      /referenceCount must be a positive integer/i.test(
+        invalidReleaseRefCount.message,
+      ),
+    `expected invalid release referenceCount, got: ${
+      String(invalidReleaseRefCount)
+    }`,
+  );
+});
+
+Deno.test("RpcServerBridge rejects unsupported inbound message tags", async () => {
+  const bridge = new RpcServerBridge();
+  const bootstrap = encodeBootstrapRequestFrame({ questionId: 1 });
+
+  let thrown: unknown;
+  try {
+    await bridge.handleFrame(bootstrap);
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof Error &&
+      /unsupported rpc message tag/i.test(thrown.message),
+    `expected unsupported-tag error, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("RpcServerBridge validates pumpWasmHostCalls options and host call metadata", async () => {
+  const bridge = new RpcServerBridge();
+
+  let invalidMaxCalls: unknown;
+  try {
+    await bridge.pumpWasmHostCalls({
+      handle: 1,
+      abi: new MockWasmHostAbi(),
+    }, { maxCalls: 0 });
+  } catch (error) {
+    invalidMaxCalls = error;
+  }
+  assert(
+    invalidMaxCalls instanceof Error &&
+      /maxCalls must be a positive integer/i.test(invalidMaxCalls.message),
+    `expected invalid maxCalls error, got: ${String(invalidMaxCalls)}`,
+  );
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(3),
+  }, { capabilityIndex: 2 });
+
+  const hostAbi = new MockWasmHostAbi();
+  hostAbi.calls.push({
+    questionId: 7,
+    interfaceId: 0x1234n,
+    methodId: 1,
+    frame: new Uint8Array([0x01, 0x02, 0x03]), // decode failure path
+  });
+  hostAbi.calls.push({
+    questionId: 8,
+    interfaceId: 0x1234n,
+    methodId: 1,
+    frame: encodeCallRequestFrame({
+      questionId: 9, // mismatch path
+      interfaceId: 0x1234n,
+      methodId: 1,
+      targetImportedCap: 2,
+      paramsContent: encodeSingleU32StructMessage(1),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: hostAbi,
+  });
+  assertEquals(handled, 2);
+  assertEquals(hostAbi.results.length, 0);
+  assertEquals(hostAbi.exceptions.length, 2);
+  assert(
+    (/invalid host call frame/i.test(hostAbi.exceptions[0].reason)) ||
+      (/rpc frame is too short/i.test(hostAbi.exceptions[0].reason)),
+    `expected decode failure reason, got: ${hostAbi.exceptions[0].reason}`,
+  );
+  assert(
+    /questionId mismatch/i.test(hostAbi.exceptions[1].reason),
+    `expected questionId mismatch reason, got: ${hostAbi.exceptions[1].reason}`,
+  );
+});
+
+Deno.test("RpcServerBridge reports interface mismatch and forwards unhandled dispatch errors", async () => {
+  const seenUnhandled: Array<{ questionId: number; message: string }> = [];
+  const bridge = new RpcServerBridge({
+    onUnhandledError: (error, call) => {
+      const message = error instanceof Error ? error.message : String(error);
+      seenUnhandled.push({ questionId: call.questionId, message });
+    },
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1111n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  }, { capabilityIndex: 3 });
+
+  const mismatch = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 4,
+    interfaceId: 0x2222n,
+    methodId: 1,
+    targetImportedCap: 3,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!mismatch) {
+    throw new Error("expected mismatch return frame");
+  }
+  const mismatchDecoded = decodeReturnFrame(mismatch);
+  assertEquals(mismatchDecoded.kind, "exception");
+  if (mismatchDecoded.kind === "exception") {
+    assert(
+      /interface mismatch/i.test(mismatchDecoded.reason),
+      `expected interface mismatch reason, got: ${mismatchDecoded.reason}`,
+    );
+  }
+
+  bridge.releaseCapability(3);
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => {
+      throw new Error("dispatch exploded");
+    },
+  }, { capabilityIndex: 3 });
+
+  const failed = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 5,
+    interfaceId: 0x1234n,
+    methodId: 1,
+    targetImportedCap: 3,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!failed) {
+    throw new Error("expected dispatch failure return frame");
+  }
+  const failedDecoded = decodeReturnFrame(failed);
+  assertEquals(failedDecoded.kind, "exception");
+  if (failedDecoded.kind === "exception") {
+    assert(
+      /dispatch exploded/i.test(failedDecoded.reason),
+      `expected dispatch exception reason, got: ${failedDecoded.reason}`,
+    );
+  }
+  assertEquals(seenUnhandled.length, 1);
+  assertEquals(seenUnhandled[0].questionId, 5);
+  assertEquals(seenUnhandled[0].message, "dispatch exploded");
 });

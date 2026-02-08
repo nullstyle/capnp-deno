@@ -246,3 +246,191 @@ Deno.test("RpcServerRuntime can warn-and-stop host-call pumping when limit is re
     await runtime.close();
   }
 });
+
+Deno.test("RpcServerRuntime rejects explicit host-call pump enablement when bridge exports are unavailable", () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+
+  let thrown: unknown;
+  try {
+    new RpcServerRuntime(peer, transport, bridge, {
+      hostCallPump: {
+        enabled: true,
+      },
+    });
+  } catch (error) {
+    thrown = error;
+  } finally {
+    peer.close();
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /explicitly enabled/i.test(thrown.message) &&
+      /unavailable/i.test(thrown.message),
+    `expected explicit-enable SessionError, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("RpcServerRuntime warns when host-call pump is unavailable and keeps runtime usable", async () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  const warningCodes: string[] = [];
+
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    hostCallPump: {
+      onWarning: (warning) => {
+        warningCodes.push(warning.code);
+      },
+    },
+  });
+
+  try {
+    await Promise.resolve(); // let async warning callback run
+    assertEquals(
+      JSON.stringify(warningCodes),
+      JSON.stringify([
+        "host_call_pump_unavailable",
+      ]),
+    );
+    const handled = await runtime.pumpHostCallsNow();
+    assertEquals(handled, 0);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime validates host-call pump configuration values", () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: () => 1,
+      capnp_peer_respond_host_call_exception: () => 1,
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+
+  let badPerFrame: unknown;
+  try {
+    new RpcServerRuntime(peer, transport, bridge, {
+      hostCallPump: {
+        maxCallsPerInboundFrame: 0,
+      },
+    });
+  } catch (error) {
+    badPerFrame = error;
+  }
+  assert(
+    badPerFrame instanceof SessionError &&
+      /maxCallsPerInboundFrame must be a positive integer/i.test(
+        badPerFrame.message,
+      ),
+    `expected maxCallsPerInboundFrame validation error, got: ${
+      String(badPerFrame)
+    }`,
+  );
+
+  let badTotal: unknown;
+  try {
+    new RpcServerRuntime(peer, transport, bridge, {
+      hostCallPump: {
+        maxCallsTotal: 0,
+      },
+    });
+  } catch (error) {
+    badTotal = error;
+  } finally {
+    peer.close();
+  }
+  assert(
+    badTotal instanceof SessionError &&
+      /maxCallsTotal must be a positive integer/i.test(badTotal.message),
+    `expected maxCallsTotal validation error, got: ${String(badTotal)}`,
+  );
+});
+
+Deno.test("RpcServerRuntime validates pumpHostCallsNow maxCalls argument", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: () => 1,
+      capnp_peer_respond_host_call_exception: () => 1,
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: new MockHostAbi(),
+    },
+  });
+  try {
+    let thrown: unknown;
+    try {
+      await runtime.pumpHostCallsNow({ maxCalls: 0 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /maxCalls must be a positive integer/i.test(thrown.message),
+      `expected pump maxCalls validation error, got: ${String(thrown)}`,
+    );
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime swallows warning callback failures at limit boundaries", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(9)),
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  hostAbi.calls.push(createHostCall(2));
+
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 8,
+      maxCallsTotal: 1,
+      failOnLimit: false,
+      onWarning: () => {
+        throw new Error("warning sink down");
+      },
+    },
+  });
+
+  try {
+    await runtime.start();
+    await transport.emit(new Uint8Array([0x01]));
+    await runtime.flush();
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(runtime.hostCallPumpDisabled, true);
+  } finally {
+    await runtime.close();
+  }
+});
