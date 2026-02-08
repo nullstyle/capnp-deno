@@ -21,6 +21,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD",
   "RPC_PROMISED_ANSWER_OP_TAG_NOOP",
   "ReconnectingRpcClientTransport",
+  "RpcConnectionPool",
   "RpcPipeline",
   "RpcServerBridge",
   "RpcServerRuntime",
@@ -42,6 +43,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "createExponentialBackoffReconnectPolicy",
   "createFrameSizeLimitMiddleware",
   "createLoggingMiddleware",
+  "createRpcIntrospectionMiddleware",
+  "createRpcMetricsMiddleware",
   "createRpcSessionWithReconnect",
   "decodeBootstrapRequestFrame",
   "decodeCallRequestFrame",
@@ -60,6 +63,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "getCapnpWasmExports",
   "instantiatePeer",
   "validateCapnpFrame",
+  "withConnection",
 ].sort();
 
 Deno.test("public API runtime exports remain stable", () => {

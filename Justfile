@@ -50,7 +50,7 @@ ci-bench:
     @echo "=========================================="
     @echo "  Benchmark Regression Checks"
     @echo "=========================================="
-    deno test --no-check bench/regression_test.ts 2>&1 || echo "WARNING: regression checks exited with non-zero status (non-blocking)"
+    deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts 2>&1 || echo "WARNING: regression checks exited with non-zero status (non-blocking)"
     @echo "=========================================="
     @echo "  Benchmarks complete"
     @echo "=========================================="

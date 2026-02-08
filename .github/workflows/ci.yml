@@ -91,5 +91,74 @@ jobs:
           cache: true
           github_token: ${{ github.token }}
 
+      - name: Restore previous benchmark results
+        uses: actions/cache/restore@v4
+        with:
+          path: bench/results.json
+          key: bench-results-dont-match
+          restore-keys: bench-results-
+
+      - name: Stash previous results
+        run: |
+          if [ -f bench/results.json ]; then
+            mkdir -p bench/previous
+            mv bench/results.json bench/previous/results.json
+            echo "Restored previous benchmark results."
+          else
+            echo "No previous benchmark results found."
+          fi
+
       - name: Run benchmarks and regression checks
         run: just ci-bench
+
+      - name: Upload benchmark results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench/results.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Save benchmark results to cache
+        if: always() && hashFiles('bench/results.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: bench/results.json
+          key: bench-results-${{ github.sha }}
+
+      - name: Compare against previous results
+        if: always()
+        run: |
+          if [ ! -f bench/previous/results.json ] || [ ! -f bench/results.json ]; then
+            echo "No previous or current results to compare, skipping."
+            exit 0
+          fi
+          deno eval '
+            const prev = JSON.parse(Deno.readTextFileSync("bench/previous/results.json"));
+            const curr = JSON.parse(Deno.readTextFileSync("bench/results.json"));
+            console.log(`Comparing: ${prev.commit?.slice(0,8) ?? "unknown"} -> ${curr.commit?.slice(0,8) ?? "unknown"}`);
+            console.log("---");
+            const prevMap = new Map(prev.results.map((r: {name: string, opsPerSec: number}) => [r.name, r.opsPerSec]));
+            let regressions = 0;
+            for (const r of curr.results) {
+              const prevOps = prevMap.get(r.name);
+              if (prevOps == null) {
+                console.log(`  ${r.name}: NEW (${r.opsPerSec.toFixed(0)} ops/s)`);
+                continue;
+              }
+              const ratio = r.opsPerSec / prevOps;
+              const pct = ((ratio - 1) * 100).toFixed(1);
+              const arrow = ratio >= 1 ? "+" : "";
+              console.log(`  ${r.name}: ${prevOps.toFixed(0)} -> ${r.opsPerSec.toFixed(0)} ops/s (${arrow}${pct}%)`);
+              if (ratio < 0.5) {
+                console.log(`::warning::Benchmark "${r.name}" regressed by >50%: ${prevOps.toFixed(0)} -> ${r.opsPerSec.toFixed(0)} ops/s (${arrow}${pct}%)`);
+                regressions++;
+              }
+            }
+            if (regressions > 0) {
+              console.log(`\n${regressions} benchmark(s) regressed by >50%.`);
+            } else {
+              console.log("\nNo significant regressions detected.");
+            }
+          '

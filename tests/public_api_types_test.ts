@@ -33,8 +33,16 @@ import type {
   RpcClientCallOptions,
   RpcClientCallResult,
   RpcClientTransportLike,
+  RpcConnectionPoolOptions,
+  RpcConnectionPoolStats,
   RpcFinishOptions,
   RpcFinishRequest,
+  RpcFrameDirection,
+  RpcIntrospectionCallbacks,
+  RpcMetricsFramesByType,
+  RpcMetricsMiddleware,
+  RpcMetricsMiddlewareOptions,
+  RpcMetricsSnapshot,
   RpcObservability,
   RpcObservabilityAttributes,
   RpcObservabilityAttributeValue,
@@ -85,6 +93,12 @@ type PublicTypeExportSmoke = {
   loggingMiddlewareOptions: LoggingMiddlewareOptions;
   middlewareResult: MiddlewareResult;
   rpcTransportMiddleware: RpcTransportMiddleware;
+  rpcFrameDirection: RpcFrameDirection;
+  rpcIntrospectionCallbacks: RpcIntrospectionCallbacks;
+  rpcMetricsFramesByType: RpcMetricsFramesByType;
+  rpcMetricsMiddleware: RpcMetricsMiddleware;
+  rpcMetricsMiddlewareOptions: RpcMetricsMiddlewareOptions;
+  rpcMetricsSnapshot: RpcMetricsSnapshot;
   wasmAbiCapabilities: WasmAbiCapabilities;
   wasmHostCallRecord: WasmHostCallRecord;
   capabilityPointer: CapabilityPointer;
@@ -118,6 +132,8 @@ type PublicTypeExportSmoke = {
   rpcClientCallOptions: RpcClientCallOptions;
   rpcClientCallResult: RpcClientCallResult;
   rpcClientTransportLike: RpcClientTransportLike;
+  rpcConnectionPoolOptions: RpcConnectionPoolOptions;
+  rpcConnectionPoolStats: RpcConnectionPoolStats;
   rpcFinishOptions: RpcFinishOptions;
   rpcFinishRequest: RpcFinishRequest;
   rpcObservability: RpcObservability;
@@ -220,6 +236,14 @@ type AssertWasmAbiCapabilitiesHasHostCallReturnFrame = Assert<
   IsEqual<WasmAbiCapabilities["hasHostCallReturnFrame"], boolean>
 >;
 
+type AssertRpcConnectionPoolOptionsMaxConnections = Assert<
+  IsEqual<RpcConnectionPoolOptions["maxConnections"], number | undefined>
+>;
+
+type AssertRpcConnectionPoolStatsTotal = Assert<
+  IsEqual<RpcConnectionPoolStats["total"], number>
+>;
+
 type StaticAssertions = [
   AssertTypeExportsExist,
   AssertRpcTransportStartSignature,
@@ -232,6 +256,8 @@ type StaticAssertions = [
   AssertReconnectOnRetrySignature,
   AssertCreateSessionAutoStart,
   AssertWasmAbiCapabilitiesHasHostCallReturnFrame,
+  AssertRpcConnectionPoolOptionsMaxConnections,
+  AssertRpcConnectionPoolStatsTotal,
 ];
 
 const STATIC_ASSERTIONS: StaticAssertions = [
@@ -246,8 +272,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 11);
+  assert(STATIC_ASSERTIONS.length === 13);
 });

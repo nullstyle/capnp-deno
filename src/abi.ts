@@ -489,6 +489,12 @@ export class WasmAbi {
   #errorTakeScratchPtr: number | null = null;
   #hostCallScratchPtr: number | null = null;
 
+  // Cached views over WASM linear memory. Invalidated when the underlying
+  // ArrayBuffer detaches (which happens on WebAssembly.Memory.grow()).
+  #cachedBuffer: ArrayBuffer | SharedArrayBuffer | null = null;
+  #cachedBytes: Uint8Array | null = null;
+  #cachedView: DataView | null = null;
+
   /**
    * Creates a new WasmAbi wrapper around the given exports.
    *
@@ -1166,10 +1172,22 @@ export class WasmAbi {
   }
 
   private bytes(): Uint8Array {
-    return new Uint8Array(this.exports.memory.buffer);
+    const buf = this.exports.memory.buffer;
+    if (this.#cachedBuffer !== buf || this.#cachedBytes === null) {
+      this.#cachedBuffer = buf;
+      this.#cachedBytes = new Uint8Array(buf);
+      this.#cachedView = new DataView(buf);
+    }
+    return this.#cachedBytes;
   }
 
   private view(): DataView {
-    return new DataView(this.exports.memory.buffer);
+    const buf = this.exports.memory.buffer;
+    if (this.#cachedBuffer !== buf || this.#cachedView === null) {
+      this.#cachedBuffer = buf;
+      this.#cachedBytes = new Uint8Array(buf);
+      this.#cachedView = new DataView(buf);
+    }
+    return this.#cachedView;
   }
 }

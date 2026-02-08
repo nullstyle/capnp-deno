@@ -8,6 +8,9 @@
  * reliably on CI runners whose performance varies.
  *
  * Run with:  deno test bench/regression_test.ts
+ *
+ * In CI (when the CI env var is set), results are also written to
+ * bench/results.json for cross-commit trend tracking.
  */
 
 import { assert, assertEquals } from "../tests/test_utils.ts";
@@ -23,6 +26,28 @@ import {
   type RpcCapDescriptor,
   validateCapnpFrame,
 } from "../mod.ts";
+
+// ---------------------------------------------------------------------------
+// Result collection for CI trend tracking
+// ---------------------------------------------------------------------------
+
+interface BenchResult {
+  name: string;
+  iterations: number;
+  elapsedMs: number;
+  opsPerSec: number;
+}
+
+const collectedResults: BenchResult[] = [];
+
+function recordResult(
+  name: string,
+  iterations: number,
+  elapsedMs: number,
+): void {
+  const opsPerSec = (iterations / elapsedMs) * 1000;
+  collectedResults.push({ name, iterations, elapsedMs, opsPerSec });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -114,6 +139,7 @@ Deno.test("regression: framer push/pop 10k iterations < 2000ms", () => {
   const frameB = buildSingleSegmentFrame(0x33);
   const coalesced = concatFrames([frameA, frameB]);
 
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     const framer = new CapnpFrameFramer();
     framer.push(coalesced);
@@ -121,8 +147,9 @@ Deno.test("regression: framer push/pop 10k iterations < 2000ms", () => {
     const b = framer.popFrame();
     assert(a !== null, "expected first frame");
     assert(b !== null, "expected second frame");
-  }, 10_000);
+  }, iterations);
 
+  recordResult("framer push/pop", iterations, elapsed);
   console.log(`  framer push/pop 10k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 2000,
@@ -135,6 +162,7 @@ Deno.test("regression: framer fragmented reassembly 10k iterations < 2000ms", ()
   const head = frame.subarray(0, 5);
   const tail = frame.subarray(5);
 
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     const framer = new CapnpFrameFramer();
     framer.push(head);
@@ -142,8 +170,9 @@ Deno.test("regression: framer fragmented reassembly 10k iterations < 2000ms", ()
     framer.push(tail);
     const out = framer.popFrame();
     assert(out !== null, "expected completed frame");
-  }, 10_000);
+  }, iterations);
 
+  recordResult("framer fragmented reassembly", iterations, elapsed);
   console.log(`  framer fragmented 10k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 2000,
@@ -156,10 +185,12 @@ Deno.test("regression: framer fragmented reassembly 10k iterations < 2000ms", ()
 Deno.test("regression: validateCapnpFrame depth-64 chain 5k iterations < 3000ms", () => {
   const deepFrame = buildPointerChainFrame(64);
 
+  const iterations = 5_000;
   const elapsed = timedRun(() => {
     validateCapnpFrame(deepFrame, { maxNestingDepth: 64 });
-  }, 5_000);
+  }, iterations);
 
+  recordResult("validateCapnpFrame depth-64", iterations, elapsed);
   console.log(`  validateCapnpFrame depth-64 5k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 3000,
@@ -168,6 +199,7 @@ Deno.test("regression: validateCapnpFrame depth-64 chain 5k iterations < 3000ms"
 });
 
 Deno.test("regression: rpc wire encode call 10k iterations < 2000ms", () => {
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     encodeCallRequestFrame({
       questionId: 2,
@@ -175,8 +207,9 @@ Deno.test("regression: rpc wire encode call 10k iterations < 2000ms", () => {
       methodId: 9,
       targetImportedCap: 1,
     });
-  }, 10_000);
+  }, iterations);
 
+  recordResult("rpc wire encode call", iterations, elapsed);
   console.log(`  rpc_wire encode call 10k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 2000,
@@ -194,6 +227,7 @@ Deno.test("regression: rpc wire encode call with 48-cap table 5k iterations < 30
     }),
   );
 
+  const iterations = 5_000;
   const elapsed = timedRun(() => {
     encodeCallRequestFrame({
       questionId: 11,
@@ -203,8 +237,9 @@ Deno.test("regression: rpc wire encode call with 48-cap table 5k iterations < 30
       paramsContent,
       paramsCapTable: capTable48,
     });
-  }, 5_000);
+  }, iterations);
 
+  recordResult("rpc wire encode call+cap48", iterations, elapsed);
   console.log(`  rpc_wire encode call+cap48 5k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 3000,
@@ -221,10 +256,12 @@ Deno.test("regression: rpc wire decode call 10k iterations < 2000ms", () => {
     paramsContent: encodeSingleU32StructMessage(77),
   });
 
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     decodeCallRequestFrame(frame);
-  }, 10_000);
+  }, iterations);
 
+  recordResult("rpc wire decode call", iterations, elapsed);
   console.log(`  rpc_wire decode call 10k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 2000,
@@ -233,11 +270,13 @@ Deno.test("regression: rpc wire decode call 10k iterations < 2000ms", () => {
 });
 
 Deno.test("regression: rpc wire encode/decode bootstrap 10k iterations < 2000ms", () => {
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     const frame = encodeBootstrapRequestFrame({ questionId: 1 });
     decodeBootstrapRequestFrame(frame);
-  }, 10_000);
+  }, iterations);
 
+  recordResult("rpc wire bootstrap roundtrip", iterations, elapsed);
   console.log(`  rpc_wire bootstrap roundtrip 10k: ${elapsed.toFixed(1)}ms`);
   assert(
     elapsed < 2000,
@@ -257,6 +296,7 @@ Deno.test("regression: rpc wire return results roundtrip 5k iterations < 3000ms"
     }),
   );
 
+  const iterations = 5_000;
   const elapsed = timedRun(() => {
     const encoded = encodeReturnResultsFrame({
       answerId: 42,
@@ -264,8 +304,9 @@ Deno.test("regression: rpc wire return results roundtrip 5k iterations < 3000ms"
       capTable: capTable48,
     });
     decodeReturnFrame(encoded);
-  }, 5_000);
+  }, iterations);
 
+  recordResult("rpc wire return results roundtrip", iterations, elapsed);
   console.log(
     `  rpc_wire return results roundtrip 5k: ${elapsed.toFixed(1)}ms`,
   );
@@ -278,14 +319,16 @@ Deno.test("regression: rpc wire return results roundtrip 5k iterations < 3000ms"
 });
 
 Deno.test("regression: rpc wire return exception roundtrip 10k iterations < 2000ms", () => {
+  const iterations = 10_000;
   const elapsed = timedRun(() => {
     const encoded = encodeReturnExceptionFrame({
       answerId: 42,
       reason: "benchmark exception message for regression test",
     });
     decodeReturnFrame(encoded);
-  }, 10_000);
+  }, iterations);
 
+  recordResult("rpc wire return exception roundtrip", iterations, elapsed);
   console.log(
     `  rpc_wire return exception roundtrip 10k: ${elapsed.toFixed(1)}ms`,
   );
@@ -294,5 +337,45 @@ Deno.test("regression: rpc wire return exception roundtrip 10k iterations < 2000
     `rpc_wire return exception roundtrip took ${
       elapsed.toFixed(1)
     }ms, budget is 2000ms`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Write results JSON in CI for trend tracking
+// ---------------------------------------------------------------------------
+
+Deno.test("regression: write results JSON in CI", async () => {
+  const isCI = Deno.env.get("CI") === "true";
+  if (!isCI) {
+    console.log("  (skipping results.json write - not in CI)");
+    return;
+  }
+
+  let commit = "unknown";
+  try {
+    const cmd = new Deno.Command("git", {
+      args: ["rev-parse", "HEAD"],
+      stdout: "piped",
+      stderr: "null",
+    });
+    const output = await cmd.output();
+    if (output.success) {
+      commit = new TextDecoder().decode(output.stdout).trim();
+    }
+  } catch {
+    // git not available, keep "unknown"
+  }
+
+  const payload = {
+    timestamp: new Date().toISOString(),
+    commit,
+    results: collectedResults,
+  };
+
+  const json = JSON.stringify(payload, null, 2);
+  const outPath = new URL("./results.json", import.meta.url);
+  await Deno.writeTextFile(outPath, json);
+  console.log(
+    `  wrote ${collectedResults.length} results to bench/results.json`,
   );
 });

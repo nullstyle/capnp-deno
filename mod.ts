@@ -142,10 +142,18 @@ export {
 export {
   createFrameSizeLimitMiddleware,
   createLoggingMiddleware,
+  createRpcIntrospectionMiddleware,
+  createRpcMetricsMiddleware,
   type FrameSizeLimitMiddlewareOptions,
   type LoggingMiddlewareOptions,
   type MiddlewareResult,
   MiddlewareTransport,
+  type RpcFrameDirection,
+  type RpcIntrospectionCallbacks,
+  type RpcMetricsFramesByType,
+  type RpcMetricsMiddleware,
+  type RpcMetricsMiddlewareOptions,
+  type RpcMetricsSnapshot,
   type RpcTransportMiddleware,
 } from "./src/middleware.ts";
 export {
@@ -160,3 +168,9 @@ export {
   WebSocketTransport,
   type WebSocketTransportOptions,
 } from "./src/transports/websocket.ts";
+export {
+  RpcConnectionPool,
+  type RpcConnectionPoolOptions,
+  type RpcConnectionPoolStats,
+  withConnection,
+} from "./src/connection_pool.ts";

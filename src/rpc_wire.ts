@@ -198,6 +198,7 @@ interface StructListRef {
  */
 interface SegmentTable {
   readonly segments: Uint8Array[];
+  readonly views: DataView[];
 }
 
 function signed30(value: bigint): number {
@@ -234,6 +235,7 @@ function segmentsFromFrame(frame: Uint8Array): SegmentTable {
   }
 
   const segments: Uint8Array[] = [];
+  const views: DataView[] = [];
   let cursor = headerBytes;
   for (let i = 0; i < segmentCount; i += 1) {
     const segmentWords = view.getUint32(4 + i * 4, true);
@@ -241,11 +243,13 @@ function segmentsFromFrame(frame: Uint8Array): SegmentTable {
     if (cursor + segmentBytes > frame.byteLength) {
       throw new ProtocolError("rpc frame segment payload is truncated");
     }
-    segments.push(frame.subarray(cursor, cursor + segmentBytes));
+    const seg = frame.subarray(cursor, cursor + segmentBytes);
+    segments.push(seg);
+    views.push(new DataView(seg.buffer, seg.byteOffset, seg.byteLength));
     cursor += segmentBytes;
   }
 
-  return { segments };
+  return { segments, views };
 }
 
 /**
@@ -321,8 +325,7 @@ function readWordFromTable(
     WORD_BYTES,
     context,
   );
-  const seg = table.segments[segmentId];
-  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+  return table.views[segmentId]
     .getBigUint64(wordIndex * WORD_BYTES, true);
 }
 
@@ -529,7 +532,7 @@ function readU16InStruct(
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
   const seg = table.segments[structRef.segmentId];
   ensureRange(seg, absolute, 2, "readU16InStruct");
-  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+  return table.views[structRef.segmentId]
     .getUint16(absolute, true);
 }
 
@@ -544,7 +547,7 @@ function readU32InStruct(
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
   const seg = table.segments[structRef.segmentId];
   ensureRange(seg, absolute, 4, "readU32InStruct");
-  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+  return table.views[structRef.segmentId]
     .getUint32(absolute, true);
 }
 
@@ -559,7 +562,7 @@ function readU64InStruct(
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
   const seg = table.segments[structRef.segmentId];
   ensureRange(seg, absolute, 8, "readU64InStruct");
-  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+  return table.views[structRef.segmentId]
     .getBigUint64(absolute, true);
 }
 
@@ -1025,6 +1028,7 @@ function writePayloadContentPointer(
 class MessageBuilder {
   private bytes: Uint8Array;
   private words: number;
+  private cachedView: DataView | null = null;
 
   constructor() {
     this.bytes = new Uint8Array(WORD_BYTES);
@@ -1129,14 +1133,18 @@ class MessageBuilder {
     const grown = new Uint8Array(next);
     grown.set(this.bytes);
     this.bytes = grown;
+    this.cachedView = null;
   }
 
   private view(): DataView {
-    return new DataView(
-      this.bytes.buffer,
-      this.bytes.byteOffset,
-      this.bytes.byteLength,
-    );
+    if (this.cachedView === null) {
+      this.cachedView = new DataView(
+        this.bytes.buffer,
+        this.bytes.byteOffset,
+        this.bytes.byteLength,
+      );
+    }
+    return this.cachedView;
   }
 
   private requireWordRange(

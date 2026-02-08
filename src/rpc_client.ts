@@ -168,6 +168,13 @@ export interface SessionRpcClientTransportOptions {
    * operation. Defaults to `true`.
    */
   autoStart?: boolean;
+  /**
+   * Default timeout in milliseconds applied to all calls (bootstrap, call,
+   * callRaw, callRawPipelined) when the per-call `timeoutMs` option is not
+   * specified. When both this and a per-call `timeoutMs` are omitted, calls
+   * wait indefinitely for a response.
+   */
+  defaultTimeoutMs?: number;
 }
 
 /**
@@ -311,6 +318,7 @@ export class SessionRpcClientTransport {
   #interfaceId: bigint;
   #nextQuestionId: number;
   #autoStart: boolean;
+  #defaultTimeoutMs: number | undefined;
   #opChain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -325,6 +333,7 @@ export class SessionRpcClientTransport {
       : BigInt(options.interfaceId);
     this.#nextQuestionId = options.nextQuestionId ?? 1;
     this.#autoStart = options.autoStart ?? true;
+    this.#defaultTimeoutMs = options.defaultTimeoutMs;
   }
 
   /**
@@ -537,11 +546,12 @@ export class SessionRpcClientTransport {
     await this.transport.emitInbound(frame);
     await this.session.flush();
 
+    const effectiveTimeout = options.timeoutMs ?? this.#defaultTimeoutMs;
     const started = Date.now();
     while (true) {
-      const remaining = options.timeoutMs === undefined
+      const remaining = effectiveTimeout === undefined
         ? undefined
-        : Math.max(0, options.timeoutMs - (Date.now() - started));
+        : Math.max(0, effectiveTimeout - (Date.now() - started));
       const outbound = await this.transport.nextOutboundFrame({
         signal: options.signal,
         timeoutMs: remaining,
@@ -568,11 +578,12 @@ export class SessionRpcClientTransport {
     questionId: number,
     options: RpcClientCallOptions,
   ): Promise<RpcClientCallResult> {
+    const effectiveTimeout = options.timeoutMs ?? this.#defaultTimeoutMs;
     const started = Date.now();
     while (true) {
-      const remaining = options.timeoutMs === undefined
+      const remaining = effectiveTimeout === undefined
         ? undefined
-        : Math.max(0, options.timeoutMs - (Date.now() - started));
+        : Math.max(0, effectiveTimeout - (Date.now() - started));
       const outbound = await this.transport.nextOutboundFrame({
         signal: options.signal,
         timeoutMs: remaining,

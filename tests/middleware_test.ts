@@ -1,7 +1,16 @@
 import {
   createFrameSizeLimitMiddleware,
   createLoggingMiddleware,
+  createRpcIntrospectionMiddleware,
+  createRpcMetricsMiddleware,
+  encodeBootstrapRequestFrame,
+  encodeCallRequestFrame,
+  encodeFinishFrame,
+  encodeReleaseFrame,
+  encodeReturnResultsFrame,
   MiddlewareTransport,
+  type RpcFrameDirection,
+  type RpcMetricsSnapshot,
   type RpcTransport,
   type RpcTransportMiddleware,
   TransportError,
@@ -613,6 +622,459 @@ Deno.test("MiddlewareTransport defensively copies the middleware array", async (
   await transport.send(new Uint8Array([0x01]));
 
   assertEquals(inner.sent.length, 1, "frame should pass through unmodified");
+
+  await transport.close();
+});
+
+// ---------------------------------------------------------------------------
+// createRpcIntrospectionMiddleware
+// ---------------------------------------------------------------------------
+
+Deno.test("createRpcIntrospectionMiddleware identifies bootstrap messages", async () => {
+  const inner = new MockTransport();
+  const observed: { type: string; direction: RpcFrameDirection }[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onBootstrap(_frame, dir) {
+      observed.push({ type: "bootstrap", direction: dir });
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  await transport.send(bootstrapFrame);
+  await inner.emitInbound(bootstrapFrame);
+
+  assertEquals(observed.length, 2);
+  assertEquals(observed[0].type, "bootstrap");
+  assertEquals(observed[0].direction, "send");
+  assertEquals(observed[1].type, "bootstrap");
+  assertEquals(observed[1].direction, "receive");
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware identifies call messages", async () => {
+  const inner = new MockTransport();
+  const observed: string[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onCall(_frame, dir) {
+      observed.push(`call-${dir}`);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const callFrame = encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  });
+  await transport.send(callFrame);
+
+  assertEquals(observed.length, 1);
+  assertEquals(observed[0], "call-send");
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware identifies return messages", async () => {
+  const inner = new MockTransport();
+  const observed: string[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onReturn(_frame, dir) {
+      observed.push(`return-${dir}`);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const returnFrame = encodeReturnResultsFrame({ answerId: 1 });
+  await inner.emitInbound(returnFrame);
+
+  assertEquals(observed.length, 1);
+  assertEquals(observed[0], "return-receive");
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware identifies finish messages", async () => {
+  const inner = new MockTransport();
+  const observed: string[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onFinish(_frame, dir) {
+      observed.push(`finish-${dir}`);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const finishFrame = encodeFinishFrame({ questionId: 1 });
+  await transport.send(finishFrame);
+
+  assertEquals(observed.length, 1);
+  assertEquals(observed[0], "finish-send");
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware identifies release messages", async () => {
+  const inner = new MockTransport();
+  const observed: string[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onRelease(_frame, dir) {
+      observed.push(`release-${dir}`);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  const releaseFrame = encodeReleaseFrame({ id: 1, referenceCount: 1 });
+  await transport.send(releaseFrame);
+
+  assertEquals(observed.length, 1);
+  assertEquals(observed[0], "release-send");
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware handles decode errors gracefully", async () => {
+  const inner = new MockTransport();
+  const errors: { error: unknown; direction: RpcFrameDirection }[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onDecodeError(_frame, err, dir) {
+      errors.push({ error: err, direction: dir });
+    },
+    onBootstrap() {
+      throw new Error("should not be called on garbage data");
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  const received: Uint8Array[] = [];
+  await transport.start((frame) => {
+    received.push(new Uint8Array(frame));
+  });
+
+  // Send garbage data that can't be decoded as a Cap'n Proto message
+  const garbage = new Uint8Array([0x01, 0x02, 0x03]);
+  await transport.send(garbage);
+  await inner.emitInbound(garbage);
+
+  assertEquals(errors.length, 2);
+  assertEquals(errors[0].direction, "send");
+  assertEquals(errors[1].direction, "receive");
+
+  // The frame should still pass through unchanged
+  assertEquals(inner.sent.length, 1);
+  assertBytes(inner.sent[0], [0x01, 0x02, 0x03]);
+  assertEquals(received.length, 1);
+  assertBytes(received[0], [0x01, 0x02, 0x03]);
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware does not modify frames", async () => {
+  const inner = new MockTransport();
+
+  const mw = createRpcIntrospectionMiddleware({
+    onBootstrap() {},
+    onCall() {},
+    onReturn() {},
+    onFinish() {},
+    onRelease() {},
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  const received: Uint8Array[] = [];
+  await transport.start((frame) => {
+    received.push(new Uint8Array(frame));
+  });
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 42 });
+  const originalBytes = new Uint8Array(bootstrapFrame);
+
+  await transport.send(bootstrapFrame);
+  assertBytes(inner.sent[0], [...originalBytes]);
+
+  await inner.emitInbound(bootstrapFrame);
+  assertBytes(received[0], [...originalBytes]);
+
+  await transport.close();
+});
+
+Deno.test("createRpcIntrospectionMiddleware calls onUnknown for unrecognized tags", async () => {
+  const inner = new MockTransport();
+  const unknowns: { tag: number; direction: RpcFrameDirection }[] = [];
+
+  const mw = createRpcIntrospectionMiddleware({
+    onUnknown(_frame, tag, dir) {
+      unknowns.push({ tag, direction: dir });
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [mw]);
+  await transport.start(() => {});
+
+  // Build a valid Cap'n Proto frame with tag=99 (not a known RPC message type).
+  // We can repurpose the bootstrap frame structure but patch the tag.
+  const frame = encodeBootstrapRequestFrame({ questionId: 1 });
+  // The message tag is at a known location: after the 8-byte framing header,
+  // the root struct pointer (word 0) points to word 1 where data starts.
+  // For bootstrap, the struct data starts at word 1 (after root pointer).
+  // The tag u16 is at byte offset 0 of that struct's data section.
+  // In a single-segment message with header [0,0,0,0, N,0,0,0], segment
+  // starts at byte 8. Root pointer is word 0 of segment. The struct it
+  // points to starts at word 1, i.e., byte 8 + 8 = 16.
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  view.setUint16(16, 99, true); // overwrite the tag to 99
+
+  await transport.send(frame);
+
+  assertEquals(unknowns.length, 1);
+  assertEquals(unknowns[0].tag, 99);
+  assertEquals(unknowns[0].direction, "send");
+
+  await transport.close();
+});
+
+// ---------------------------------------------------------------------------
+// createRpcMetricsMiddleware
+// ---------------------------------------------------------------------------
+
+Deno.test("createRpcMetricsMiddleware tracks counts and bytes for sent frames", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  await transport.send(bootstrapFrame);
+
+  const snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 1);
+  assertEquals(snap.totalFramesReceived, 0);
+  assertEquals(snap.totalBytesSent, bootstrapFrame.byteLength);
+  assertEquals(snap.totalBytesReceived, 0);
+  assertEquals(snap.framesByType.bootstrap, 1);
+  assertEquals(snap.framesByType.call, 0);
+  assertEquals(snap.framesByType.return, 0);
+  assertEquals(snap.framesByType.finish, 0);
+  assertEquals(snap.framesByType.release, 0);
+  assertEquals(snap.framesByType.unknown, 0);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware tracks counts and bytes for received frames", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  const returnFrame = encodeReturnResultsFrame({ answerId: 1 });
+  await inner.emitInbound(returnFrame);
+
+  const snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 0);
+  assertEquals(snap.totalFramesReceived, 1);
+  assertEquals(snap.totalBytesSent, 0);
+  assertEquals(snap.totalBytesReceived, returnFrame.byteLength);
+  assertEquals(snap.framesByType.return, 1);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware tracks multiple message types", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await transport.send(
+    encodeCallRequestFrame({
+      questionId: 2,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 0,
+    }),
+  );
+  await transport.send(encodeFinishFrame({ questionId: 1 }));
+  await transport.send(encodeReleaseFrame({ id: 0, referenceCount: 1 }));
+  await inner.emitInbound(encodeReturnResultsFrame({ answerId: 2 }));
+
+  const snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 4);
+  assertEquals(snap.totalFramesReceived, 1);
+  assertEquals(snap.framesByType.bootstrap, 1);
+  assertEquals(snap.framesByType.call, 1);
+  assertEquals(snap.framesByType.finish, 1);
+  assertEquals(snap.framesByType.release, 1);
+  assertEquals(snap.framesByType.return, 1);
+  assertEquals(snap.framesByType.unknown, 0);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware counts undecoded frames as unknown", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  // Garbage data that can't be decoded
+  await transport.send(new Uint8Array([0x01]));
+
+  const snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 1);
+  assertEquals(snap.framesByType.unknown, 1);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware reset clears all counters", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+  await inner.emitInbound(encodeReturnResultsFrame({ answerId: 1 }));
+
+  // Verify non-zero before reset
+  let snap = metrics.snapshot();
+  assert(snap.totalFramesSent > 0, "should have sent frames");
+  assert(snap.totalFramesReceived > 0, "should have received frames");
+
+  metrics.reset();
+  snap = metrics.snapshot();
+  assertEquals(snap.totalFramesSent, 0);
+  assertEquals(snap.totalFramesReceived, 0);
+  assertEquals(snap.totalBytesSent, 0);
+  assertEquals(snap.totalBytesReceived, 0);
+  assertEquals(snap.framesByType.bootstrap, 0);
+  assertEquals(snap.framesByType.call, 0);
+  assertEquals(snap.framesByType.return, 0);
+  assertEquals(snap.framesByType.finish, 0);
+  assertEquals(snap.framesByType.release, 0);
+  assertEquals(snap.framesByType.unknown, 0);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware snapshot returns independent copies", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 1 }));
+
+  const snap1 = metrics.snapshot();
+  assertEquals(snap1.totalFramesSent, 1);
+
+  await transport.send(encodeBootstrapRequestFrame({ questionId: 2 }));
+
+  const snap2 = metrics.snapshot();
+  assertEquals(snap2.totalFramesSent, 2);
+  // snap1 should not have changed
+  assertEquals(snap1.totalFramesSent, 1);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware onSnapshot fires at correct interval", async () => {
+  const inner = new MockTransport();
+  const snapshots: RpcMetricsSnapshot[] = [];
+
+  const metrics = createRpcMetricsMiddleware({
+    snapshotIntervalFrames: 3,
+    onSnapshot(snap) {
+      snapshots.push(snap);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+
+  // Send 7 frames; snapshots should fire after frame 3 and frame 6
+  for (let i = 0; i < 7; i++) {
+    await transport.send(bootstrapFrame);
+  }
+
+  assertEquals(snapshots.length, 2);
+  assertEquals(snapshots[0].totalFramesSent, 3);
+  assertEquals(snapshots[1].totalFramesSent, 6);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware onSnapshot counts both send and receive", async () => {
+  const inner = new MockTransport();
+  const snapshots: RpcMetricsSnapshot[] = [];
+
+  const metrics = createRpcMetricsMiddleware({
+    snapshotIntervalFrames: 2,
+    onSnapshot(snap) {
+      snapshots.push(snap);
+    },
+  });
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  await transport.start(() => {});
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+
+  // 1 send + 1 receive = 2 total, should trigger snapshot
+  await transport.send(bootstrapFrame);
+  await inner.emitInbound(bootstrapFrame);
+
+  assertEquals(snapshots.length, 1);
+  assertEquals(snapshots[0].totalFramesSent, 1);
+  assertEquals(snapshots[0].totalFramesReceived, 1);
+
+  await transport.close();
+});
+
+Deno.test("createRpcMetricsMiddleware does not modify frames", async () => {
+  const inner = new MockTransport();
+  const metrics = createRpcMetricsMiddleware();
+
+  const transport = new MiddlewareTransport(inner, [metrics.middleware]);
+  const received: Uint8Array[] = [];
+  await transport.start((frame) => {
+    received.push(new Uint8Array(frame));
+  });
+
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 42 });
+  const originalBytes = new Uint8Array(bootstrapFrame);
+
+  await transport.send(bootstrapFrame);
+  assertBytes(inner.sent[0], [...originalBytes]);
+
+  await inner.emitInbound(bootstrapFrame);
+  assertBytes(received[0], [...originalBytes]);
 
   await transport.close();
 });

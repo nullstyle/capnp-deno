@@ -349,3 +349,45 @@ Deno.test("WasmAbi schema helpers and allocation/error-take fallbacks cover edge
     }`,
   );
 });
+
+Deno.test("WasmAbi memory view cache invalidates correctly after buffer detachment from memory growth", () => {
+  // This test verifies the memory caching optimization:
+  // When WASM memory grows, the old ArrayBuffer detaches and a new one
+  // is allocated. The cached Uint8Array/DataView must be invalidated.
+  const fake = new FakeCapnpWasm();
+  const abi = new WasmAbi(fake.exports);
+
+  // Write data through the ABI and read it back to exercise the cache
+  const peer = abi.createPeer();
+  abi.pushFrame(peer, new Uint8Array([0xAA, 0xBB]));
+  const frame = abi.popOutFrame(peer);
+  assert(frame !== null, "expected frame after pushFrame");
+  assertEquals(frame![0], 0xAA);
+  assertEquals(frame![1], 0xBB);
+
+  // Capture the current buffer identity
+  const bufferBefore = fake.memory.buffer;
+
+  // Grow memory -- this detaches the old ArrayBuffer
+  fake.memory.grow(1);
+
+  // Verify the buffer is now a different object
+  const bufferAfter = fake.memory.buffer;
+  assert(
+    bufferBefore !== bufferAfter,
+    "memory.grow should produce a new ArrayBuffer",
+  );
+
+  // Verify detachment: the old buffer should have byteLength === 0
+  assertEquals(bufferBefore.byteLength, 0);
+
+  // The ABI should still work correctly after detachment because the
+  // cache invalidates on buffer identity change
+  abi.pushFrame(peer, new Uint8Array([0xCC, 0xDD]));
+  const frame2 = abi.popOutFrame(peer);
+  assert(frame2 !== null, "expected frame after memory growth");
+  assertEquals(frame2![0], 0xCC);
+  assertEquals(frame2![1], 0xDD);
+
+  abi.freePeer(peer);
+});

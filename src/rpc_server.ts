@@ -169,6 +169,11 @@ interface AnswerTableEntry {
   outcome?: RpcDispatchOutcome;
   /** Timer handle for automatic eviction of completed but unfinished entries */
   evictionTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Number of in-flight pipelined calls currently dispatching against this
+   * entry. Eviction is deferred while this count is greater than zero.
+   */
+  pipelineRefCount: number;
 }
 
 function normalizeCapability(
@@ -440,6 +445,7 @@ export class RpcServerBridge {
       promise: new Promise<RpcDispatchOutcome>((resolve) => {
         resolveEntry = resolve;
       }),
+      pipelineRefCount: 0,
     };
     this.#answerTable.set(call.questionId, entry);
 
@@ -483,9 +489,15 @@ export class RpcServerBridge {
     }
     const timer = setTimeout(() => {
       // Only evict if the entry is still present (not already finished).
-      if (this.#answerTable.get(questionId) === entry) {
-        this.#answerTable.delete(questionId);
+      if (this.#answerTable.get(questionId) !== entry) {
+        return;
       }
+      // Defer eviction while pipelined calls are in-flight.
+      if (entry.pipelineRefCount > 0) {
+        this.#scheduleEviction(questionId, entry);
+        return;
+      }
+      this.#answerTable.delete(questionId);
     }, this.#answerEvictionTimeoutMs);
     // Unref the timer so it does not prevent the process from exiting
     // and does not trigger resource-leak sanitizers in test runners.
@@ -630,28 +642,35 @@ export class RpcServerBridge {
       };
     }
 
-    // Wait for the referenced question to complete.
-    let targetOutcome: RpcDispatchOutcome;
-    if (answerEntry.outcome !== undefined) {
-      targetOutcome = answerEntry.outcome;
-    } else {
-      targetOutcome = await answerEntry.promise;
-    }
-
-    // Resolve the capability index from the answer's result cap table.
-    let capabilityIndex: number;
+    // Increment the pipeline ref count to prevent eviction while this
+    // pipelined call is in-flight.
+    answerEntry.pipelineRefCount += 1;
     try {
-      capabilityIndex = resolvePromisedAnswerCapability(
-        targetOutcome,
-        transform,
-      );
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return { kind: "exception", reason };
-    }
+      // Wait for the referenced question to complete.
+      let targetOutcome: RpcDispatchOutcome;
+      if (answerEntry.outcome !== undefined) {
+        targetOutcome = answerEntry.outcome;
+      } else {
+        targetOutcome = await answerEntry.promise;
+      }
 
-    // Dispatch to the resolved capability.
-    return await this.#dispatchToCapability(capabilityIndex, call);
+      // Resolve the capability index from the answer's result cap table.
+      let capabilityIndex: number;
+      try {
+        capabilityIndex = resolvePromisedAnswerCapability(
+          targetOutcome,
+          transform,
+        );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return { kind: "exception", reason };
+      }
+
+      // Dispatch to the resolved capability.
+      return await this.#dispatchToCapability(capabilityIndex, call);
+    } finally {
+      answerEntry.pipelineRefCount -= 1;
+    }
   }
 
   /**

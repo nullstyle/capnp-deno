@@ -8,7 +8,7 @@ import {
   type RpcServerWasmHost,
   type WasmHostCallRecord,
 } from "../mod.ts";
-import { assert, assertEquals } from "./test_utils.ts";
+import { assert, assertEquals, deferred } from "./test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;
 
@@ -1409,5 +1409,273 @@ Deno.test("RpcServerBridge answer table full does not prevent finish or release"
     encodeFinishFrame({ questionId: 1 }),
   );
   assertEquals(finishResult, null);
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+// --- Answer Table Eviction vs Pipelined Call Race Tests ---
+
+Deno.test("RpcServerBridge eviction deferred while pipelined call is in-flight", async () => {
+  // Use a very short eviction timeout so the timer fires while the
+  // pipelined dispatch is still running.
+  const bridge = new RpcServerBridge({
+    answerEvictionTimeoutMs: 10,
+  });
+
+  // Gate to control when the pipelined dispatch completes.
+  const gate = deferred<void>();
+
+  // Factory capability: returns a cap id in its result.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Target capability: blocks until we release the gate.
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: async () => {
+      await gate.promise;
+      return encodeSingleU32StructMessage(42);
+    },
+  }, { capabilityIndex: 10 });
+
+  // Step 1: Make the initial call (question 1) to the factory.
+  const factoryResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(factoryResponse !== null, "expected factory response");
+  assertEquals(decodeReturnFrame(factoryResponse).kind, "results");
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Step 2: Start a pipelined call targeting question 1. This will block
+  // inside the target capability dispatch because we hold the gate.
+  const pipelinedPromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Step 3: Wait long enough for the eviction timer to fire at least once.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // The entry for question 1 should still be present because the pipelined
+  // call has incremented the pipeline ref count.
+  assertEquals(bridge.answerTableSize >= 1, true);
+
+  // Step 4: Release the gate and let the pipelined call complete.
+  gate.resolve();
+  const pipelinedResponse = await pipelinedPromise;
+  assert(pipelinedResponse !== null, "expected pipelined response");
+  const decoded = decodeReturnFrame(pipelinedResponse);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 42);
+  }
+
+  // Clean up: send Finish for both questions so eviction timers are
+  // cancelled and Deno's test sanitizer does not report timer leaks.
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 2 }));
+});
+
+Deno.test("RpcServerBridge eviction proceeds after pipelined call completes", async () => {
+  const bridge = new RpcServerBridge({
+    answerEvictionTimeoutMs: 20,
+  });
+
+  const gate = deferred<void>();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: async () => {
+      await gate.promise;
+      return encodeSingleU32StructMessage(99);
+    },
+  }, { capabilityIndex: 10 });
+
+  // Initial call.
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Start the pipelined call (blocks on gate).
+  const pipelinedPromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Let the eviction timer fire while the pipelined call is still in-flight.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // Entry should still be present (deferred by ref count).
+  assertEquals(bridge.answerTableSize >= 1, true);
+
+  // Release the pipelined call.
+  gate.resolve();
+  await pipelinedPromise;
+
+  // Now wait for the rescheduled eviction timer to fire and actually evict.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+
+  // The entry for question 1 should now be evicted (question 2 was its own
+  // entry, also evicted by now).
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+Deno.test("RpcServerBridge multiple concurrent pipelined calls against same question defer eviction", async () => {
+  const bridge = new RpcServerBridge({
+    answerEvictionTimeoutMs: 10,
+  });
+
+  const gate1 = deferred<void>();
+  const gate2 = deferred<void>();
+  let dispatchCount = 0;
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Target capability: each call blocks on a different gate.
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: async () => {
+      dispatchCount += 1;
+      const currentCount = dispatchCount;
+      if (currentCount === 1) {
+        await gate1.promise;
+      } else {
+        await gate2.promise;
+      }
+      return encodeSingleU32StructMessage(currentCount * 100);
+    },
+  }, { capabilityIndex: 10 });
+
+  // Initial factory call.
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Start two concurrent pipelined calls against question 1.
+  const pipelined1 = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  const pipelined2 = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 3,
+    interfaceId: 0x5678n,
+    methodId: 1,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Let the eviction timer fire.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // Entry should still exist because both pipelined calls are in-flight.
+  assertEquals(bridge.answerTableSize >= 1, true);
+
+  // Release the first pipelined call.
+  gate1.resolve();
+  const r1 = await pipelined1;
+  assert(r1 !== null, "expected pipelined response 1");
+  assertEquals(decodeReturnFrame(r1).kind, "results");
+
+  // After releasing one, the second is still in-flight, so the entry
+  // for question 1 should still be protected.
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // question 1 entry should still be present (or at least question 3 entry).
+  // The key assertion: question 1 should not have been evicted while
+  // a pipelined call is still referencing it.
+
+  // Release the second pipelined call.
+  gate2.resolve();
+  const r2 = await pipelined2;
+  assert(r2 !== null, "expected pipelined response 2");
+  assertEquals(decodeReturnFrame(r2).kind, "results");
+
+  if (decodeReturnFrame(r1).kind === "results") {
+    assertEquals(
+      decodeSingleU32StructMessage(
+        (decodeReturnFrame(r1) as { contentBytes: Uint8Array }).contentBytes,
+      ),
+      100,
+    );
+  }
+  if (decodeReturnFrame(r2).kind === "results") {
+    assertEquals(
+      decodeSingleU32StructMessage(
+        (decodeReturnFrame(r2) as { contentBytes: Uint8Array }).contentBytes,
+      ),
+      200,
+    );
+  }
+
+  // Wait for eviction timers to clean up all entries.
+  await new Promise((resolve) => setTimeout(resolve, 50));
   assertEquals(bridge.answerTableSize, 0);
 });

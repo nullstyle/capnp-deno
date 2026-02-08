@@ -1,0 +1,330 @@
+import { SessionError } from "./errors.ts";
+import type { RpcClientTransportLike } from "./reconnecting_client.ts";
+
+/**
+ * Configuration options for {@link RpcConnectionPool}.
+ */
+export interface RpcConnectionPoolOptions {
+  /** Minimum number of connections to keep in the pool. Defaults to 0. */
+  minConnections?: number;
+  /** Maximum number of connections allowed. Defaults to 8. */
+  maxConnections?: number;
+  /** Time in milliseconds before an idle connection is closed. Defaults to 30000. */
+  idleTimeoutMs?: number;
+  /** Time in milliseconds to wait for a connection when the pool is exhausted. Defaults to 5000. */
+  acquireTimeoutMs?: number;
+}
+
+/**
+ * Pool statistics returned by {@link RpcConnectionPool.stats}.
+ */
+export interface RpcConnectionPoolStats {
+  /** Total number of connections managed by the pool (idle + active). */
+  total: number;
+  /** Number of idle connections available for acquisition. */
+  idle: number;
+  /** Number of connections currently in use. */
+  active: number;
+  /** Number of pending acquire requests waiting for a connection. */
+  pending: number;
+}
+
+interface IdleEntry {
+  conn: RpcClientTransportLike;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingAcquire {
+  resolve: (conn: RpcClientTransportLike) => void;
+  reject: (error: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * A connection pool for managing multiple RPC client transport connections.
+ *
+ * The pool lazily creates connections up to the configured maximum, reuses
+ * idle connections, and closes connections that have been idle for longer
+ * than `idleTimeoutMs`. When the pool is at capacity, {@link acquire} will
+ * block until a connection is released or `acquireTimeoutMs` is exceeded.
+ *
+ * On construction, if `minConnections` is greater than 0, the pool will
+ * pre-warm by creating that many connections eagerly.
+ *
+ * Implements `Disposable` so it can be used with `using` declarations.
+ *
+ * @example
+ * ```ts
+ * const pool = new RpcConnectionPool(
+ *   () => createMyTransport(),
+ *   { maxConnections: 4, idleTimeoutMs: 10000 },
+ * );
+ * const conn = await pool.acquire();
+ * try {
+ *   // use conn...
+ * } finally {
+ *   pool.release(conn);
+ * }
+ * await pool.close();
+ * ```
+ */
+export class RpcConnectionPool implements Disposable {
+  readonly #connect: () => Promise<RpcClientTransportLike>;
+  readonly #minConnections: number;
+  readonly #maxConnections: number;
+  readonly #idleTimeoutMs: number;
+  readonly #acquireTimeoutMs: number;
+
+  #idle: IdleEntry[] = [];
+  #active: Set<RpcClientTransportLike> = new Set();
+  #pending: PendingAcquire[] = [];
+  #closed = false;
+
+  constructor(
+    connect: () => Promise<RpcClientTransportLike>,
+    options: RpcConnectionPoolOptions = {},
+  ) {
+    this.#connect = connect;
+    this.#minConnections = options.minConnections ?? 0;
+    this.#maxConnections = options.maxConnections ?? 8;
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? 30000;
+    this.#acquireTimeoutMs = options.acquireTimeoutMs ?? 5000;
+
+    if (this.#minConnections > this.#maxConnections) {
+      throw new SessionError(
+        "minConnections must not exceed maxConnections",
+      );
+    }
+
+    if (this.#minConnections > 0) {
+      this.#warmUp();
+    }
+  }
+
+  /**
+   * Current pool statistics.
+   */
+  get stats(): RpcConnectionPoolStats {
+    return {
+      total: this.#idle.length + this.#active.size,
+      idle: this.#idle.length,
+      active: this.#active.size,
+      pending: this.#pending.length,
+    };
+  }
+
+  /**
+   * Acquire a connection from the pool.
+   *
+   * If an idle connection is available it is returned immediately. If the pool
+   * has capacity, a new connection is created. Otherwise the call blocks until
+   * a connection is released or the acquire timeout expires.
+   *
+   * @returns A pooled connection.
+   * @throws {SessionError} If the pool is closed, the acquire times out, or
+   *   connection creation fails.
+   */
+  async acquire(): Promise<RpcClientTransportLike> {
+    if (this.#closed) {
+      throw new SessionError("connection pool is closed");
+    }
+
+    // Try to reuse an idle connection.
+    while (this.#idle.length > 0) {
+      const entry = this.#idle.shift()!;
+      clearTimeout(entry.timer);
+      this.#active.add(entry.conn);
+      return entry.conn;
+    }
+
+    // Try to create a new connection if under the limit.
+    if (this.#active.size < this.#maxConnections) {
+      return await this.#createConnection();
+    }
+
+    // At capacity -- wait for a release.
+    return await new Promise<RpcClientTransportLike>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.#pending.indexOf(entry);
+        if (idx !== -1) this.#pending.splice(idx, 1);
+        reject(
+          new SessionError(
+            `connection pool acquire timed out after ${this.#acquireTimeoutMs}ms`,
+          ),
+        );
+      }, this.#acquireTimeoutMs);
+
+      const entry: PendingAcquire = { resolve, reject, timer };
+      this.#pending.push(entry);
+    });
+  }
+
+  /**
+   * Release a connection back to the pool.
+   *
+   * If there are pending acquire requests the connection is handed off
+   * directly. Otherwise the connection is placed into the idle set with
+   * an idle timeout timer.
+   *
+   * @param conn - The connection to release, which must have been obtained
+   *   via {@link acquire}.
+   */
+  release(conn: RpcClientTransportLike): void {
+    if (!this.#active.has(conn)) {
+      return;
+    }
+    this.#active.delete(conn);
+
+    if (this.#closed) {
+      this.#closeConnection(conn);
+      return;
+    }
+
+    // Hand off to a pending waiter if one exists.
+    while (this.#pending.length > 0) {
+      const waiter = this.#pending.shift()!;
+      clearTimeout(waiter.timer);
+      this.#active.add(conn);
+      waiter.resolve(conn);
+      return;
+    }
+
+    // Return to idle pool with a timeout.
+    const timer = setTimeout(() => {
+      this.#evictIdle(conn);
+    }, this.#idleTimeoutMs);
+    this.#idle.push({ conn, timer });
+  }
+
+  /**
+   * Close all connections in the pool and reject any pending acquire requests.
+   *
+   * After calling close, no further operations are allowed on the pool.
+   */
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+
+    // Reject all pending acquires.
+    const pendingCopy = this.#pending.splice(0);
+    for (const waiter of pendingCopy) {
+      clearTimeout(waiter.timer);
+      waiter.reject(new SessionError("connection pool is closed"));
+    }
+
+    // Close all idle connections.
+    const idleCopy = this.#idle.splice(0);
+    const closePromises: Promise<void>[] = [];
+    for (const entry of idleCopy) {
+      clearTimeout(entry.timer);
+      closePromises.push(this.#closeConnection(entry.conn));
+    }
+
+    // Close all active connections.
+    const activeCopy = [...this.#active];
+    this.#active.clear();
+    for (const conn of activeCopy) {
+      closePromises.push(this.#closeConnection(conn));
+    }
+
+    await Promise.all(closePromises);
+  }
+
+  /**
+   * Disposable implementation -- delegates to {@link close}.
+   */
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  async #createConnection(): Promise<RpcClientTransportLike> {
+    try {
+      const conn = await this.#connect();
+      this.#active.add(conn);
+      return conn;
+    } catch (error) {
+      // If creation failed and there is still capacity, try once more.
+      // This handles transient failures without blocking callers indefinitely.
+      throw new SessionError("connection pool: failed to create connection", {
+        cause: error,
+      });
+    }
+  }
+
+  async #closeConnection(conn: RpcClientTransportLike): Promise<void> {
+    if (!conn.close) return;
+    try {
+      await conn.close();
+    } catch {
+      // Swallow close errors -- best effort cleanup.
+    }
+  }
+
+  #evictIdle(conn: RpcClientTransportLike): void {
+    const idx = this.#idle.findIndex((e) => e.conn === conn);
+    if (idx === -1) return;
+    const [entry] = this.#idle.splice(idx, 1);
+    clearTimeout(entry.timer);
+
+    // Only close if we are above minConnections.
+    const total = this.#idle.length + this.#active.size;
+    if (total >= this.#minConnections) {
+      this.#closeConnection(conn);
+    } else {
+      // Re-add with a fresh timer.
+      const timer = setTimeout(() => {
+        this.#evictIdle(conn);
+      }, this.#idleTimeoutMs);
+      this.#idle.push({ conn, timer });
+    }
+  }
+
+  #warmUp(): void {
+    const count = this.#minConnections;
+    for (let i = 0; i < count; i++) {
+      this.#connect().then(
+        (conn) => {
+          if (this.#closed) {
+            this.#closeConnection(conn);
+            return;
+          }
+          const timer = setTimeout(() => {
+            this.#evictIdle(conn);
+          }, this.#idleTimeoutMs);
+          this.#idle.push({ conn, timer });
+        },
+        () => {
+          // Warm-up failures are silently ignored -- connections will be
+          // created on demand when acquire() is called.
+        },
+      );
+    }
+  }
+}
+
+/**
+ * Execute a function with a connection acquired from the pool.
+ *
+ * The connection is automatically released back to the pool after `fn`
+ * completes. If `fn` throws, the connection is still released (the pool
+ * can decide whether to keep or discard it).
+ *
+ * @param pool - The connection pool to acquire from.
+ * @param fn - The function to execute with the acquired connection.
+ * @returns The return value of `fn`.
+ * @throws Rethrows any error from `fn` after releasing the connection.
+ */
+export async function withConnection<T>(
+  pool: RpcConnectionPool,
+  fn: (conn: RpcClientTransportLike) => Promise<T>,
+): Promise<T> {
+  const conn = await pool.acquire();
+  try {
+    const result = await fn(conn);
+    pool.release(conn);
+    return result;
+  } catch (error) {
+    pool.release(conn);
+    throw error;
+  }
+}
