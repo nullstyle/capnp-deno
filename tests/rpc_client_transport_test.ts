@@ -80,7 +80,7 @@ Deno.test("SessionRpcClientTransport drives fixture bootstrap/call flow", async 
 
   try {
     const cap = await client.bootstrap();
-    assertEquals(cap.capabilityIndex, 0);
+    assertEquals(cap.capabilityIndex, 1);
     assertEquals(bootstrapFinished, true);
 
     let thrown: unknown;

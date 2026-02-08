@@ -58,7 +58,7 @@ Deno.test("rpc wire encodes call request frame matching fixture", () => {
     questionId: 2,
     interfaceId: 0x1234n,
     methodId: 9,
-    targetImportedCap: 0,
+    targetImportedCap: 1,
   });
   assertBytes(encoded, Array.from(CALL_BOOTSTRAP_CAP_Q2_INBOUND));
 
@@ -66,7 +66,7 @@ Deno.test("rpc wire encodes call request frame matching fixture", () => {
   assertEquals(decoded.questionId, 2);
   assertEquals(decoded.interfaceId, 0x1234n);
   assertEquals(decoded.methodId, 9);
-  assertEquals(decoded.targetImportedCap, 0);
+  assertEquals(decoded.targetImportedCap, 1);
   assertEquals(decoded.paramsCapTable.length, 0);
 });
 
@@ -102,7 +102,7 @@ Deno.test("rpc wire decodes bootstrap success return and extracts capability ind
   assertEquals(message.kind, "results");
   assertEquals(message.answerId, 1);
   const capIndex = extractBootstrapCapabilityIndex(message);
-  assertEquals(capIndex, 0);
+  assertEquals(capIndex, 1);
 });
 
 Deno.test("rpc wire decodes call exception return", () => {

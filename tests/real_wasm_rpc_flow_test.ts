@@ -61,8 +61,43 @@ async function withPeer(
 function enableBootstrapStub(
   instance: WebAssembly.Instance,
   peer: WasmPeer,
-): void {
+): number {
   const raw = instance.exports as Record<string, unknown>;
+  const withId = raw.capnp_peer_set_bootstrap_stub_with_id;
+  if (typeof withId === "function") {
+    const alloc = raw.capnp_alloc;
+    const free = raw.capnp_free;
+    const memory = raw.memory;
+    if (
+      typeof alloc !== "function" || typeof free !== "function" ||
+      !(memory instanceof WebAssembly.Memory)
+    ) {
+      throw new Error("missing memory/alloc/free for bootstrap stub id helper");
+    }
+    const idPtr = (alloc as (len: number) => number)(4);
+    if (idPtr === 0) {
+      throw new Error("capnp_alloc failed for bootstrap stub id helper");
+    }
+    try {
+      const view = new DataView(memory.buffer);
+      view.setUint32(idPtr, 0, true);
+      const ok = (withId as (handle: number, outExportIdPtr: number) => number)(
+        peer.handle,
+        idPtr,
+      );
+      if (ok !== 1) {
+        const err = peer.abi.exports.capnp_last_error_code();
+        const msg = err === 0
+          ? "capnp_peer_set_bootstrap_stub_with_id failed"
+          : `capnp_peer_set_bootstrap_stub_with_id failed with code=${err}`;
+        throw new Error(msg);
+      }
+      return view.getUint32(idPtr, true);
+    } finally {
+      (free as (ptr: number, len: number) => void)(idPtr, 4);
+    }
+  }
+
   const fn = raw.capnp_peer_set_bootstrap_stub;
   if (typeof fn !== "function") {
     throw new Error("missing capnp_peer_set_bootstrap_stub export");
@@ -75,6 +110,7 @@ function enableBootstrapStub(
       : `capnp_peer_set_bootstrap_stub failed with code=${err}`;
     throw new Error(msg);
   }
+  return 1;
 }
 
 function encodeSingleU32StructMessage(value: number): Uint8Array {
@@ -167,7 +203,7 @@ Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () =
 
 Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", async () => {
   await withPeer((instance, peer) => {
-    enableBootstrapStub(instance, peer);
+    const bootstrapStubExportId = enableBootstrapStub(instance, peer);
 
     const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
     assertEquals(bootstrapOutbound.length, 1);
@@ -179,42 +215,24 @@ Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", asyn
     assertEquals(bootstrap.answerId, 1);
     assertEquals(bootstrap.capTable.length, 1);
     assertEquals(bootstrap.capTable[0].tag, 1);
-    // Host call bridge owns export 0; bootstrap stub is installed as export 1.
-    assertEquals(bootstrap.capTable[0].id, 1);
+    assertEquals(bootstrap.capTable[0].id, bootstrapStubExportId);
 
     const callOutbound = peer.pushFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
-    assertEquals(callOutbound.length, 0);
-
-    const hostCall = peer.abi.popHostCall(peer.handle);
-    assert(hostCall !== null, "expected host call bridge record");
-    assertEquals(hostCall.questionId, 2);
-    assertEquals(hostCall.interfaceId, 0x1234n);
-    assertEquals(hostCall.methodId, 9);
-    assert(
-      hostCall.frame.byteLength > 0,
-      "expected non-empty host call payload",
-    );
-
-    peer.abi.respondHostCallException(
-      peer.handle,
-      hostCall.questionId,
-      "bootstrap stub",
-    );
-    const postResponseFrames = peer.drainOutgoingFrames();
-    assertEquals(postResponseFrames.length, 1);
-    const postResponse = decodeReturnFrame(postResponseFrames[0]);
-    assertEquals(postResponse.kind, "exception");
-    if (postResponse.kind !== "exception") {
-      throw new Error(`expected exception return, got: ${postResponse.kind}`);
+    assertEquals(callOutbound.length, 1);
+    const call = decodeReturnFrame(callOutbound[0]);
+    assertEquals(call.kind, "exception");
+    if (call.kind !== "exception") {
+      throw new Error(`expected exception return, got: ${call.kind}`);
     }
-    assertEquals(postResponse.answerId, 2);
-    assertEquals(postResponse.reason, "bootstrap stub");
+    assertEquals(call.answerId, 2);
+    assertEquals(call.reason, "bootstrap stub");
+    assertEquals(peer.abi.popHostCall(peer.handle), null);
   });
 });
 
 Deno.test("RpcSession pumps real wasm peer using successful bootstrap fixture", async () => {
   await withPeer(async (instance, peer) => {
-    enableBootstrapStub(instance, peer);
+    const bootstrapStubExportId = enableBootstrapStub(instance, peer);
 
     const transport = new MockTransport();
     const session = new RpcSession(peer, transport);
@@ -233,7 +251,7 @@ Deno.test("RpcSession pumps real wasm peer using successful bootstrap fixture", 
       assertEquals(bootstrap.answerId, 1);
       assertEquals(bootstrap.capTable.length, 1);
       assertEquals(bootstrap.capTable[0].tag, 1);
-      assertEquals(bootstrap.capTable[0].id, 1);
+      assertEquals(bootstrap.capTable[0].id, bootstrapStubExportId);
     } finally {
       await session.close();
     }
@@ -242,8 +260,14 @@ Deno.test("RpcSession pumps real wasm peer using successful bootstrap fixture", 
 
 Deno.test("real wasm rpc lifecycle: finish retires returned caps and release frames are accepted", async () => {
   await withPeer((instance, peer) => {
-    enableBootstrapStub(instance, peer);
-    const callTemplate = decodeCallRequestFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+    const bootstrapStubExportId = enableBootstrapStub(instance, peer);
+    const fixtureCall = decodeCallRequestFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+    const callTemplate = {
+      interfaceId: fixtureCall.interfaceId,
+      methodId: fixtureCall.methodId,
+      paramsContent: fixtureCall.paramsContent,
+      paramsCapTable: fixtureCall.paramsCapTable,
+    };
 
     const bootstrapOutbound = peer.pushFrame(BOOTSTRAP_Q1_SUCCESS_INBOUND);
     assertEquals(bootstrapOutbound.length, 1);
@@ -255,9 +279,17 @@ Deno.test("real wasm rpc lifecycle: finish retires returned caps and release fra
     assertEquals(bootstrap.answerId, 1);
     assertEquals(bootstrap.capTable.length, 1);
     const bootstrapCapId = bootstrap.capTable[0].id;
-    assertEquals(bootstrapCapId, 1);
+    assertEquals(bootstrapCapId, bootstrapStubExportId);
 
-    const callOutbound = peer.pushFrame(CALL_BOOTSTRAP_CAP_Q2_INBOUND);
+    const hostBridgeCall = encodeCallRequestFrame({
+      questionId: 2,
+      interfaceId: callTemplate.interfaceId,
+      methodId: callTemplate.methodId,
+      targetImportedCap: 0,
+      paramsContent: callTemplate.paramsContent,
+      paramsCapTable: callTemplate.paramsCapTable,
+    });
+    const callOutbound = peer.pushFrame(hostBridgeCall);
     assertEquals(callOutbound.length, 0);
 
     const hostCall = peer.abi.popHostCall(peer.handle);

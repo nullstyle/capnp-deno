@@ -150,6 +150,7 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
   ];
   const seenResults: Array<{ questionId: number; payload: Uint8Array }> = [];
   const seenExceptions: Array<{ questionId: number; reason: string }> = [];
+  const seenFreedHostFrames: Array<{ ptr: number; len: number }> = [];
   const seenFinish: Array<{
     questionId: number;
     releaseResultCaps: number;
@@ -203,6 +204,14 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
         });
         return 1;
       },
+      capnp_peer_free_host_call_frame: (
+        _peer: number,
+        framePtr: number,
+        frameLen: number,
+      ) => {
+        seenFreedHostFrames.push({ ptr: framePtr, len: frameLen });
+        return 1;
+      },
       capnp_peer_send_finish: (
         _peer: number,
         questionId: number,
@@ -241,6 +250,7 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
 
   const abi = new WasmAbi(fake.exports);
   assertEquals(abi.capabilities.hasHostCallBridge, true);
+  assertEquals(abi.capabilities.hasHostCallFrameRelease, true);
   assertEquals(abi.capabilities.hasLifecycleHelpers, true);
   assertEquals(abi.capabilities.hasSchemaManifest, true);
 
@@ -250,6 +260,8 @@ Deno.test("WasmAbi host-call and lifecycle wrappers route through optional expor
   assertEquals(hostCall.interfaceId, 0x1234n);
   assertEquals(hostCall.methodId, 9);
   assertBytes(hostCall.frame, [0xaa, 0xbb, 0xcc]);
+  assertEquals(seenFreedHostFrames.length, 1);
+  assertEquals(seenFreedHostFrames[0].len, 3);
   assertEquals(abi.popHostCall(1), null);
 
   abi.respondHostCallResults(1, 42, new Uint8Array([0x01, 0x02, 0x03]));

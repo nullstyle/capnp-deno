@@ -32,6 +32,11 @@ export interface CapnpWasmExports {
     out_frame_ptr_ptr: number,
     out_frame_len_ptr: number,
   ): number;
+  capnp_peer_free_host_call_frame?(
+    peer: number,
+    frame_ptr: number,
+    frame_len: number,
+  ): number;
   capnp_peer_respond_host_call_results?(
     peer: number,
     question_id: number,
@@ -54,6 +59,11 @@ export interface CapnpWasmExports {
     peer: number,
     cap_id: number,
     reference_count: number,
+  ): number;
+  capnp_peer_set_bootstrap_stub?(peer: number): number;
+  capnp_peer_set_bootstrap_stub_with_id?(
+    peer: number,
+    out_export_id_ptr: number,
   ): number;
   capnp_schema_manifest_json?(
     out_ptr_ptr: number,
@@ -80,7 +90,9 @@ export interface WasmAbiOptions {
 export interface WasmAbiCapabilities {
   hasPeerPopCommit: boolean;
   hasHostCallBridge: boolean;
+  hasHostCallFrameRelease: boolean;
   hasLifecycleHelpers: boolean;
+  hasBootstrapStubIdentity: boolean;
   hasSchemaManifest: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
@@ -195,8 +207,12 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     hasHostCallBridge: typeof exports.capnp_peer_pop_host_call === "function" &&
       typeof exports.capnp_peer_respond_host_call_results === "function" &&
       typeof exports.capnp_peer_respond_host_call_exception === "function",
+    hasHostCallFrameRelease:
+      typeof exports.capnp_peer_free_host_call_frame === "function",
     hasLifecycleHelpers: typeof exports.capnp_peer_send_finish === "function" &&
       typeof exports.capnp_peer_send_release === "function",
+    hasBootstrapStubIdentity:
+      typeof exports.capnp_peer_set_bootstrap_stub_with_id === "function",
     hasSchemaManifest: typeof exports.capnp_schema_manifest_json === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
@@ -272,6 +288,12 @@ export function getCapnpWasmExports(
       "capnp_peer_respond_host_call_exception",
     );
   }
+  if (raw.capnp_peer_free_host_call_frame !== undefined) {
+    exports.capnp_peer_free_host_call_frame = expectFunction(
+      raw.capnp_peer_free_host_call_frame,
+      "capnp_peer_free_host_call_frame",
+    );
+  }
   if (raw.capnp_peer_send_finish !== undefined) {
     exports.capnp_peer_send_finish = expectFunction(
       raw.capnp_peer_send_finish,
@@ -282,6 +304,18 @@ export function getCapnpWasmExports(
     exports.capnp_peer_send_release = expectFunction(
       raw.capnp_peer_send_release,
       "capnp_peer_send_release",
+    );
+  }
+  if (raw.capnp_peer_set_bootstrap_stub !== undefined) {
+    exports.capnp_peer_set_bootstrap_stub = expectFunction(
+      raw.capnp_peer_set_bootstrap_stub,
+      "capnp_peer_set_bootstrap_stub",
+    );
+  }
+  if (raw.capnp_peer_set_bootstrap_stub_with_id !== undefined) {
+    exports.capnp_peer_set_bootstrap_stub_with_id = expectFunction(
+      raw.capnp_peer_set_bootstrap_stub_with_id,
+      "capnp_peer_set_bootstrap_stub_with_id",
     );
   }
   if (raw.capnp_schema_manifest_json !== undefined) {
@@ -476,6 +510,7 @@ export class WasmAbi {
       const framePtr = this.readU32(framePtrPtr);
       const frameLen = this.readU32(frameLenPtr);
       const frame = this.copyBytes(framePtr, frameLen);
+      this.freeHostCallFrame(peer, framePtr, frameLen);
       return {
         questionId,
         interfaceId,
@@ -488,6 +523,17 @@ export class WasmAbi {
       this.free(methodIdPtr, 2);
       this.free(framePtrPtr, 4);
       this.free(frameLenPtr, 4);
+    }
+  }
+
+  freeHostCallFrame(peer: number, framePtr: number, frameLen: number): void {
+    const fn = this.exports.capnp_peer_free_host_call_frame;
+    if (!fn) return;
+
+    this.clearError();
+    const ok = fn(peer, framePtr, frameLen);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_free_host_call_frame failed");
     }
   }
 

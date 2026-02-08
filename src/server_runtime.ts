@@ -5,7 +5,7 @@ import type { RpcTransport } from "./transport.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
 
 const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;
-const DEFAULT_MAX_HOST_CALLS_TOTAL = 4_096;
+const DEFAULT_MAX_HOST_CALLS_TOTAL = Number.MAX_SAFE_INTEGER;
 
 class PostInboundHookTransport implements RpcTransport {
   readonly #inner: RpcTransport;
@@ -232,7 +232,7 @@ export class RpcServerRuntime {
     const warning: RpcServerRuntimeWarning = {
       code: "host_call_pump_limit_reached",
       message:
-        `host-call pump limit reached (${this.#maxHostCallsTotal}); upstream host-call frame release is not available yet`,
+        `host-call pump limit reached (${this.#maxHostCallsTotal}); host-call pumping has been bounded by runtime policy`,
       totalHostCallsPumped: this.#totalHostCallsPumped,
       maxHostCallsTotal: this.#maxHostCallsTotal,
     };
