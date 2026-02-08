@@ -465,6 +465,60 @@ Deno.test("InMemoryRpcHarnessTransport nextOutboundFrame rejects on timeout", as
   );
 });
 
+Deno.test("InMemoryRpcHarnessTransport removes timed-out waiter before next send", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.start(() => {});
+
+  try {
+    let thrown: unknown;
+    try {
+      await transport.nextOutboundFrame({ timeoutMs: 10 });
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rpc wait timed out after 10ms/i.test(thrown.message),
+      `expected timeout SessionError, got: ${String(thrown)}`,
+    );
+
+    transport.send(new Uint8Array([0xde, 0xad]));
+    const frame = await transport.nextOutboundFrame({ timeoutMs: 50 });
+    assertBytes(frame, [0xde, 0xad]);
+  } finally {
+    transport.close();
+  }
+});
+
+Deno.test("InMemoryRpcHarnessTransport removes aborted waiter before next send", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.start(() => {});
+
+  try {
+    const controller = new AbortController();
+    const pending = transport.nextOutboundFrame({ signal: controller.signal });
+    controller.abort();
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rpc wait aborted/i.test(thrown.message),
+      `expected aborted SessionError, got: ${String(thrown)}`,
+    );
+
+    transport.send(new Uint8Array([0xbe, 0xef]));
+    const frame = await transport.nextOutboundFrame({ timeoutMs: 50 });
+    assertBytes(frame, [0xbe, 0xef]);
+  } finally {
+    transport.close();
+  }
+});
+
 Deno.test("InMemoryRpcHarnessTransport nextOutboundFrame rejects on abort and close", async () => {
   const abortTransport = new InMemoryRpcHarnessTransport();
   abortTransport.start(() => {});

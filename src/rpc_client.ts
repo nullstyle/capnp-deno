@@ -165,8 +165,9 @@ export interface RpcClientCallOptions {
    *
    * **Consequence of disabling**: If you set `autoFinish: false` and never
    * call {@link SessionRpcClientTransport.finish}, the server's answer table
-   * entry for this question will persist indefinitely, causing a resource
-   * leak.
+   * entry for this question can persist indefinitely, causing a resource
+   * leak. This includes timeout/abort paths, where `autoFinish: true`
+   * performs best-effort cleanup by sending `finish`.
    *
    * @default true
    * @see {@link SessionRpcClientTransport.finish} to manually finish a question.
@@ -175,9 +176,12 @@ export interface RpcClientCallOptions {
    */
   autoFinish?: boolean;
   /**
-   * Options forwarded to the auto-finish message when `autoFinish` is enabled
-   * and the server's `noFinishNeeded` is `false`. Has no effect when
-   * `autoFinish` is `false` or when using {@link SessionRpcClientTransport.callRawPipelined}.
+   * Options forwarded to auto-finish behavior when `autoFinish` is enabled:
+   * - normal response path (when `noFinishNeeded` is `false`), and
+   * - wait-failure cleanup path (timeout/abort after sending the call frame).
+   *
+   * Has no effect when `autoFinish` is `false` or when using
+   * {@link SessionRpcClientTransport.callRawPipelined}.
    *
    * @see {@link RpcFinishOptions} for available options.
    */
@@ -327,6 +331,12 @@ interface PendingReturnWaiter {
   settled: boolean;
 }
 
+interface PendingOutboundFrameWaiter {
+  resolve: (frame: Uint8Array) => void;
+  reject: (error: unknown) => void;
+  settled: boolean;
+}
+
 /**
  * An in-memory implementation of {@link RpcSessionHarnessTransport} for testing.
  *
@@ -348,10 +358,7 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
   #closed = false;
   #outboundQueue: Uint8Array[] = [];
-  #waiters: Array<{
-    resolve: (frame: Uint8Array) => void;
-    reject: (error: unknown) => void;
-  }> = [];
+  #waiters: PendingOutboundFrameWaiter[] = [];
 
   start(
     onFrame: (frame: Uint8Array) => void | Promise<void>,
@@ -399,30 +406,38 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
 
     return await new Promise<Uint8Array>((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      const waiter: PendingOutboundFrameWaiter = {
+        settled: false,
+        resolve: (frame: Uint8Array): void => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          this.#removeOutboundFrameWaiter(waiter);
+          cleanup();
+          resolve(frame);
+        },
+        reject: (error: unknown): void => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          this.#removeOutboundFrameWaiter(waiter);
+          cleanup();
+          reject(error);
+        },
+      };
       const onAbort = (): void => {
-        cleanup();
-        reject(new SessionError("rpc wait aborted"));
+        waiter.reject(new SessionError("rpc wait aborted"));
       };
       const cleanup = (): void => {
         if (timeout !== undefined) clearTimeout(timeout);
         options.signal?.removeEventListener("abort", onAbort);
       };
-      const wrappedResolve = (frame: Uint8Array): void => {
-        cleanup();
-        resolve(frame);
-      };
-      const wrappedReject = (error: unknown): void => {
-        cleanup();
-        reject(error);
-      };
 
       if (options.signal?.aborted) {
-        wrappedReject(new SessionError("rpc wait aborted"));
+        waiter.reject(new SessionError("rpc wait aborted"));
         return;
       }
       if (options.timeoutMs !== undefined) {
         timeout = setTimeout(() => {
-          wrappedReject(
+          waiter.reject(
             new SessionError(`rpc wait timed out after ${options.timeoutMs}ms`),
           );
         }, options.timeoutMs);
@@ -431,11 +446,15 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
         options.signal.addEventListener("abort", onAbort, { once: true });
       }
 
-      this.#waiters.push({
-        resolve: wrappedResolve,
-        reject: wrappedReject,
-      });
+      this.#waiters.push(waiter);
     });
+  }
+
+  #removeOutboundFrameWaiter(waiter: PendingOutboundFrameWaiter): void {
+    const index = this.#waiters.indexOf(waiter);
+    if (index >= 0) {
+      this.#waiters.splice(index, 1);
+    }
   }
 }
 
@@ -579,7 +598,7 @@ export class SessionRpcClientTransport {
    *
    * If you set `autoFinish: false`, you take responsibility for calling
    * {@link finish} yourself. Failing to do so will leak the server's answer
-   * table entry for this question indefinitely.
+   * table entry for this question indefinitely, including timeout/abort paths.
    *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
    * @param methodOrdinal - The zero-based method index within the interface.
@@ -857,14 +876,33 @@ export class SessionRpcClientTransport {
     options: RpcClientCallOptions,
   ): Promise<RpcReturnMessage> {
     this.#markReturnExpected(questionId);
+    let frameSent = false;
     try {
       await this.#ensureStarted();
       await this.transport.emitInbound(frame);
+      frameSent = true;
       await this.session.flush();
       return await this.#awaitReturn(questionId, options);
     } catch (error) {
       this.#abandonExpectedReturn(questionId);
+      if (frameSent && (options.autoFinish ?? true)) {
+        await this.#tryFinishAfterWaitFailure(questionId, options.finish);
+      }
       throw error;
+    }
+  }
+
+  async #tryFinishAfterWaitFailure(
+    questionId: number,
+    options: RpcFinishOptions = {},
+  ): Promise<void> {
+    try {
+      await this.#sendFinish(questionId, {
+        releaseResultCaps: options.releaseResultCaps,
+        requireEarlyCancellation: options.requireEarlyCancellation ?? true,
+      });
+    } catch {
+      // Best-effort cleanup only; preserve the original request failure.
     }
   }
 

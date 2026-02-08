@@ -1,5 +1,6 @@
 import {
   decodeCallRequestFrame,
+  decodeFinishFrame,
   decodeRpcMessageTag,
   encodeReturnResultsFrame,
   InMemoryRpcHarnessTransport,
@@ -223,6 +224,222 @@ Deno.test("defaultTimeoutMs applies to callRaw", async () => {
         /timed out after 20ms/i.test(thrown.message),
       `expected callRaw default-timeout SessionError, got: ${String(thrown)}`,
     );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("callRaw timeout sends cleanup finish when autoFinish is enabled", async () => {
+  const params = encodeSingleU32StructMessage(42);
+  let callCount = 0;
+  const seenFinishFlags: Array<{
+    releaseResultCaps: boolean;
+    requireEarlyCancellation: boolean;
+  }> = [];
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        callCount += 1;
+        return [];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        const finish = decodeFinishFrame(frame);
+        seenFinishFlags.push({
+          releaseResultCaps: finish.releaseResultCaps,
+          requireEarlyCancellation: finish.requireEarlyCancellation,
+        });
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    defaultTimeoutMs: 20,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await client.callRaw({ capabilityIndex: 0 }, 1, params);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /timed out after 20ms/i.test(thrown.message),
+      `expected callRaw timeout SessionError, got: ${String(thrown)}`,
+    );
+    assertEquals(callCount, 1);
+    assertEquals(seenFinishFlags.length, 1);
+    assertEquals(seenFinishFlags[0].releaseResultCaps, true);
+    assertEquals(seenFinishFlags[0].requireEarlyCancellation, true);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("callRaw timeout does not send cleanup finish when autoFinish=false", async () => {
+  const params = encodeSingleU32StructMessage(42);
+  let callCount = 0;
+  let finishCount = 0;
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        callCount += 1;
+        return [];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        finishCount += 1;
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    defaultTimeoutMs: 20,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await client.callRaw(
+        { capabilityIndex: 0 },
+        1,
+        params,
+        { autoFinish: false },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /timed out after 20ms/i.test(thrown.message),
+      `expected callRaw timeout SessionError, got: ${String(thrown)}`,
+    );
+    assertEquals(callCount, 1);
+    assertEquals(finishCount, 0);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("callRaw abort after send sends cleanup finish when autoFinish is enabled", async () => {
+  const params = encodeSingleU32StructMessage(42);
+  let callCount = 0;
+  let finishCount = 0;
+  const controller = new AbortController();
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        callCount += 1;
+        controller.abort();
+        return [];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        finishCount += 1;
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    defaultTimeoutMs: 200,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await client.callRaw(
+        { capabilityIndex: 0 },
+        1,
+        params,
+        { signal: controller.signal },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rpc wait aborted/i.test(thrown.message),
+      `expected callRaw abort SessionError, got: ${String(thrown)}`,
+    );
+    assertEquals(callCount, 1);
+    assertEquals(finishCount, 1);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("call succeeds after an earlier timed-out call", async () => {
+  const params = encodeSingleU32StructMessage(1);
+  const results = encodeSingleU32StructMessage(9);
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        if (call.methodId === 1) {
+          return [];
+        }
+        if (call.methodId === 2) {
+          return [
+            encodeReturnResultsFrame({
+              answerId: call.questionId,
+              content: results,
+            }),
+          ];
+        }
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) return [];
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    let firstThrown: unknown;
+    try {
+      await client.call({ capabilityIndex: 0 }, 1, params, { timeoutMs: 10 });
+    } catch (error) {
+      firstThrown = error;
+    }
+    assert(
+      firstThrown instanceof SessionError &&
+        /timed out after 10ms/i.test(firstThrown.message),
+      `expected first call timeout SessionError, got: ${String(firstThrown)}`,
+    );
+
+    const second = await client.call(
+      { capabilityIndex: 0 },
+      2,
+      params,
+      { timeoutMs: 40 },
+    );
+    assertEquals(decodeSingleU32StructMessage(second), 9);
   } finally {
     await session.close();
   }
