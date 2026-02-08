@@ -1,9 +1,11 @@
 import {
+  decodeBootstrapRequestFrame,
   decodeCallRequestFrame,
   decodeFinishFrame,
   decodeReleaseFrame,
   decodeRpcMessageTag,
   EMPTY_STRUCT_MESSAGE,
+  encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   InMemoryRpcHarnessTransport,
   RPC_MESSAGE_TAG_BOOTSTRAP,
@@ -11,6 +13,7 @@ import {
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
   RpcSession,
+  SessionError,
   SessionRpcClientTransport,
   WasmPeer,
 } from "../mod.ts";
@@ -373,6 +376,399 @@ Deno.test("SessionRpcClientTransport stress: large cap-table lifecycle ordering 
       }
     }
     assertEquals(cursor, events.length);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("InMemoryRpcHarnessTransport nextOutboundFrame rejects on timeout", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.start(() => {});
+
+  let thrown: unknown;
+  try {
+    await transport.nextOutboundFrame({ timeoutMs: 10 });
+  } catch (error) {
+    thrown = error;
+  } finally {
+    transport.close();
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /rpc wait timed out after 10ms/i.test(thrown.message),
+    `expected timeout SessionError, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("InMemoryRpcHarnessTransport nextOutboundFrame rejects on abort and close", async () => {
+  const abortTransport = new InMemoryRpcHarnessTransport();
+  abortTransport.start(() => {});
+  const controller = new AbortController();
+  controller.abort();
+
+  let abortErr: unknown;
+  try {
+    await abortTransport.nextOutboundFrame({ signal: controller.signal });
+  } catch (error) {
+    abortErr = error;
+  } finally {
+    abortTransport.close();
+  }
+  assert(
+    abortErr instanceof SessionError &&
+      /rpc wait aborted/i.test(abortErr.message),
+    `expected aborted SessionError, got: ${String(abortErr)}`,
+  );
+
+  const closeTransport = new InMemoryRpcHarnessTransport();
+  closeTransport.start(() => {});
+  const wait = closeTransport.nextOutboundFrame();
+  closeTransport.close();
+  let closeErr: unknown;
+  try {
+    await wait;
+  } catch (error) {
+    closeErr = error;
+  }
+  assert(
+    closeErr instanceof SessionError &&
+      /transport is closed/i.test(closeErr.message),
+    `expected closed SessionError, got: ${String(closeErr)}`,
+  );
+});
+
+Deno.test("InMemoryRpcHarnessTransport rejects start/send/emitInbound after close", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.close();
+
+  let startErr: unknown;
+  try {
+    transport.start(() => {});
+  } catch (error) {
+    startErr = error;
+  }
+  assert(
+    startErr instanceof SessionError &&
+      /transport is closed/i.test(startErr.message),
+    `expected start closed SessionError, got: ${String(startErr)}`,
+  );
+
+  let sendErr: unknown;
+  try {
+    transport.send(new Uint8Array([0x01]));
+  } catch (error) {
+    sendErr = error;
+  }
+  assert(
+    sendErr instanceof SessionError &&
+      /transport is closed/i.test(sendErr.message),
+    `expected send closed SessionError, got: ${String(sendErr)}`,
+  );
+
+  let inboundErr: unknown;
+  try {
+    await transport.emitInbound(new Uint8Array([0x02]));
+  } catch (error) {
+    inboundErr = error;
+  }
+  assert(
+    inboundErr instanceof SessionError &&
+      /transport is closed/i.test(inboundErr.message),
+    `expected emitInbound closed SessionError, got: ${String(inboundErr)}`,
+  );
+});
+
+Deno.test("SessionRpcClientTransport skips undecodable and mismatched return frames", async () => {
+  const params = encodeSingleU32StructMessage(777);
+  const results = encodeSingleU32StructMessage(888);
+
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        return [
+          new Uint8Array([0x00, 0x01, 0x02]),
+          encodeReturnResultsFrame({
+            answerId: call.questionId + 100,
+            content: encodeSingleU32StructMessage(111),
+          }),
+          encodeReturnResultsFrame({
+            answerId: call.questionId,
+            content: results,
+          }),
+        ];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    const response = await client.call({ capabilityIndex: 0 }, 7, params);
+    assertEquals(decodeSingleU32StructMessage(response), 888);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport respects autoStart=false and supports manual start", async () => {
+  const params = encodeSingleU32StructMessage(111);
+  const results = encodeSingleU32StructMessage(222);
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        return [
+          encodeReturnResultsFrame({
+            answerId: call.questionId,
+            content: results,
+          }),
+        ];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) return [];
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    autoStart: false,
+  });
+
+  try {
+    let notStartedErr: unknown;
+    try {
+      await client.call({ capabilityIndex: 0 }, 3, params, { timeoutMs: 20 });
+    } catch (error) {
+      notStartedErr = error;
+    }
+    assert(
+      notStartedErr instanceof SessionError &&
+        /transport is not started/i.test(notStartedErr.message),
+      `expected not-started SessionError, got: ${String(notStartedErr)}`,
+    );
+
+    await session.start();
+    const response = await client.call({ capabilityIndex: 0 }, 3, params);
+    assertEquals(decodeSingleU32StructMessage(response), 222);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport surfaces wait timeout when no response arrives", async () => {
+  const params = encodeSingleU32StructMessage(5);
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) return [];
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await client.call({ capabilityIndex: 0 }, 1, params, { timeoutMs: 10 });
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /timed out after 10ms/i.test(thrown.message),
+      `expected wait-timeout SessionError, got: ${String(thrown)}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("InMemoryRpcHarnessTransport resolves pending waiter via send and supports abort listener wiring", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.start(() => {});
+
+  try {
+    const controller = new AbortController();
+    const pending = transport.nextOutboundFrame({
+      signal: controller.signal,
+      timeoutMs: 500,
+    });
+    transport.send(new Uint8Array([0xaa, 0xbb]));
+    const frame = await pending;
+    assertBytes(frame, [0xaa, 0xbb]);
+  } finally {
+    transport.close();
+  }
+});
+
+Deno.test("InMemoryRpcHarnessTransport aborts pending waiter and close is idempotent", async () => {
+  const transport = new InMemoryRpcHarnessTransport();
+  transport.start(() => {});
+
+  const controller = new AbortController();
+  const pending = transport.nextOutboundFrame({ signal: controller.signal });
+  controller.abort();
+
+  let abortErr: unknown;
+  try {
+    await pending;
+  } catch (error) {
+    abortErr = error;
+  }
+  assert(
+    abortErr instanceof SessionError &&
+      /rpc wait aborted/i.test(abortErr.message),
+    `expected aborted SessionError, got: ${String(abortErr)}`,
+  );
+
+  transport.close();
+  transport.close();
+
+  let closedErr: unknown;
+  try {
+    await transport.nextOutboundFrame();
+  } catch (error) {
+    closedErr = error;
+  }
+  assert(
+    closedErr instanceof SessionError &&
+      /transport is closed/i.test(closedErr.message),
+    `expected closed SessionError, got: ${String(closedErr)}`,
+  );
+});
+
+Deno.test("SessionRpcClientTransport bootstrap surfaces exception and reports question id", async () => {
+  let seenQuestionId = -1;
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag !== RPC_MESSAGE_TAG_BOOTSTRAP) {
+        throw new Error(`unexpected inbound rpc tag=${tag}`);
+      }
+      const bootstrap = decodeBootstrapRequestFrame(frame);
+      return [
+        encodeReturnExceptionFrame({
+          answerId: bootstrap.questionId,
+          reason: "bootstrap denied",
+        }),
+      ];
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await client.bootstrap({
+        onQuestionId: (questionId) => {
+          seenQuestionId = questionId;
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    assertEquals(seenQuestionId, 1);
+    assert(
+      thrown instanceof Error &&
+        /rpc bootstrap failed: bootstrap denied/i.test(thrown.message),
+      `expected bootstrap exception propagation, got: ${String(thrown)}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport callRaw reports question ids and explicit finish flags", async () => {
+  const params = encodeSingleU32StructMessage(55);
+  const results = encodeSingleU32StructMessage(66);
+  const seenQuestionIds: number[] = [];
+  const seenFinishFlags: Array<{
+    releaseResultCaps: boolean;
+    requireEarlyCancellation: boolean;
+  }> = [];
+
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        return [
+          encodeReturnResultsFrame({
+            answerId: call.questionId,
+            content: results,
+            noFinishNeeded: true,
+          }),
+        ];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        const finish = decodeFinishFrame(frame);
+        seenFinishFlags.push({
+          releaseResultCaps: finish.releaseResultCaps,
+          requireEarlyCancellation: finish.requireEarlyCancellation,
+        });
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+  });
+
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    const response = await client.callRaw(
+      { capabilityIndex: 7 },
+      3,
+      params,
+      {
+        onQuestionId: (questionId) => {
+          seenQuestionIds.push(questionId);
+        },
+      },
+    );
+    assertEquals(decodeSingleU32StructMessage(response.contentBytes), 66);
+    assertEquals(seenQuestionIds.join(","), "1");
+    assertEquals(seenFinishFlags.length, 0);
+
+    await client.finish(response.answerId, {
+      releaseResultCaps: false,
+      requireEarlyCancellation: true,
+    });
+    assertEquals(seenFinishFlags.length, 1);
+    assertEquals(seenFinishFlags[0].releaseResultCaps, false);
+    assertEquals(seenFinishFlags[0].requireEarlyCancellation, true);
   } finally {
     await session.close();
   }

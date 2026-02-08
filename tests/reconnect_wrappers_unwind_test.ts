@@ -39,7 +39,7 @@ class TrackingTransport implements RpcTransport {
     // no-op
   }
 
-  async close(): Promise<void> {
+  close(): void {
     this.closeCalls += 1;
     if (this.throwOnClose !== null) {
       throw this.throwOnClose;

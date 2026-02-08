@@ -509,3 +509,151 @@ Deno.test("RpcServerBridge reports interface mismatch and forwards unhandled dis
   assertEquals(seenUnhandled[0].questionId, 5);
   assertEquals(seenUnhandled[0].message, "dispatch exploded");
 });
+
+Deno.test("RpcServerBridge auto-assigns capability indexes and supports pointer retain/release", () => {
+  const bridge = new RpcServerBridge({
+    nextCapabilityIndex: 10,
+  });
+  const dispatch = {
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  };
+
+  const first = bridge.exportCapability(dispatch);
+  const second = bridge.exportCapability(dispatch);
+  assertEquals(first.capabilityIndex, 10);
+  assertEquals(second.capabilityIndex, 11);
+
+  bridge.retainCapability(first, 2);
+  assertEquals(bridge.releaseCapability(first, 2), true);
+  assertEquals(bridge.releaseCapability(first, 1), false);
+  assertEquals(bridge.releaseCapability({ capabilityIndex: 999 }, 1), false);
+
+  let invalidRetain: unknown;
+  try {
+    bridge.retainCapability(second, 0);
+  } catch (error) {
+    invalidRetain = error;
+  }
+  assert(
+    invalidRetain instanceof Error &&
+      /referenceCount must be a positive integer/i.test(invalidRetain.message),
+    `expected invalid retain referenceCount, got: ${String(invalidRetain)}`,
+  );
+});
+
+Deno.test("RpcServerBridge host-call pump rejects non-default return flags", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(6),
+        releaseParamCaps: false,
+      }),
+  }, { capabilityIndex: 4 });
+
+  const hostAbi = new MockWasmHostAbi();
+  hostAbi.calls.push({
+    questionId: 21,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 21,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 4,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: hostAbi,
+  });
+  assertEquals(handled, 1);
+  assertEquals(hostAbi.results.length, 0);
+  assertEquals(hostAbi.exceptions.length, 1);
+  assert(
+    /does not support non-default return flags/i.test(
+      hostAbi.exceptions[0].reason,
+    ),
+    `unexpected non-default flag exception reason: ${
+      hostAbi.exceptions[0].reason
+    }`,
+  );
+});
+
+Deno.test("RpcServerBridge host-call pump defaults missing results content to empty struct frame", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve({}),
+  }, { capabilityIndex: 6 });
+
+  const hostAbi = new MockWasmHostAbi();
+  hostAbi.calls.push({
+    questionId: 22,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 22,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 6,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: hostAbi,
+  });
+  assertEquals(handled, 1);
+  assertEquals(hostAbi.exceptions.length, 0);
+  assertEquals(hostAbi.results.length, 1);
+  assertEquals(hostAbi.results[0].payload.byteLength, 16);
+  const view = new DataView(
+    hostAbi.results[0].payload.buffer,
+    hostAbi.results[0].payload.byteOffset,
+    hostAbi.results[0].payload.byteLength,
+  );
+  assertEquals(view.getBigUint64(8, true), 0n);
+});
+
+Deno.test("RpcServerBridge string dispatch throws become exception reasons", async () => {
+  const seenUnhandled: Array<{ questionId: number; message: string }> = [];
+  const bridge = new RpcServerBridge({
+    onUnhandledError: (error, call) => {
+      seenUnhandled.push({
+        questionId: call.questionId,
+        message: String(error),
+      });
+    },
+  });
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => {
+      throw "string explosion";
+    },
+  }, { capabilityIndex: 8 });
+
+  const response = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 23,
+    interfaceId: 0x1234n,
+    methodId: 1,
+    targetImportedCap: 8,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!response) {
+    throw new Error("expected string-throw return frame");
+  }
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "exception");
+  if (decoded.kind === "exception") {
+    assertEquals(decoded.reason, "string explosion");
+  }
+  assertEquals(seenUnhandled.length, 1);
+  assertEquals(seenUnhandled[0].questionId, 23);
+  assertEquals(seenUnhandled[0].message, "string explosion");
+});

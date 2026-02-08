@@ -24,7 +24,7 @@
   scaffold TS output from schema input.
 - `just codegen-request path/to/request.bin`: generate scaffold TS output from a
   prebuilt binary `CodeGeneratorRequest`.
-- `just build-wasm`: build `.artifacts/capnp_deno.wasm` via
+- `just build-wasm`: build `generated/capnp_deno.wasm` via
   `scripts/build_wasm.sh`.
 - `CAPNPC_ZIG_ROOT=/path/to/capnp-zig deno task build:wasm`: required when
   auto-detection cannot find the Zig repo.

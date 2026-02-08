@@ -1,5 +1,16 @@
-import { MessagePortTransport, type RpcObservabilityEvent } from "../mod.ts";
-import { assert, assertBytes, deferred, withTimeout } from "./test_utils.ts";
+import {
+  MessagePortTransport,
+  type RpcObservabilityEvent,
+  TransportError,
+} from "../mod.ts";
+import {
+  assert,
+  assertBytes,
+  assertEquals,
+  assertThrows,
+  deferred,
+  withTimeout,
+} from "./test_utils.ts";
 
 function buildFrame(words: number): Uint8Array {
   const frame = new Uint8Array(8 + words * 8);
@@ -232,5 +243,272 @@ Deno.test("MessagePortTransport validates inbound frameLimits", async () => {
   } finally {
     await transport.close();
     channel.port1.close();
+  }
+});
+
+Deno.test("MessagePortTransport can ignore non-binary payloads when configured", async () => {
+  const channel = new MessageChannel();
+  const seenErrors: unknown[] = [];
+  let inboundFrames = 0;
+  const transport = new MessagePortTransport(channel.port2, {
+    closePortOnClose: true,
+    rejectNonBinaryFrames: false,
+    onError: (error) => {
+      seenErrors.push(error);
+    },
+  });
+
+  try {
+    transport.start((_frame) => {
+      inboundFrames += 1;
+    });
+    channel.port1.postMessage("text payload");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(inboundFrames, 0);
+    assertEquals(seenErrors.length, 0);
+  } finally {
+    await transport.close();
+    channel.port1.close();
+  }
+});
+
+Deno.test("MessagePortTransport normalizes messageerror events", async () => {
+  const channel = new MessageChannel();
+  const transportError = deferred<unknown>();
+  const transport = new MessagePortTransport(channel.port2, {
+    closePortOnClose: true,
+    onError: (error) => transportError.resolve(error),
+  });
+
+  try {
+    transport.start((_frame) => {});
+    channel.port2.dispatchEvent(new Event("messageerror"));
+
+    const err = await withTimeout(
+      transportError.promise,
+      1000,
+      "message port messageerror callback",
+    );
+    assert(
+      err instanceof TransportError &&
+        /message port transport error/i.test(err.message),
+      `expected messageerror normalization, got: ${String(err)}`,
+    );
+  } finally {
+    await transport.close();
+    channel.port1.close();
+  }
+});
+
+Deno.test("MessagePortTransport enforces maxQueuedOutboundBytes", async () => {
+  const channel = new MessageChannel();
+  const transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+    maxQueuedOutboundBytes: 1,
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const first = transport.send(new Uint8Array([0x01]));
+
+    let err: unknown;
+    try {
+      await transport.send(new Uint8Array([0x02]));
+    } catch (error) {
+      err = error;
+    }
+
+    assert(
+      err instanceof TransportError &&
+        /outbound queue byte limit exceeded/i.test(err.message),
+      `expected queued byte limit error, got: ${String(err)}`,
+    );
+
+    await first;
+  } finally {
+    await transport.close();
+    channel.port2.close();
+  }
+});
+
+Deno.test("MessagePortTransport enforces sendTimeoutMs before queued postMessage", async () => {
+  const channel = new MessageChannel();
+  const transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+    sendTimeoutMs: 0,
+  });
+
+  try {
+    transport.start((_frame) => {});
+    let err: unknown;
+    try {
+      await transport.send(new Uint8Array([0xaa]));
+    } catch (error) {
+      err = error;
+    }
+    assert(
+      err instanceof TransportError &&
+        /send timed out/i.test(err.message),
+      `expected send timeout error, got: ${String(err)}`,
+    );
+  } finally {
+    await transport.close();
+    channel.port2.close();
+  }
+});
+
+Deno.test("MessagePortTransport normalizes postMessage failures", async () => {
+  const channel = new MessageChannel();
+  const port = channel.port1 as unknown as {
+    postMessage: (value: unknown) => void;
+  };
+  const originalPostMessage = port.postMessage;
+  port.postMessage = () => {
+    throw new Error("post exploded");
+  };
+
+  const seenError = deferred<unknown>();
+  const transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+    onError: (error) => seenError.resolve(error),
+  });
+
+  try {
+    transport.start((_frame) => {});
+    let sendErr: unknown;
+    try {
+      await transport.send(new Uint8Array([0x01]));
+    } catch (error) {
+      sendErr = error;
+    }
+    assert(
+      sendErr instanceof TransportError &&
+        /message port send failed/i.test(sendErr.message) &&
+        /post exploded/i.test(sendErr.message),
+      `expected postMessage send failure normalization, got: ${
+        String(sendErr)
+      }`,
+    );
+
+    const callbackErr = await withTimeout(
+      seenError.promise,
+      1000,
+      "message port postMessage error callback",
+    );
+    assert(
+      callbackErr instanceof TransportError &&
+        /message port send failed/i.test(callbackErr.message),
+      `expected callback normalization, got: ${String(callbackErr)}`,
+    );
+  } finally {
+    await transport.close();
+    channel.port2.close();
+    port.postMessage = originalPostMessage;
+  }
+});
+
+Deno.test("MessagePortTransport lifecycle guards reject duplicate start and send-after-close", async () => {
+  const firstChannel = new MessageChannel();
+  const closedBeforeStart = new MessagePortTransport(firstChannel.port1, {
+    closePortOnClose: true,
+  });
+  closedBeforeStart.close();
+  assertThrows(
+    () => closedBeforeStart.start((_frame) => {}),
+    /MessagePortTransport is closed/i,
+  );
+  firstChannel.port2.close();
+
+  const secondChannel = new MessageChannel();
+  const started = new MessagePortTransport(secondChannel.port1, {
+    closePortOnClose: true,
+  });
+  try {
+    started.start((_frame) => {});
+    assertThrows(
+      () => started.start((_frame) => {}),
+      /MessagePortTransport already started/i,
+    );
+    started.close();
+
+    let err: unknown;
+    try {
+      await started.send(new Uint8Array([0xaa]));
+    } catch (error) {
+      err = error;
+    }
+    assert(
+      err instanceof TransportError &&
+        /MessagePortTransport is closed/i.test(err.message),
+      `expected closed send error, got: ${String(err)}`,
+    );
+  } finally {
+    started.close();
+    secondChannel.port2.close();
+  }
+});
+
+Deno.test("MessagePortTransport ignores non-binary frames and still decodes Blob payloads", async () => {
+  const channel = new MessageChannel();
+  const seen = deferred<Uint8Array>();
+  const seenErrors: unknown[] = [];
+  const transport = new MessagePortTransport(channel.port2, {
+    closePortOnClose: true,
+    rejectNonBinaryFrames: false,
+    onError: (error) => {
+      seenErrors.push(error);
+    },
+  });
+
+  try {
+    transport.start((frame) => seen.resolve(new Uint8Array(frame)));
+    channel.port2.dispatchEvent(
+      new MessageEvent("message", {
+        data: "ignore-me",
+      }),
+    );
+    channel.port2.dispatchEvent(
+      new MessageEvent("message", {
+        data: new Blob([new Uint8Array([0xde, 0xad, 0xbe])]),
+      }),
+    );
+
+    const inbound = await withTimeout(
+      seen.promise,
+      1000,
+      "message port blob inbound frame",
+    );
+    assertBytes(inbound, [0xde, 0xad, 0xbe]);
+    assertEquals(seenErrors.length, 0);
+  } finally {
+    transport.close();
+    channel.port1.close();
+  }
+});
+
+Deno.test("MessagePortTransport rejects queued sends when closed before drain", async () => {
+  const channel = new MessageChannel();
+  const transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const first = transport.send(new Uint8Array([0x01]));
+    const second = transport.send(new Uint8Array([0x02]));
+    transport.close();
+
+    const settled = await Promise.allSettled([first, second]);
+    for (const result of settled) {
+      assert(result.status === "rejected", "expected queued send rejection");
+      assert(
+        result.reason instanceof TransportError &&
+          /MessagePortTransport is closed/i.test(result.reason.message),
+        `expected closed queued send error, got: ${String(result.reason)}`,
+      );
+    }
+  } finally {
+    transport.close();
+    channel.port2.close();
   }
 });

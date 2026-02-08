@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 capnp_deno_root="$(cd "$script_dir/.." && pwd)"
-artifacts_dir="${CAPNP_DENO_ARTIFACTS_DIR:-$capnp_deno_root/.artifacts}"
+artifacts_dir="${CAPNP_DENO_ARTIFACTS_DIR:-$capnp_deno_root/generated}"
 
 if [[ -n "${CAPNPC_ZIG_ROOT:-}" ]]; then
   capnpc_zig_root="$CAPNPC_ZIG_ROOT"

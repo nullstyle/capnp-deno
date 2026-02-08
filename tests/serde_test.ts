@@ -5,6 +5,12 @@ import { assertBytes, assertEquals, assertThrows } from "./test_utils.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+function asInstance(exports: unknown): WebAssembly.Instance {
+  return {
+    exports: exports as WebAssembly.Exports,
+  } as unknown as WebAssembly.Instance;
+}
+
 function makeSerdeFixture(): {
   fake: FakeCapnpWasm;
   serde: WasmSerde;
@@ -139,5 +145,100 @@ Deno.test("WasmSerde surfaces missing export and wasm-side errors", () => {
   assertThrows(
     () => serde.createJsonCodecFor<{ text: string }>({ key: "missing" }),
     /missing wasm serde codec exports/,
+  );
+});
+
+Deno.test("WasmSerde.fromInstance discovers sorted codec bindings and skips incomplete pairs", () => {
+  const state: { fake: FakeCapnpWasm | null } = { fake: null };
+  state.fake = new FakeCapnpWasm({
+    extraExports: {
+      capnp_zeta_to_json: () => 1,
+      capnp_zeta_from_json: () => 1,
+      capnp_alpha_to_json: () => 1,
+      capnp_alpha_from_json: () => 1,
+      capnp_orphan_to_json: () => 1,
+      capnp_non_function_from_json: 1,
+    },
+  });
+  const fake = state.fake;
+
+  const serde = WasmSerde.fromInstance(asInstance(fake.exports));
+  const bindings = serde.listJsonCodecs();
+  assertEquals(bindings.length, 2);
+  assertEquals(bindings[0].key, "alpha");
+  assertEquals(bindings[1].key, "zeta");
+});
+
+Deno.test("WasmSerde.createJsonCodec exposes json passthrough helpers and stringify guard", () => {
+  const { serde } = makeSerdeFixture();
+  const codec = serde.createJsonCodec<{ text: string }>({
+    toJsonExport: "capnp_test_echo_to_json",
+    fromJsonExport: "capnp_test_echo_from_json",
+  });
+
+  const encoded = codec.encodeJson('{"text":"via-json"}');
+  assertBytes(encoded, Array.from(encoder.encode("via-json")));
+  const decoded = codec.decodeToJson(encoder.encode("roundtrip"));
+  assertEquals(decoded, '{"text":"roundtrip"}');
+
+  assertThrows(
+    () => codec.encode(undefined as unknown as { text: string }),
+    /JSON\.stringify returned undefined/i,
+  );
+});
+
+Deno.test("WasmSerde handles zero-length IO and surfaces alloc/output bounds failures", () => {
+  const state: { fake: FakeCapnpWasm | null } = { fake: null };
+  state.fake = new FakeCapnpWasm({
+    extraExports: {
+      capnp_zero_from_json: (
+        _inputPtr: number,
+        _inputLen: number,
+        outPtrPtr: number,
+        outLenPtr: number,
+      ) => {
+        const fake = state.fake!;
+        fake.writeU32(outPtrPtr, 0);
+        fake.writeU32(outLenPtr, 0);
+        return 1;
+      },
+      capnp_bounds_from_json: (
+        _inputPtr: number,
+        _inputLen: number,
+        outPtrPtr: number,
+        outLenPtr: number,
+      ) => {
+        const fake = state.fake!;
+        const memLen = fake.memory.buffer.byteLength;
+        fake.writeU32(outPtrPtr, memLen - 1);
+        fake.writeU32(outLenPtr, 16);
+        return 1;
+      },
+    },
+  });
+  const serde = WasmSerde.fromExports(
+    state.fake.exports as CapnpWasmExports & Record<string, unknown>,
+  );
+
+  const zero = serde.encodeFromJson("capnp_zero_from_json", "");
+  assertEquals(zero.byteLength, 0);
+
+  assertThrows(
+    () => serde.encodeFromJson("capnp_bounds_from_json", "{}"),
+    /invalid wasm serde output bounds/i,
+  );
+
+  const allocFail = new FakeCapnpWasm({
+    extraExports: {
+      capnp_alloc: () => 0,
+      capnp_zero_from_json: () => 1,
+    },
+  });
+  const allocFailSerde = WasmSerde.fromExports(
+    allocFail.exports as CapnpWasmExports & Record<string, unknown>,
+  );
+  assertThrows(
+    () => allocFailSerde.encodeFromJson("capnp_zero_from_json", ""),
+    /capnp_alloc failed for 1 bytes/i,
   );
 });

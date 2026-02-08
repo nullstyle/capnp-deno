@@ -1,7 +1,29 @@
 {
   "name": "@capnp/deno",
   "version": "0.0.0-dev",
+  "license": "UNLICENSED",
   "exports": "./mod.ts",
+  "publish": {
+    "include": [
+      "mod.ts",
+      "src/**/*.ts",
+      "generated/*.wasm",
+      "README.md"
+    ],
+    "exclude": [
+      "tests/**",
+      "bench/**",
+      "docs/**",
+      "examples/**",
+      "scripts/**",
+      "tools/**",
+      "coverage/**",
+      "vendor/**",
+      ".git/**"
+    ]
+  },
+  "include": ["generated/*.wasm"],
+  "exclude": ["vendor/**"],
   "tasks": {
     "fmt": "deno fmt mod.ts src tests bench examples docs scripts deno.json README.md AGENTS.md",
     "lint": "deno lint",
@@ -17,15 +39,13 @@
     "smoke:real": "deno run --allow-read examples/smoke_real_wasm.ts",
     "bench": "deno task bench:fast",
     "bench:fast": "deno bench bench --ignore=bench/real_wasm_bench.ts",
-    "bench:real": "deno bench bench/real_wasm_bench.ts --allow-read=.artifacts/capnp_deno.wasm",
+    "bench:real": "deno bench bench/real_wasm_bench.ts --allow-read=generated/capnp_deno.wasm",
     "verify": "deno task fmt && deno task lint && deno task check && deno task test:unit",
     "verify:integration": "deno task test:integration",
     "verify:real": "deno task build:wasm && deno task smoke:real && deno task test:integration && deno task test:real"
   },
   "lint": {
-    "exclude": [
-      "vendor/capnp-zig/vendor/**"
-    ]
+    "exclude": ["vendor/capnp-zig/vendor/**"]
   },
   "compilerOptions": {
     "strict": true

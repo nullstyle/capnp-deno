@@ -1,4 +1,4 @@
-import { TcpTransport } from "../mod.ts";
+import { TcpTransport, TransportError } from "../mod.ts";
 import { assert, assertEquals, deferred, withTimeout } from "./test_utils.ts";
 
 interface FakeConnOptions {
@@ -71,6 +71,28 @@ function createFakeConn(options: FakeConnOptions = {}): {
     getReadDeadlineCalls: () => readDeadlineCalls,
     getCloseCalls: () => closeCalls,
   };
+}
+
+async function withPatchedDenoConnect(
+  connectImpl: unknown,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const denoMutable = Deno as unknown as { connect?: typeof Deno.connect };
+  const original = denoMutable.connect;
+  if (connectImpl === undefined) {
+    delete denoMutable.connect;
+  } else {
+    denoMutable.connect = connectImpl as typeof Deno.connect;
+  }
+  try {
+    await fn();
+  } finally {
+    if (original === undefined) {
+      delete denoMutable.connect;
+    } else {
+      denoMutable.connect = original;
+    }
+  }
 }
 
 Deno.test("TcpTransport enforces maxQueuedOutboundFrames under backpressure", async () => {
@@ -217,4 +239,516 @@ Deno.test("TcpTransport validates inbound frameLimits", async () => {
   } finally {
     await transport.close();
   }
+});
+
+Deno.test("TcpTransport.connect fails when Deno.connect is unavailable", async () => {
+  await withPatchedDenoConnect(undefined, async () => {
+    let thrown: unknown;
+    try {
+      await TcpTransport.connect("127.0.0.1", 9000);
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof TransportError &&
+        /Deno\.connect is unavailable/i.test(thrown.message),
+      `expected unavailable connect TransportError, got: ${String(thrown)}`,
+    );
+  });
+});
+
+Deno.test("TcpTransport.connect normalizes dial failures", async () => {
+  await withPatchedDenoConnect(
+    () => Promise.reject(new Error("dial exploded")),
+    async () => {
+      let thrown: unknown;
+      try {
+        await TcpTransport.connect("127.0.0.1", 9001);
+      } catch (error) {
+        thrown = error;
+      }
+
+      assert(
+        thrown instanceof TransportError &&
+          /tcp connect failed/i.test(thrown.message) &&
+          /dial exploded/i.test(thrown.message),
+        `expected normalized dial failure, got: ${String(thrown)}`,
+      );
+    },
+  );
+});
+
+Deno.test("TcpTransport.connect times out and closes late successful dials", async () => {
+  const dial = deferred<Deno.Conn>();
+  const fake = createFakeConn();
+
+  await withPatchedDenoConnect(() => dial.promise, async () => {
+    const connectPromise = TcpTransport.connect("127.0.0.1", 9002, {
+      connectTimeoutMs: 10,
+    }).then((transport) => ({ ok: true as const, transport })).catch((
+      error,
+    ) => ({
+      ok: false as const,
+      error,
+    }));
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    dial.resolve(fake.conn);
+
+    const result = await connectPromise;
+    const thrown = result.ok ? undefined : result.error;
+
+    assert(
+      thrown instanceof TransportError &&
+        /connect timed out/i.test(thrown.message),
+      `expected timeout error, got: ${String(thrown)}`,
+    );
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(fake.getCloseCalls() > 0, true);
+  });
+});
+
+Deno.test("TcpTransport validates start/send lifecycle guards", async () => {
+  const fake = createFakeConn();
+  const transport = new TcpTransport(fake.conn);
+
+  let notStartedErr: unknown;
+  try {
+    await transport.send(new Uint8Array([0x01]));
+  } catch (error) {
+    notStartedErr = error;
+  }
+  assert(
+    notStartedErr instanceof TransportError &&
+      /not started/i.test(notStartedErr.message),
+    `expected send-before-start error, got: ${String(notStartedErr)}`,
+  );
+
+  transport.start((_frame) => {});
+  let alreadyStartedErr: unknown;
+  try {
+    transport.start((_frame) => {});
+  } catch (error) {
+    alreadyStartedErr = error;
+  }
+  assert(
+    alreadyStartedErr instanceof TransportError &&
+      /already started/i.test(alreadyStartedErr.message),
+    `expected start-twice error, got: ${String(alreadyStartedErr)}`,
+  );
+
+  await transport.close();
+  let closedStartErr: unknown;
+  try {
+    transport.start((_frame) => {});
+  } catch (error) {
+    closedStartErr = error;
+  }
+  assert(
+    closedStartErr instanceof TransportError &&
+      /is closed/i.test(closedStartErr.message),
+    `expected start-after-close error, got: ${String(closedStartErr)}`,
+  );
+});
+
+Deno.test("TcpTransport enforces maxQueuedOutboundBytes under backpressure", async () => {
+  const firstWrite = deferred<number>();
+  let writeCalls = 0;
+  const fake = createFakeConn({
+    write() {
+      writeCalls += 1;
+      if (writeCalls === 1) return firstWrite.promise;
+      return 1;
+    },
+  });
+
+  const transport = new TcpTransport(fake.conn, {
+    maxQueuedOutboundBytes: 2,
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const first = transport.send(new Uint8Array([0xaa, 0xbb]));
+
+    let thrown: unknown;
+    try {
+      await transport.send(new Uint8Array([0xcc]));
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof TransportError &&
+        /queue byte limit exceeded/i.test(thrown.message),
+      `expected queue byte limit error, got: ${String(thrown)}`,
+    );
+
+    firstWrite.resolve(2);
+    await first;
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport rejects invalid write results", async () => {
+  const fake = createFakeConn({
+    write() {
+      return 0;
+    },
+  });
+  const transport = new TcpTransport(fake.conn);
+
+  try {
+    transport.start((_frame) => {});
+    let thrown: unknown;
+    try {
+      await transport.send(new Uint8Array([0x01]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof TransportError &&
+        /invalid tcp write result/i.test(thrown.message),
+      `expected invalid write result error, got: ${String(thrown)}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport normalizes non-timeout read failures", async () => {
+  const seenError = deferred<unknown>();
+  const fake = createFakeConn({
+    read() {
+      throw new Error("read exploded");
+    },
+  });
+  const transport = new TcpTransport(fake.conn, {
+    onError: (error) => seenError.resolve(error),
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const err = await withTimeout(seenError.promise, 1000, "tcp read failure");
+    assert(
+      err instanceof TransportError &&
+        /tcp read failed/i.test(err.message) &&
+        /read exploded/i.test(err.message),
+      `expected normalized read failure, got: ${String(err)}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport enforces maxOutboundFrameBytes", async () => {
+  const fake = createFakeConn();
+  const transport = new TcpTransport(fake.conn, {
+    maxOutboundFrameBytes: 2,
+  });
+
+  try {
+    transport.start((_frame) => {});
+    let thrown: unknown;
+    try {
+      await transport.send(new Uint8Array([0x01, 0x02, 0x03]));
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof TransportError &&
+        /outbound frame size 3 exceeds configured limit 2/i.test(
+          thrown.message,
+        ),
+      `expected outbound frame size error, got: ${String(thrown)}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport treats timed-out error messages as idle timeout failures", async () => {
+  const seenError = deferred<unknown>();
+  const fake = createFakeConn({
+    read() {
+      throw new Error("operation timed out");
+    },
+  });
+
+  const transport = new TcpTransport(fake.conn, {
+    readIdleTimeoutMs: 10,
+    onError: (error) => seenError.resolve(error),
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const err = await withTimeout(
+      seenError.promise,
+      1000,
+      "tcp read timeout string error",
+    );
+    assert(
+      err instanceof Error &&
+        /read idle timeout/i.test(err.message),
+      `expected read idle timeout from timeout-shaped error, got: ${
+        String(err)
+      }`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport rejects send after close", async () => {
+  const fake = createFakeConn();
+  const transport = new TcpTransport(fake.conn);
+
+  transport.start((_frame) => {});
+  await transport.close();
+
+  let thrown: unknown;
+  try {
+    await transport.send(new Uint8Array([0x01]));
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof TransportError &&
+      /is closed/i.test(thrown.message),
+    `expected send-after-close error, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("TcpTransport close timeout path tolerates conn.close failures", async () => {
+  const neverRead = deferred<number | null>();
+  const fake = createFakeConn({
+    read() {
+      return neverRead.promise;
+    },
+  });
+  const closeThrowingConn = {
+    ...fake.conn,
+    close() {
+      throw new Error("close exploded");
+    },
+  } as Deno.Conn;
+
+  const transport = new TcpTransport(closeThrowingConn, {
+    closeTimeoutMs: 10,
+  });
+  transport.start((_frame) => {});
+
+  await withTimeout(transport.close(), 1000, "tcp close timeout path");
+  neverRead.resolve(null);
+});
+
+Deno.test("TcpTransport propagates send failures through onError and rejects queued frames", async () => {
+  const seenErrors: unknown[] = [];
+  const fake = createFakeConn({
+    write() {
+      return Promise.reject(new Error("send exploded"));
+    },
+  });
+
+  const transport = new TcpTransport(fake.conn, {
+    onError: (error) => {
+      seenErrors.push(error);
+    },
+  });
+
+  try {
+    transport.start((_frame) => {});
+    const first = transport.send(new Uint8Array([0x01]));
+    const second = transport.send(new Uint8Array([0x02]));
+
+    let firstErr: unknown;
+    let secondErr: unknown;
+    try {
+      await first;
+    } catch (error) {
+      firstErr = error;
+    }
+    try {
+      await second;
+    } catch (error) {
+      secondErr = error;
+    }
+
+    assert(
+      firstErr instanceof TransportError &&
+        /tcp send failed/i.test(firstErr.message),
+      `expected first queued send to fail, got: ${String(firstErr)}`,
+    );
+    assert(
+      secondErr instanceof TransportError &&
+        /tcp send failed/i.test(secondErr.message),
+      `expected queued send rejection after drain failure, got: ${
+        String(secondErr)
+      }`,
+    );
+
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 1000;
+        const tick = (): void => {
+          if (seenErrors.length > 0) {
+            resolve();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            reject(new Error("tcp onError callback was not invoked"));
+            return;
+          }
+          setTimeout(tick, 5);
+        };
+        tick();
+      }),
+      1100,
+      "tcp onError callback",
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport connect timeout tolerates late dial close failures", async () => {
+  const lateConn = createFakeConn();
+  const dial = deferred<Deno.Conn>();
+
+  const closeThrowingConn = {
+    ...lateConn.conn,
+    close() {
+      throw new Error("late close exploded");
+    },
+  } as Deno.Conn;
+
+  await withPatchedDenoConnect(() => dial.promise, async () => {
+    const pending = TcpTransport.connect("127.0.0.1", 9010, {
+      connectTimeoutMs: 10,
+    }).then((transport) => ({ ok: true as const, transport })).catch((
+      error,
+    ) => ({
+      ok: false as const,
+      error,
+    }));
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    dial.resolve(closeThrowingConn);
+
+    const timedOut = await pending;
+    const thrown = timedOut.ok ? undefined : timedOut.error;
+    assert(
+      thrown instanceof TransportError &&
+        /connect timed out/i.test(thrown.message),
+      `expected timeout with late close handling, got: ${String(thrown)}`,
+    );
+  });
+});
+
+Deno.test("TcpTransport.connect succeeds without timeout when dial resolves", async () => {
+  const fake = createFakeConn();
+
+  await withPatchedDenoConnect(
+    () => Promise.resolve(fake.conn),
+    async () => {
+      const transport = await TcpTransport.connect("127.0.0.1", 9020);
+      await transport.close();
+    },
+  );
+
+  assertEquals(fake.getCloseCalls() > 0, true);
+});
+
+Deno.test("TcpTransport.connect with timeout still normalizes immediate dial failures", async () => {
+  await withPatchedDenoConnect(
+    () => {
+      const failed = Promise.reject(
+        new Error("timeout-mode dial exploded"),
+      ) as Promise<Deno.Conn>;
+      void failed.catch(() => {
+        // local no-op to avoid unhandled rejection races in test scaffolding
+      });
+      return failed;
+    },
+    async () => {
+      let thrown: unknown;
+      try {
+        await TcpTransport.connect("127.0.0.1", 9021, {
+          connectTimeoutMs: 1000,
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      assert(
+        thrown instanceof TransportError &&
+          /tcp connect failed/i.test(thrown.message) &&
+          /timeout-mode dial exploded/i.test(thrown.message),
+        `expected timeout-mode connect normalization, got: ${String(thrown)}`,
+      );
+    },
+  );
+});
+
+Deno.test("TcpTransport read loop tolerates zero-byte reads and continues", async () => {
+  const seenFrames: Uint8Array[] = [];
+  const frame = buildFrame(1);
+  let readCount = 0;
+  const fake = createFakeConn({
+    read(buffer) {
+      if (readCount === 0) {
+        readCount += 1;
+        return 0;
+      }
+      if (readCount === 1) {
+        readCount += 1;
+        buffer.set(frame);
+        return frame.byteLength;
+      }
+      return null;
+    },
+  });
+  const transport = new TcpTransport(fake.conn);
+
+  try {
+    transport.start((decoded) => {
+      seenFrames.push(new Uint8Array(decoded));
+    });
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 1000;
+        const tick = (): void => {
+          if (seenFrames.length > 0) {
+            resolve();
+            return;
+          }
+          if (Date.now() >= deadline) {
+            reject(new Error("tcp zero-byte read continuation timed out"));
+            return;
+          }
+          setTimeout(tick, 5);
+        };
+        tick();
+      }),
+      1100,
+      "tcp zero-byte read continuation",
+    );
+    assertEquals(seenFrames.length, 1);
+    assertEquals(seenFrames[0].byteLength, frame.byteLength);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("TcpTransport close is idempotent", async () => {
+  const fake = createFakeConn();
+  const transport = new TcpTransport(fake.conn);
+  transport.start((_frame) => {});
+
+  await transport.close();
+  await transport.close();
+
+  assertEquals(fake.getCloseCalls(), 1);
 });

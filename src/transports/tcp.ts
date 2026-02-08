@@ -93,7 +93,10 @@ export class TcpTransport implements RpcTransport {
           ),
         );
       }, connectTimeoutMs);
-      void connectPromise.finally(() => clearTimeout(timer));
+      void connectPromise.then(
+        () => clearTimeout(timer),
+        () => clearTimeout(timer),
+      );
     });
 
     void connectPromise.then((conn) => {

@@ -1,6 +1,6 @@
 import { CapnpReader } from "../tools/capnpc-deno/capnp_reader.ts";
 import { encodeCodeGeneratorResponse } from "../tools/capnpc-deno/plugin_response.ts";
-import { assert, assertEquals } from "./test_utils.ts";
+import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
 const WORD_BYTES = 8;
 const MASK_30 = 0x3fff_ffffn;
@@ -190,6 +190,38 @@ function toSingleFarPointer(
   return buildMessage([segment0, segment1]);
 }
 
+function withPatchedNumberIsInteger(
+  patch: (original: typeof Number.isInteger) => typeof Number.isInteger,
+  fn: () => void,
+): void {
+  const numberMutable = Number as unknown as {
+    isInteger: typeof Number.isInteger;
+  };
+  const original = numberMutable.isInteger;
+  numberMutable.isInteger = patch(original);
+  try {
+    fn();
+  } finally {
+    numberMutable.isInteger = original;
+  }
+}
+
+function withPatchedTextEncoderEncode(
+  patch: (original: TextEncoder["encode"]) => TextEncoder["encode"],
+  fn: () => void,
+): void {
+  const proto = TextEncoder.prototype as {
+    encode: TextEncoder["encode"];
+  };
+  const original = proto.encode;
+  proto.encode = patch(original);
+  try {
+    fn();
+  } finally {
+    proto.encode = original;
+  }
+}
+
 Deno.test("capnpc-deno plugin response encoder handles empty output", () => {
   const encoded = encodeCodeGeneratorResponse([]);
   const decoded = decodeResponse(encoded);
@@ -264,4 +296,104 @@ Deno.test("capnpc-deno reader decodes far pointer within struct field", () => {
   assertEquals(decoded[0].id, 3n);
   assertEquals(decoded[0].filename, "c.ts");
   assertEquals(decoded[0].content, "z");
+});
+
+Deno.test("capnpc-deno plugin response encoder validates bigint id bounds", () => {
+  assertThrows(
+    () =>
+      encodeCodeGeneratorResponse([
+        { id: -1n, filename: "neg.ts", content: "x" },
+      ]),
+    /out of u64 range/,
+  );
+  assertThrows(
+    () =>
+      encodeCodeGeneratorResponse([
+        { id: 0x1_0000_0000_0000_0000n, filename: "overflow.ts", content: "x" },
+      ]),
+    /out of u64 range/,
+  );
+});
+
+Deno.test("capnpc-deno plugin response encoder validates numeric id inputs", () => {
+  assertThrows(
+    () =>
+      encodeCodeGeneratorResponse([
+        { id: -1, filename: "neg.ts", content: "x" },
+      ]),
+    /non-negative safe integer/,
+  );
+  assertThrows(
+    () =>
+      encodeCodeGeneratorResponse([
+        { id: 1.25, filename: "frac.ts", content: "x" },
+      ]),
+    /non-negative safe integer/,
+  );
+  assertThrows(
+    () =>
+      encodeCodeGeneratorResponse([
+        {
+          id: Number.MAX_SAFE_INTEGER + 1,
+          filename: "unsafe.ts",
+          content: "x",
+        },
+      ]),
+    /non-negative safe integer/,
+  );
+});
+
+Deno.test("capnpc-deno plugin response encoder accepts safe numeric ids", () => {
+  const encoded = encodeCodeGeneratorResponse([
+    { id: 42, filename: "safe.ts", content: "x" },
+  ]);
+  const decoded = decodeResponse(encoded);
+  assertEquals(decoded.length, 1);
+  assertEquals(decoded[0].id, 42n);
+  assertEquals(decoded[0].filename, "safe.ts");
+});
+
+Deno.test("capnpc-deno plugin response encoder guards signed pointer offset encoding", () => {
+  withPatchedNumberIsInteger(
+    (original) =>
+      ((
+        value: number,
+      ) => (value === 0 ? false : original(value))) as typeof Number.isInteger,
+    () => {
+      assertThrows(
+        () => encodeCodeGeneratorResponse([]),
+        /pointer offset is out of signed 30-bit range/i,
+      );
+    },
+  );
+});
+
+Deno.test("capnpc-deno plugin response encoder guards text write ranges", () => {
+  withPatchedTextEncoderEncode(
+    () => (() => ({ byteLength: -2 } as unknown as Uint8Array<ArrayBuffer>)),
+    () => {
+      assertThrows(
+        () =>
+          encodeCodeGeneratorResponse([{ filename: "bad.ts", content: "x" }]),
+        /writeTextPointer out of range/i,
+      );
+    },
+  );
+});
+
+Deno.test("capnpc-deno plugin response encoder guards against invalid allocation counts", () => {
+  const malformed = {
+    length: Number.POSITIVE_INFINITY,
+    0: {
+      filename: "bad.ts",
+      content: "x",
+    },
+  } as unknown as Array<
+    { id?: bigint | number; filename: string; content: string }
+  >;
+
+  assertThrows(
+    () => encodeCodeGeneratorResponse(malformed),
+    /allocWords requires non-negative integer/,
+  );
 });

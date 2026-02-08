@@ -43,3 +43,41 @@ Deno.test("WasmPeer.close is idempotent and blocks further use", () => {
   assert(peer.closed, "peer should report closed state");
   assertThrows(() => peer.pushFrame(new Uint8Array([0x01])), /closed/);
 });
+
+Deno.test("WasmPeer.popOutgoingFrame and drainOutgoingFrames expose queued frames", () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [
+      new Uint8Array([0x11]),
+      new Uint8Array([0x22]),
+      new Uint8Array([0x33]),
+    ],
+  });
+
+  using peer = WasmPeer.fromExports(fake.exports);
+  peer.abi.pushFrame(peer.handle, new Uint8Array([0xaa]));
+
+  const first = peer.popOutgoingFrame();
+  assert(first !== null, "expected first frame");
+  assertBytes(first, [0x11]);
+
+  const remaining = peer.drainOutgoingFrames();
+  assertEquals(remaining.length, 2);
+  assertBytes(remaining[0], [0x22]);
+  assertBytes(remaining[1], [0x33]);
+
+  assertEquals(peer.popOutgoingFrame(), null);
+});
+
+Deno.test("WasmPeer.fromInstance accepts WebAssembly instance exports", () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [new Uint8Array([0xfe])],
+  });
+  const instance = {
+    exports: fake.exports,
+  } as unknown as WebAssembly.Instance;
+
+  using peer = WasmPeer.fromInstance(instance, { expectedVersion: 1 });
+  const outbound = peer.pushFrame(new Uint8Array([0x01]));
+  assertEquals(outbound.length, 1);
+  assertBytes(outbound[0], [0xfe]);
+});

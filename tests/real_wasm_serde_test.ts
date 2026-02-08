@@ -2,7 +2,7 @@ import { instantiatePeer, WasmSerde } from "../mod.ts";
 import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
 const wasmPath = new URL(
-  "../.artifacts/capnp_deno.wasm",
+  "../generated/capnp_deno.wasm",
   import.meta.url,
 );
 

@@ -263,7 +263,7 @@ zig build gen-rpc-fixtures > tests/fixtures/rpc_frames.ts
 
 ## Real WASM Smoke
 
-Build and copy the wasm artifact into `.artifacts/` and run a local smoke check:
+Build and copy the wasm artifact into `generated/` and run a local smoke check:
 
 ```sh
 deno task verify:real
@@ -276,5 +276,5 @@ By default `scripts/build_wasm.sh` auto-detects the monorepo root. If
 CAPNPC_ZIG_ROOT=/path/to/capnpc-zig deno task build:wasm
 ```
 
-Real-wasm examples/tests load `.artifacts/capnp_deno.wasm` unless an explicit
+Real-wasm examples/tests load `generated/capnp_deno.wasm` unless an explicit
 path argument is provided.

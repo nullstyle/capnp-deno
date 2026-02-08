@@ -1,9 +1,11 @@
 import {
   generateTypescriptFiles,
   renderedFieldNamesForTest,
+  renderSingleFileForTest,
 } from "../tools/capnpc-deno/emitter.ts";
+import type { CodeGeneratorRequestModel } from "../tools/capnpc-deno/model.ts";
 import { parseCodeGeneratorRequest } from "../tools/capnpc-deno/request_parser.ts";
-import { assert, assertEquals } from "./test_utils.ts";
+import { assert, assertEquals, assertThrows } from "./test_utils.ts";
 
 const REQUEST_BASE64 =
   "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";
@@ -370,4 +372,186 @@ Deno.test("capnpc-deno generated runtime decodes far pointer text fields", async
   assertEquals(decoded.age, value.age);
   assertEquals(decoded.favorite, value.favorite);
   assertEquals((decoded.tags as string[]).join(","), value.tags.join(","));
+});
+
+function makeRpcFallbackRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x100n;
+  const interfaceId = 0x101n;
+  const prefix = "schema/fallback.capnp:";
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "schema/fallback.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [{ name: "Svc", id: interfaceId }],
+        kind: "file",
+      },
+      {
+        id: interfaceId,
+        displayName: `${prefix}Svc`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [
+            {
+              name: "do thing",
+              codeOrder: 0,
+              paramStructTypeId: 0x200n,
+              resultStructTypeId: 0x201n,
+            },
+            {
+              name: "do-thing",
+              codeOrder: 1,
+              paramStructTypeId: 0x202n,
+              resultStructTypeId: 0x203n,
+            },
+            {
+              name: "123start",
+              codeOrder: 2,
+              paramStructTypeId: 0x204n,
+              resultStructTypeId: 0x205n,
+            },
+          ],
+        },
+      },
+    ],
+    requestedFiles: [
+      {
+        id: fileId,
+        filename: "schema/fallback.capnp",
+        imports: [],
+      },
+    ],
+  };
+}
+
+function makeMultiFileRequest(): CodeGeneratorRequestModel {
+  return {
+    nodes: [
+      {
+        id: 0x300n,
+        displayName: "schema/a.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [],
+        kind: "file",
+      },
+      {
+        id: 0x301n,
+        displayName: "schema/b.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [],
+        kind: "file",
+      },
+    ],
+    requestedFiles: [
+      { id: 0x300n, filename: "schema/a.capnp", imports: [] },
+      { id: 0x301n, filename: "schema/b.capnp", imports: [] },
+    ],
+  };
+}
+
+function makeMissingGroupStructRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x400n;
+  const rootStructId = 0x401n;
+  const prefix = "schema/group_missing.capnp:";
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "schema/group_missing.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [{ name: "Root", id: rootStructId }],
+        kind: "file",
+      },
+      {
+        id: rootStructId,
+        displayName: `${prefix}Root`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 1,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [
+            {
+              name: "child",
+              codeOrder: 0,
+              discriminantValue: 0xffff,
+              group: { typeId: 0x4ffn },
+            },
+          ],
+        },
+      },
+    ],
+    requestedFiles: [
+      {
+        id: fileId,
+        filename: "schema/group_missing.capnp",
+        imports: [],
+      },
+    ],
+  };
+}
+
+Deno.test("capnpc-deno emitter handles rpc method collisions and unknown param/result structs", () => {
+  const generated = generateTypescriptFiles(makeRpcFallbackRequest());
+  const rpc = fileByPath(generated, "fallback_rpc.ts");
+
+  assert(
+    rpc.contents.includes("doThing: 0,"),
+    "expected first collided method name",
+  );
+  assert(
+    rpc.contents.includes("doThing2: 1,"),
+    "expected deterministic suffix for collided method names",
+  );
+  assert(
+    rpc.contents.includes('"123start": 2,'),
+    "expected quoted ordinal key for non-identifier method name",
+  );
+  assert(
+    rpc.contents.includes('"123start"(params: Record<string, unknown>'),
+    "expected quoted client method signature for non-identifier method name",
+  );
+  assert(
+    rpc.contents.includes("const payload = new Uint8Array(0);"),
+    "expected unknown param struct fallback payload",
+  );
+  assert(
+    rpc.contents.includes("return response as unknown as unknown;"),
+    "expected unknown result struct fallback decode",
+  );
+  assert(
+    rpc.contents.includes("const decoded = {} as Record<string, unknown>;"),
+    "expected unknown param struct fallback on server decode",
+  );
+  assert(
+    rpc.contents.includes("return new Uint8Array(0);"),
+    "expected unknown result struct fallback on server encode",
+  );
+});
+
+Deno.test("capnpc-deno emitter renderSingleFileForTest rejects multi-file requests", () => {
+  assertThrows(
+    () => renderSingleFileForTest(makeMultiFileRequest()),
+    /expected exactly one generated capnp file, got 2/,
+  );
+});
+
+Deno.test("capnpc-deno emitter rejects group fields that reference unknown local structs", () => {
+  assertThrows(
+    () => generateTypescriptFiles(makeMissingGroupStructRequest()),
+    /references unknown local struct id/,
+  );
 });

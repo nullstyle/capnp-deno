@@ -334,3 +334,75 @@ Deno.test("validateCapnpFrame rejects out-of-range struct and list targets", () 
     /list pointer target out of range/i,
   );
 });
+
+Deno.test("validateCapnpFrame accepts flat list element-size variants and capability pointers", () => {
+  const cases: Array<{ elementSize: number; elementCount: number }> = [
+    { elementSize: 0, elementCount: 123 }, // void list
+    { elementSize: 1, elementCount: 64 }, // bit list => 1 word
+    { elementSize: 2, elementCount: 8 }, // byte list => 1 word
+    { elementSize: 3, elementCount: 4 }, // two-byte list => 1 word
+    { elementSize: 4, elementCount: 2 }, // four-byte list => 1 word
+    { elementSize: 5, elementCount: 1 }, // eight-byte list
+  ];
+
+  for (const testCase of cases) {
+    const payloadWords = (() => {
+      switch (testCase.elementSize) {
+        case 0:
+          return 0;
+        case 1:
+          return Math.ceil(testCase.elementCount / 64);
+        case 2:
+          return Math.ceil(testCase.elementCount / 8);
+        case 3:
+          return Math.ceil(testCase.elementCount / 4);
+        case 4:
+          return Math.ceil(testCase.elementCount / 2);
+        case 5:
+          return testCase.elementCount;
+        default:
+          throw new Error(`unexpected elementSize: ${testCase.elementSize}`);
+      }
+    })();
+
+    const segment = new Uint8Array((1 + payloadWords) * WORD_BYTES);
+    setWord(
+      segment,
+      0,
+      listPointerWord(0, testCase.elementSize, testCase.elementCount),
+    );
+    validateCapnpFrame(buildMessage([segment]), { maxNestingDepth: 4 });
+  }
+
+  const pointerList = new Uint8Array(2 * WORD_BYTES);
+  setWord(pointerList, 0, listPointerWord(0, 6, 1));
+  setWord(pointerList, 1, 0n);
+  validateCapnpFrame(buildMessage([pointerList]), { maxNestingDepth: 4 });
+
+  const capabilityRoot = new Uint8Array(WORD_BYTES);
+  setWord(capabilityRoot, 0, 0x3n);
+  validateCapnpFrame(buildMessage([capabilityRoot]), { maxNestingDepth: 4 });
+});
+
+Deno.test("validateCapnpFrame reports missing-segment and inline-composite payload range errors", () => {
+  const missingSegment = new Uint8Array(WORD_BYTES);
+  setWord(missingSegment, 0, farPointerWord(99, 0, false));
+  assertThrows(
+    () =>
+      validateCapnpFrame(buildMessage([missingSegment]), {
+        maxNestingDepth: 4,
+      }),
+    /references missing segment 99/i,
+  );
+
+  const inlinePayloadRange = new Uint8Array(2 * WORD_BYTES);
+  setWord(inlinePayloadRange, 0, listPointerWord(0, 7, 10));
+  setWord(inlinePayloadRange, 1, structPointerWord(1, 0, 0)); // one inline element, zero payload words
+  assertThrows(
+    () =>
+      validateCapnpFrame(buildMessage([inlinePayloadRange]), {
+        maxNestingDepth: 4,
+      }),
+    /inline composite list payload out of range/i,
+  );
+});

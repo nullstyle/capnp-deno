@@ -243,3 +243,87 @@ Deno.test("connectWebSocketTransportWithReconnect delegates to WebSocketTranspor
     }).connect = original;
   }
 });
+
+Deno.test("connectTcpTransportWithReconnect uses empty transport options when omitted", async () => {
+  const original = TcpTransport.connect;
+  let seenOptions: Record<string, unknown> | null = null;
+
+  try {
+    (TcpTransport as unknown as {
+      connect: typeof TcpTransport.connect;
+    }).connect = (
+      _hostname: string,
+      _port: number,
+      options = {},
+    ): Promise<TcpTransport> => {
+      seenOptions = options as Record<string, unknown>;
+      return Promise.resolve(new TcpTransport(createFakeConn(), options));
+    };
+
+    const transport = await connectTcpTransportWithReconnect(
+      "127.0.0.1",
+      9999,
+      {
+        reconnect: reconnectOptions(),
+      },
+    );
+
+    try {
+      assertEquals(seenOptions !== null, true);
+      assertEquals(Object.keys(seenOptions!).length, 0);
+    } finally {
+      await transport.close();
+    }
+  } finally {
+    (TcpTransport as unknown as {
+      connect: typeof TcpTransport.connect;
+    }).connect = original;
+  }
+});
+
+Deno.test("connectWebSocketTransportWithReconnect uses default protocols/options when omitted", async () => {
+  const original = WebSocketTransport.connect;
+  let seenUrl = "";
+  let seenProtocols: string | string[] | undefined;
+  let seenOptions: Record<string, unknown> | null = null;
+
+  try {
+    (WebSocketTransport as unknown as {
+      connect: typeof WebSocketTransport.connect;
+    }).connect = (
+      url: string | URL,
+      protocols?: string | string[],
+      options = {},
+    ): Promise<WebSocketTransport> => {
+      seenUrl = String(url);
+      seenProtocols = protocols;
+      seenOptions = options as Record<string, unknown>;
+      return Promise.resolve(
+        new WebSocketTransport(
+          new FakeWebSocket() as unknown as WebSocket,
+          options,
+        ),
+      );
+    };
+
+    const transport = await connectWebSocketTransportWithReconnect(
+      new URL("ws://127.0.0.1:9998"),
+      {
+        reconnect: reconnectOptions(),
+      },
+    );
+
+    try {
+      assertEquals(seenUrl, "ws://127.0.0.1:9998/");
+      assertEquals(seenProtocols, undefined);
+      assertEquals(seenOptions !== null, true);
+      assertEquals(Object.keys(seenOptions!).length, 0);
+    } finally {
+      await transport.close();
+    }
+  } finally {
+    (WebSocketTransport as unknown as {
+      connect: typeof WebSocketTransport.connect;
+    }).connect = original;
+  }
+});

@@ -485,3 +485,493 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability across
     await transport.close();
   }
 });
+
+Deno.test("ReconnectingRpcClientTransport validates capability pointer ranges", async () => {
+  const client: RpcClientTransportLike = {
+    call: () => Promise.resolve(new Uint8Array([0x01])),
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => Promise.resolve(client),
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await transport.call({ capabilityIndex: -1 }, 0, EMPTY);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /capabilityIndex must be a non-negative 32-bit integer/i.test(
+          thrown.message,
+        ),
+      `expected capability validation SessionError, got: ${String(thrown)}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport reports missing finish/release support", async () => {
+  const client: RpcClientTransportLike = {
+    call: () => Promise.resolve(new Uint8Array([0x01])),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => Promise.resolve(client),
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let finishErr: unknown;
+    try {
+      await transport.finish(1);
+    } catch (error) {
+      finishErr = error;
+    }
+    assert(
+      finishErr instanceof SessionError &&
+        /does not support finish\(\)/i.test(finishErr.message),
+      `expected missing finish support error, got: ${String(finishErr)}`,
+    );
+
+    let releaseErr: unknown;
+    try {
+      await transport.release({ capabilityIndex: 2 }, 1);
+    } catch (error) {
+      releaseErr = error;
+    }
+    assert(
+      releaseErr instanceof SessionError &&
+        /does not support release\(\)/i.test(releaseErr.message),
+      `expected missing release support error, got: ${String(releaseErr)}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport honors shouldReconnectError override", async () => {
+  let connectCount = 0;
+  const seenErrors: unknown[] = [];
+  const client: RpcClientTransportLike = {
+    call: () => Promise.reject(new TransportError("dropped")),
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(client);
+    },
+    reconnect: reconnectOptions(),
+    shouldReconnectError: (error) => {
+      seenErrors.push(error);
+      return false;
+    },
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await transport.call({ capabilityIndex: 1 }, 0, EMPTY);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof TransportError,
+      `expected original transport error, got: ${String(thrown)}`,
+    );
+    assertEquals(connectCount, 1);
+    assertEquals(seenErrors.length, 1);
+    assert(
+      seenErrors[0] instanceof TransportError,
+      `expected TransportError callback input, got: ${String(seenErrors[0])}`,
+    );
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport surfaces reconnect close failures", async () => {
+  let connectCount = 0;
+  let closeCalls = 0;
+  const client1: RpcClientTransportLike = {
+    call: () => Promise.reject(new TransportError("connection dropped")),
+    close: () => {
+      closeCalls += 1;
+      if (closeCalls === 1) {
+        return Promise.reject(new Error("close exploded"));
+      }
+      return Promise.resolve();
+    },
+  };
+  const client2: RpcClientTransportLike = {
+    call: () => Promise.resolve(new Uint8Array([0x01])),
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await transport.call({ capabilityIndex: 1 }, 0, EMPTY);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rpc client close failed/i.test(thrown.message) &&
+        /close exploded/i.test(thrown.message),
+      `expected reconnect close failure, got: ${String(thrown)}`,
+    );
+    assertEquals(connectCount, 1);
+    assertEquals(closeCalls, 1);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport retries calls even when no bootstrap was established", async () => {
+  const calls: Array<{ client: number; capabilityIndex: number }> = [];
+  let connectCount = 0;
+
+  const client1: RpcClientTransportLike = {
+    call: (capability) => {
+      calls.push({ client: 1, capabilityIndex: capability.capabilityIndex });
+      return Promise.reject(new TransportError("connection dropped"));
+    },
+    close: () => Promise.resolve(),
+  };
+  const client2: RpcClientTransportLike = {
+    call: (capability) => {
+      calls.push({ client: 2, capabilityIndex: capability.capabilityIndex });
+      return Promise.resolve(new Uint8Array([0x7a]));
+    },
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    const response = await transport.call({ capabilityIndex: 77 }, 5, EMPTY);
+    assertEquals(response[0], 0x7a);
+    assertEquals(connectCount, 2);
+    assertEquals(
+      JSON.stringify(calls),
+      JSON.stringify([
+        { client: 1, capabilityIndex: 77 },
+        { client: 2, capabilityIndex: 77 },
+      ]),
+    );
+    assertEquals(transport.bootstrapCapability, null);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport normalizes retry-call failures after reconnect", async () => {
+  let connectCount = 0;
+  const client1: RpcClientTransportLike = {
+    call: () => Promise.reject(new TransportError("connection dropped")),
+    close: () => Promise.resolve(),
+  };
+  const client2: RpcClientTransportLike = {
+    call: () => Promise.reject(new Error("retry exploded")),
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await transport.call({ capabilityIndex: 1 }, 0, EMPTY);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rpc call retry failed/i.test(thrown.message) &&
+        /retry exploded/i.test(thrown.message),
+      `expected normalized retry failure, got: ${String(thrown)}`,
+    );
+    assertEquals(connectCount, 2);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport can disable bootstrap remap via rebootstrapOnReconnect=false", async () => {
+  let connectCount = 0;
+  let secondCallCount = 0;
+  const client1: RpcClientTransportLike = {
+    bootstrap: () => Promise.resolve({ capabilityIndex: 10 }),
+    call: () => Promise.reject(new TransportError("connection dropped")),
+    close: () => Promise.resolve(),
+  };
+  const client2: RpcClientTransportLike = {
+    bootstrap: () => Promise.resolve({ capabilityIndex: 20 }),
+    call: () => {
+      secondCallCount += 1;
+      return Promise.resolve(new Uint8Array([0x01]));
+    },
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+    rebootstrapOnReconnect: false,
+  });
+
+  try {
+    const bootstrap = await transport.bootstrap();
+    let thrown: unknown;
+    try {
+      await transport.call(bootstrap, 3, EMPTY);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /rebootstrapOnReconnect is disabled/i.test(thrown.message),
+      `expected bootstrap remap policy error, got: ${String(thrown)}`,
+    );
+    assertEquals(connectCount, 2);
+    assertEquals(secondCallCount, 0);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport remap callback can receive null current bootstrap when rebootstrap is disabled", async () => {
+  let connectCount = 0;
+  let remapCurrentBootstrap: number | null = -1;
+  let remapPreviousBootstrap: number | null = -1;
+  const client1: RpcClientTransportLike = {
+    bootstrap: () => Promise.resolve({ capabilityIndex: 10 }),
+    call: () => Promise.reject(new TransportError("connection dropped")),
+    close: () => Promise.resolve(),
+  };
+  const client2: RpcClientTransportLike = {
+    call: (capability) => {
+      if (capability.capabilityIndex !== 77) {
+        return Promise.reject(new Error("expected remapped capability"));
+      }
+      return Promise.resolve(new Uint8Array([0x33]));
+    },
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+    rebootstrapOnReconnect: false,
+    remapCapabilityOnReconnect: (context) => {
+      remapPreviousBootstrap =
+        context.previousBootstrapCapability?.capabilityIndex ?? null;
+      remapCurrentBootstrap =
+        context.currentBootstrapCapability?.capabilityIndex ?? null;
+      return { capabilityIndex: 77 };
+    },
+  });
+
+  try {
+    await transport.bootstrap();
+    const out = await transport.call({ capabilityIndex: 99 }, 8, EMPTY);
+    assertEquals(out[0], 0x33);
+    assertEquals(remapPreviousBootstrap, 10);
+    assertEquals(remapCurrentBootstrap, null);
+    assertEquals(connectCount, 2);
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport can skip reconnect for finish/release via shouldReconnectError", async () => {
+  let connectCount = 0;
+  let closeCalls = 0;
+  const client: RpcClientTransportLike = {
+    call: () => Promise.resolve(new Uint8Array([0x00])),
+    finish: () => Promise.reject(new Error("finish exploded")),
+    release: () => Promise.reject(new Error("release exploded")),
+    close: () => {
+      closeCalls += 1;
+      return Promise.resolve();
+    },
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(client);
+    },
+    reconnect: reconnectOptions(),
+    shouldReconnectError: () => false,
+  });
+
+  try {
+    let finishErr: unknown;
+    try {
+      await transport.finish(7);
+    } catch (error) {
+      finishErr = error;
+    }
+    assert(
+      finishErr instanceof SessionError &&
+        /rpc finish failed/i.test(finishErr.message),
+      `expected non-retriable finish error, got: ${String(finishErr)}`,
+    );
+
+    let releaseErr: unknown;
+    try {
+      await transport.release({ capabilityIndex: 9 }, 1);
+    } catch (error) {
+      releaseErr = error;
+    }
+    assert(
+      releaseErr instanceof SessionError &&
+        /rpc release failed/i.test(releaseErr.message),
+      `expected non-retriable release error, got: ${String(releaseErr)}`,
+    );
+
+    assertEquals(connectCount, 1);
+    assertEquals(closeCalls, 0);
+  } finally {
+    await transport.close();
+  }
+
+  assertEquals(closeCalls, 1);
+});
+
+Deno.test("ReconnectingRpcClientTransport surfaces bootstrap/connect/closed edge cases", async () => {
+  const noBootstrapTransport = new ReconnectingRpcClientTransport({
+    connect: () =>
+      Promise.resolve({
+        call: () => Promise.resolve(new Uint8Array([0x00])),
+        close: () => Promise.resolve(),
+      }),
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let missingBootstrapErr: unknown;
+    try {
+      await noBootstrapTransport.bootstrap();
+    } catch (error) {
+      missingBootstrapErr = error;
+    }
+    assert(
+      missingBootstrapErr instanceof SessionError &&
+        /does not support bootstrap\(\)/i.test(missingBootstrapErr.message),
+      `expected missing bootstrap support error, got: ${
+        String(missingBootstrapErr)
+      }`,
+    );
+  } finally {
+    await noBootstrapTransport.close();
+  }
+
+  const bootstrapFailureTransport = new ReconnectingRpcClientTransport({
+    connect: () =>
+      Promise.resolve({
+        bootstrap: () => Promise.reject("bootstrap exploded"),
+        call: () => Promise.resolve(new Uint8Array([0x00])),
+        close: () => Promise.resolve(),
+      }),
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    let bootstrapErr: unknown;
+    try {
+      await bootstrapFailureTransport.bootstrap();
+    } catch (error) {
+      bootstrapErr = error;
+    }
+    assert(
+      bootstrapErr instanceof SessionError &&
+        /rpc bootstrap failed/i.test(bootstrapErr.message) &&
+        /bootstrap exploded/i.test(bootstrapErr.message),
+      `expected normalized bootstrap failure, got: ${String(bootstrapErr)}`,
+    );
+  } finally {
+    await bootstrapFailureTransport.close();
+  }
+
+  const connectFailureTransport = new ReconnectingRpcClientTransport({
+    connect: () => Promise.reject(new Error("dial exploded")),
+    reconnect: {
+      policy: {
+        shouldRetry: () => false,
+        nextDelayMs: () => 0,
+      },
+      sleep: async (_delayMs: number) => {},
+    },
+  });
+
+  let connectErr: unknown;
+  try {
+    await connectFailureTransport.call({ capabilityIndex: 1 }, 0, EMPTY);
+  } catch (error) {
+    connectErr = error;
+  }
+  assert(
+    connectErr instanceof TransportError &&
+      /reconnect connect attempt failed/i.test(connectErr.message) &&
+      /dial exploded/i.test(connectErr.message),
+    `expected connect failure normalization, got: ${String(connectErr)}`,
+  );
+  await connectFailureTransport.close();
+
+  const closedTransport = new ReconnectingRpcClientTransport({
+    connect: () =>
+      Promise.resolve({
+        call: () => Promise.resolve(new Uint8Array([0x00])),
+      }),
+    reconnect: reconnectOptions(),
+  });
+  await closedTransport.close();
+
+  let closedErr: unknown;
+  try {
+    await closedTransport.call({ capabilityIndex: 1 }, 0, EMPTY);
+  } catch (error) {
+    closedErr = error;
+  }
+  assert(
+    closedErr instanceof SessionError &&
+      /reconnecting client transport is closed/i.test(closedErr.message),
+    `expected closed transport guard, got: ${String(closedErr)}`,
+  );
+});

@@ -90,11 +90,11 @@ async function withPatchedGlobals(
 Deno.test("instantiatePeer accepts BufferSource variants", async () => {
   const compiledPayloads: number[][] = [];
   await withPatchedGlobals({
-    compile: async (bytes) => {
+    compile: (bytes) => {
       compiledPayloads.push(toBytes(bytes));
-      return {} as WebAssembly.Module;
+      return Promise.resolve({} as WebAssembly.Module);
     },
-    instantiate: async () => createFakeInstantiatedSource().instance,
+    instantiate: () => Promise.resolve(createFakeInstantiatedSource().instance),
   }, async () => {
     const shared = new SharedArrayBuffer(3);
     new Uint8Array(shared).set([1, 2, 3]);
@@ -126,19 +126,19 @@ Deno.test("instantiatePeer falls back when instantiateStreaming fails", async ()
   const seenImports: Array<WebAssembly.Imports | undefined> = [];
 
   await withPatchedGlobals({
-    instantiateStreaming: async (_response, imports) => {
+    instantiateStreaming: (_response, imports) => {
       streamingCalls += 1;
       seenImports.push(imports);
-      throw new Error("streaming unavailable");
+      return Promise.reject(new Error("streaming unavailable"));
     },
-    compile: async (_bytes) => {
+    compile: (_bytes) => {
       compileCalls += 1;
-      return {} as WebAssembly.Module;
+      return Promise.resolve({} as WebAssembly.Module);
     },
-    instantiate: async (_module, imports) => {
+    instantiate: (_module, imports) => {
       instantiateCalls += 1;
       seenImports.push(imports);
-      return createFakeInstantiatedSource().instance;
+      return Promise.resolve(createFakeInstantiatedSource().instance);
     },
   }, async () => {
     const response = new Response(new Uint8Array([0xaa, 0xbb]), {
@@ -163,20 +163,22 @@ Deno.test("instantiatePeer loads URL via fetch and supports streaming success", 
   let compileCalls = 0;
 
   await withPatchedGlobals({
-    fetch: async (input) => {
+    fetch: (input) => {
       seenUrls.push(String(input));
-      return new Response(new Uint8Array([0x01]), {
-        status: 200,
-        headers: { "content-type": "application/wasm" },
-      });
+      return Promise.resolve(
+        new Response(new Uint8Array([0x01]), {
+          status: 200,
+          headers: { "content-type": "application/wasm" },
+        }),
+      );
     },
-    instantiateStreaming: async () => {
+    instantiateStreaming: () => {
       streamingCalls += 1;
-      return createFakeInstantiatedSource();
+      return Promise.resolve(createFakeInstantiatedSource());
     },
-    compile: async (_bytes) => {
+    compile: (_bytes) => {
       compileCalls += 1;
-      return {} as WebAssembly.Module;
+      return Promise.resolve({} as WebAssembly.Module);
     },
   }, async () => {
     const result = await instantiatePeer("https://example.com/capnp.wasm");
@@ -196,11 +198,13 @@ Deno.test("instantiatePeer loads URL via fetch and supports streaming success", 
 
 Deno.test("instantiatePeer reports fetch failures for URL sources", async () => {
   await withPatchedGlobals({
-    fetch: async () =>
-      new Response("missing", {
-        status: 404,
-        statusText: "Not Found",
-      }),
+    fetch: () =>
+      Promise.resolve(
+        new Response("missing", {
+          status: 404,
+          statusText: "Not Found",
+        }),
+      ),
   }, async () => {
     let thrown: unknown;
     try {
@@ -223,17 +227,17 @@ Deno.test("instantiatePeer reads file URLs and path strings via Deno.readFile", 
   let instantiateCalls = 0;
 
   await withPatchedGlobals({
-    readFile: async (path) => {
+    readFile: (path) => {
       readFileCalls.push(String(path));
-      return new Uint8Array([0x09, 0x08, 0x07]);
+      return Promise.resolve(new Uint8Array([0x09, 0x08, 0x07]));
     },
-    compile: async (_bytes) => {
+    compile: (_bytes) => {
       compileCalls += 1;
-      return {} as WebAssembly.Module;
+      return Promise.resolve({} as WebAssembly.Module);
     },
-    instantiate: async () => {
+    instantiate: () => {
       instantiateCalls += 1;
-      return createFakeInstantiatedSource().instance;
+      return Promise.resolve(createFakeInstantiatedSource().instance);
     },
   }, async () => {
     const fromFileUrl = await instantiatePeer(new URL("file:///tmp/a.wasm"));

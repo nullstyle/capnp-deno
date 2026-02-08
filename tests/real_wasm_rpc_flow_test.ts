@@ -18,7 +18,7 @@ import {
 import { assert, assertEquals } from "./test_utils.ts";
 
 const wasmPath = new URL(
-  "../.artifacts/capnp_deno.wasm",
+  "../generated/capnp_deno.wasm",
   import.meta.url,
 );
 

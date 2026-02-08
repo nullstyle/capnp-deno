@@ -1,7 +1,9 @@
 import {
+  CapnpError,
   type RpcObservabilityEvent,
   RpcSession,
   type RpcTransport,
+  SessionError,
   WasmPeer,
 } from "../mod.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
@@ -12,6 +14,9 @@ class MockTransport implements RpcTransport {
   readonly sent: Uint8Array[] = [];
   started = false;
   closed = false;
+  closeCalls = 0;
+  throwOnSend: unknown = null;
+  throwOnClose: unknown = null;
 
   start(
     onFrame: (frame: Uint8Array) => void | Promise<void>,
@@ -21,11 +26,14 @@ class MockTransport implements RpcTransport {
   }
 
   send(frame: Uint8Array): void {
+    if (this.throwOnSend !== null) throw this.throwOnSend;
     this.sent.push(new Uint8Array(frame));
   }
 
   close(): void {
+    this.closeCalls += 1;
     this.closed = true;
+    if (this.throwOnClose !== null) throw this.throwOnClose;
   }
 
   async emit(frame: Uint8Array): Promise<void> {
@@ -101,5 +109,178 @@ Deno.test("RpcSession emits observability events", async () => {
   assert(
     names.includes("rpc.session.close"),
     "expected rpc.session.close event",
+  );
+});
+
+Deno.test("RpcSession rejects start after close and preserves state flags", async () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const session = new RpcSession(peer, transport);
+
+  assertEquals(session.started, false);
+  assertEquals(session.closed, false);
+
+  await session.close();
+  assertEquals(session.closed, true);
+
+  let thrown: unknown;
+  try {
+    await session.start();
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /RpcSession is closed/i.test(thrown.message),
+    `expected closed SessionError, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("RpcSession pumpInboundFrame normalizes transport send failures", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (_frame) => [new Uint8Array([0xaa])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnSend = "send exploded";
+  const session = new RpcSession(peer, transport);
+
+  try {
+    await session.start();
+
+    let thrown: unknown;
+    try {
+      await session.pumpInboundFrame(new Uint8Array([0x01]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /rpc session inbound frame failed/i.test(thrown.message) &&
+        /send exploded/i.test(thrown.message),
+      `expected normalized inbound failure, got: ${String(thrown)}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("RpcSession close swallows flush failures and still closes transport and peer", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (_frame) => [new Uint8Array([0xbb])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnSend = "send failed";
+  const session = new RpcSession(peer, transport);
+
+  await session.start();
+
+  let inboundError: unknown;
+  try {
+    await transport.emit(new Uint8Array([0x10]));
+  } catch (error) {
+    inboundError = error;
+  }
+  assert(
+    inboundError instanceof SessionError,
+    `expected inbound SessionError, got: ${String(inboundError)}`,
+  );
+
+  await session.close();
+  assertEquals(transport.closed, true);
+  assertEquals(transport.closeCalls, 1);
+  assertEquals(peer.closed, true);
+});
+
+Deno.test("RpcSession routes inbound failures through onError callback", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (_frame) => [new Uint8Array([0xcc])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnSend = "send failed";
+  const seenErrors: unknown[] = [];
+  const session = new RpcSession(peer, transport, {
+    onError: (error) => {
+      seenErrors.push(error);
+    },
+  });
+
+  try {
+    await session.start();
+    await transport.emit(new Uint8Array([0x33]));
+    await session.flush();
+    assertEquals(seenErrors.length, 1);
+    assert(
+      seenErrors[0] instanceof SessionError,
+      `expected SessionError callback argument, got: ${String(seenErrors[0])}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("RpcSession propagates onError callback failures", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (_frame) => [new Uint8Array([0xdd])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnSend = "send failed";
+  const session = new RpcSession(peer, transport, {
+    onError: () => {
+      throw new Error("onError handler failed");
+    },
+  });
+
+  try {
+    await session.start();
+    let thrown: unknown;
+    try {
+      await transport.emit(new Uint8Array([0x55]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof Error && /onError handler failed/i.test(thrown.message),
+      `expected onError handler failure, got: ${String(thrown)}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("RpcSession closes peer even when transport close fails", async () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnClose = new Error("transport close failed");
+  const session = new RpcSession(peer, transport);
+
+  await session.start();
+
+  let thrown: unknown;
+  try {
+    await session.close();
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof Error && /transport close failed/i.test(thrown.message),
+    `expected transport close error, got: ${String(thrown)}`,
+  );
+  assertEquals(peer.closed, true);
+  assertEquals(transport.closeCalls, 1);
+  assertEquals(session.closed, true);
+  assertEquals(session.started, true);
+  assert(
+    thrown instanceof CapnpError === false,
+    "expected close to surface raw transport error without normalization",
   );
 });

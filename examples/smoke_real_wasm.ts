@@ -1,7 +1,7 @@
 import { instantiatePeer } from "../mod.ts";
 
 const defaultWasm = new URL(
-  "../.artifacts/capnp_deno.wasm",
+  "../generated/capnp_deno.wasm",
   import.meta.url,
 );
 const source = Deno.args[0] ?? defaultWasm;

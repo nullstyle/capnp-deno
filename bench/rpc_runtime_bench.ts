@@ -1,10 +1,14 @@
 import {
+  decodeBootstrapRequestFrame,
   decodeCallRequestFrame,
   decodeReturnFrame,
   decodeRpcMessageTag,
   encodeCallRequestFrame,
+  encodeFinishFrame,
+  encodeReleaseFrame,
   encodeReturnResultsFrame,
   InMemoryRpcHarnessTransport,
+  RPC_MESSAGE_TAG_BOOTSTRAP,
   RPC_MESSAGE_TAG_CALL,
   RPC_MESSAGE_TAG_FINISH,
   RpcServerBridge,
@@ -89,6 +93,42 @@ const capTable48 = Array.from({ length: 48 }, (_v, i) => ({
   tag: i % 2 === 0 ? 1 : 3,
   id: 10_000 + i,
 }));
+const bootstrapCapTable = [{ tag: 1, id: 5 }];
+
+const spuriousUndecodableFrame = new Uint8Array([0xff, 0x00, 0xaa, 0x55]);
+const spuriousMismatchedReturnFrame = encodeReturnResultsFrame({
+  answerId: 0,
+  content: resultPayload,
+});
+
+function makeSpuriousReturnPrefix(count: number): Uint8Array[] {
+  return Array.from(
+    { length: count },
+    (_v, i) =>
+      i % 2 === 0 ? spuriousUndecodableFrame : spuriousMismatchedReturnFrame,
+  );
+}
+
+const spuriousPrefix8 = makeSpuriousReturnPrefix(8);
+const spuriousPrefix64 = makeSpuriousReturnPrefix(64);
+
+async function createLoopbackClient(
+  onPushFrame: (frame: Uint8Array) => Uint8Array[],
+): Promise<{
+  session: RpcSession;
+  client: SessionRpcClientTransport;
+}> {
+  const fake = new FakeCapnpWasm({ onPushFrame });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  await session.start();
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    autoStart: false,
+  });
+  return { session, client };
+}
 
 const bridge = new RpcServerBridge();
 bridge.exportCapability({
@@ -96,12 +136,36 @@ bridge.exportCapability({
   dispatch: (_methodOrdinal, _params, _ctx) => resultPayload,
 }, { capabilityIndex: 5 });
 
+let bridgeFinishCount = 0;
+let bridgeReleaseCount = 0;
+const bridgeControl = new RpcServerBridge({
+  onFinish: () => {
+    bridgeFinishCount += 1;
+  },
+});
+bridgeControl.exportCapability({
+  interfaceId: 0x1234n,
+  dispatch: () => resultPayload,
+}, {
+  capabilityIndex: 77,
+  referenceCount: 2_000_000,
+});
+
 const bridgeCallFrame = encodeCallRequestFrame({
   questionId: 11,
   interfaceId: 0x1234n,
   methodId: 9,
   targetImportedCap: 5,
   paramsContent: callPayload,
+});
+const bridgeFinishFrame = encodeFinishFrame({
+  questionId: 42,
+  releaseResultCaps: true,
+  requireEarlyCancellation: false,
+});
+const bridgeReleaseFrame = encodeReleaseFrame({
+  id: 77,
+  referenceCount: 1,
 });
 
 const hostAbi = new MockHostAbi();
@@ -124,8 +188,8 @@ const hostCallBatch32: WasmHostCallRecord[] = Array.from(
   },
 );
 
-const fakeClientSmall = new FakeCapnpWasm({
-  onPushFrame: (frame) => {
+const { session: clientSmallSession, client: clientSmall } =
+  await createLoopbackClient((frame) => {
     const tag = decodeRpcMessageTag(frame);
     if (tag === RPC_MESSAGE_TAG_CALL) {
       const call = decodeCallRequestFrame(frame);
@@ -138,26 +202,10 @@ const fakeClientSmall = new FakeCapnpWasm({
     }
     if (tag === RPC_MESSAGE_TAG_FINISH) return [];
     throw new Error(`unexpected rpc tag=${tag}`);
-  },
-});
-const clientSmallPeer = WasmPeer.fromExports(fakeClientSmall.exports);
-const clientSmallTransport = new InMemoryRpcHarnessTransport();
-const clientSmallSession = new RpcSession(
-  clientSmallPeer,
-  clientSmallTransport,
-);
-await clientSmallSession.start();
-const clientSmall = new SessionRpcClientTransport(
-  clientSmallSession,
-  clientSmallTransport,
-  {
-    interfaceId: 0x1234n,
-    autoStart: false,
-  },
-);
+  });
 
-const fakeClientCapTable = new FakeCapnpWasm({
-  onPushFrame: (frame) => {
+const { session: clientCapTableSession, client: clientCapTable } =
+  await createLoopbackClient((frame) => {
     const tag = decodeRpcMessageTag(frame);
     if (tag === RPC_MESSAGE_TAG_CALL) {
       const call = decodeCallRequestFrame(frame);
@@ -171,27 +219,64 @@ const fakeClientCapTable = new FakeCapnpWasm({
     }
     if (tag === RPC_MESSAGE_TAG_FINISH) return [];
     throw new Error(`unexpected rpc tag=${tag}`);
-  },
-});
-const clientCapTablePeer = WasmPeer.fromExports(fakeClientCapTable.exports);
-const clientCapTableTransport = new InMemoryRpcHarnessTransport();
-const clientCapTableSession = new RpcSession(
-  clientCapTablePeer,
-  clientCapTableTransport,
-);
-await clientCapTableSession.start();
-const clientCapTable = new SessionRpcClientTransport(
-  clientCapTableSession,
-  clientCapTableTransport,
-  {
-    interfaceId: 0x1234n,
-    autoStart: false,
-  },
-);
+  });
+
+const { session: clientBootstrapSession, client: clientBootstrap } =
+  await createLoopbackClient((frame) => {
+    const tag = decodeRpcMessageTag(frame);
+    if (tag === RPC_MESSAGE_TAG_BOOTSTRAP) {
+      const request = decodeBootstrapRequestFrame(frame);
+      return [
+        encodeReturnResultsFrame({
+          answerId: request.questionId,
+          capTable: bootstrapCapTable,
+        }),
+      ];
+    }
+    if (tag === RPC_MESSAGE_TAG_FINISH) return [];
+    throw new Error(`unexpected rpc tag=${tag}`);
+  });
+
+const { session: clientSpurious8Session, client: clientSpurious8 } =
+  await createLoopbackClient((frame) => {
+    const tag = decodeRpcMessageTag(frame);
+    if (tag === RPC_MESSAGE_TAG_CALL) {
+      const call = decodeCallRequestFrame(frame);
+      return [
+        ...spuriousPrefix8,
+        encodeReturnResultsFrame({
+          answerId: call.questionId,
+          content: resultPayload,
+        }),
+      ];
+    }
+    if (tag === RPC_MESSAGE_TAG_FINISH) return [];
+    throw new Error(`unexpected rpc tag=${tag}`);
+  });
+
+const { session: clientSpurious64Session, client: clientSpurious64 } =
+  await createLoopbackClient((frame) => {
+    const tag = decodeRpcMessageTag(frame);
+    if (tag === RPC_MESSAGE_TAG_CALL) {
+      const call = decodeCallRequestFrame(frame);
+      return [
+        ...spuriousPrefix64,
+        encodeReturnResultsFrame({
+          answerId: call.questionId,
+          content: resultPayload,
+        }),
+      ];
+    }
+    if (tag === RPC_MESSAGE_TAG_FINISH) return [];
+    throw new Error(`unexpected rpc tag=${tag}`);
+  });
 
 addEventListener("unload", () => {
   void clientSmallSession.close();
   void clientCapTableSession.close();
+  void clientBootstrapSession.close();
+  void clientSpurious8Session.close();
+  void clientSpurious64Session.close();
 });
 
 Deno.bench({
@@ -225,6 +310,32 @@ Deno.bench({
 });
 
 Deno.bench({
+  name: "rpc_server_bridge:handle_finish_frame",
+  group: "rpc_server_bridge_control",
+  baseline: true,
+  n: 80_000,
+  warmup: 2_000,
+  async fn() {
+    const response = await bridgeControl.handleFrame(bridgeFinishFrame);
+    if (response !== null) throw new Error("finish should not emit response");
+    blackhole ^= bridgeFinishCount;
+  },
+});
+
+Deno.bench({
+  name: "rpc_server_bridge:handle_release_frame",
+  group: "rpc_server_bridge_control",
+  n: 80_000,
+  warmup: 2_000,
+  async fn() {
+    const response = await bridgeControl.handleFrame(bridgeReleaseFrame);
+    if (response !== null) throw new Error("release should not emit response");
+    bridgeReleaseCount += 1;
+    blackhole ^= bridgeReleaseCount;
+  },
+});
+
+Deno.bench({
   name: "rpc_client_loopback:call_raw_small_payload",
   group: "rpc_client_loopback",
   baseline: true,
@@ -237,6 +348,95 @@ Deno.bench({
       callPayload,
     );
     blackhole ^= decodeSingleU32StructMessage(result.contentBytes);
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_bootstrap:default_finish",
+  group: "rpc_client_bootstrap",
+  baseline: true,
+  n: 4_000,
+  warmup: 180,
+  async fn() {
+    const cap = await clientBootstrap.bootstrap();
+    blackhole ^= cap.capabilityIndex;
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_bootstrap:auto_finish_false",
+  group: "rpc_client_bootstrap",
+  n: 4_000,
+  warmup: 180,
+  async fn() {
+    const cap = await clientBootstrap.bootstrap({ autoFinish: false });
+    blackhole ^= cap.capabilityIndex;
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_loopback:call_raw_spurious_returns_8",
+  group: "rpc_client_spurious_returns",
+  baseline: true,
+  n: 2_000,
+  warmup: 120,
+  async fn() {
+    const result = await clientSpurious8.callRaw(
+      { capabilityIndex: 5 },
+      9,
+      callPayload,
+    );
+    blackhole ^= decodeSingleU32StructMessage(result.contentBytes);
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_loopback:call_raw_spurious_returns_64",
+  group: "rpc_client_spurious_returns",
+  n: 700,
+  warmup: 80,
+  async fn() {
+    const result = await clientSpurious64.callRaw(
+      { capabilityIndex: 5 },
+      9,
+      callPayload,
+    );
+    blackhole ^= decodeSingleU32StructMessage(result.contentBytes);
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_concurrency:call_raw_burst_8",
+  group: "rpc_client_concurrency",
+  baseline: true,
+  n: 600,
+  warmup: 30,
+  async fn() {
+    const calls = Array.from(
+      { length: 8 },
+      () => clientSmall.callRaw({ capabilityIndex: 5 }, 9, callPayload),
+    );
+    const results = await Promise.all(calls);
+    for (const result of results) {
+      blackhole ^= decodeSingleU32StructMessage(result.contentBytes);
+    }
+  },
+});
+
+Deno.bench({
+  name: "rpc_client_concurrency:call_raw_burst_32",
+  group: "rpc_client_concurrency",
+  n: 180,
+  warmup: 20,
+  async fn() {
+    const calls = Array.from(
+      { length: 32 },
+      () => clientSmall.callRaw({ capabilityIndex: 5 }, 9, callPayload),
+    );
+    const results = await Promise.all(calls);
+    for (const result of results) {
+      blackhole ^= decodeSingleU32StructMessage(result.contentBytes);
+    }
   },
 });
 
