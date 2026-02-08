@@ -145,22 +145,41 @@ export interface RpcClientCallOptions {
    * Whether to automatically send a `finish` message after receiving the
    * response. Defaults to `true`.
    *
-   * **Conditional behavior**: When `true`, a `finish` message is sent only if
-   * the server's return message has `noFinishNeeded = false`. The server may
-   * set `noFinishNeeded = true` when it has already released resources and
-   * does not need to be notified that the client is done with the answer.
+   * **Conditional behavior**: Even when `true`, a `finish` message is sent
+   * only if the server's return message has `noFinishNeeded === false`. If the
+   * server sets `noFinishNeeded` to `true`, it has already released the answer
+   * table entry on its side and no `finish` is needed. In other words,
+   * `autoFinish: true` means "finish *if the server requires it*", not
+   * "finish unconditionally".
    *
-   * **Important**: {@link callRawPipelined} NEVER auto-finishes regardless of
-   * this setting, since pipelining requires the question to remain open. You
-   * MUST manually call {@link finish} for pipelined calls to clean up
-   * server-side state.
+   * **Applies to**: {@link SessionRpcClientTransport.bootstrap},
+   * {@link SessionRpcClientTransport.call}, and
+   * {@link SessionRpcClientTransport.callRaw} only.
    *
-   * **Consequence of disabling**: If you set `autoFinish = false` and never
-   * call {@link finish}, the server's answer table entry for this question
-   * will persist indefinitely, potentially causing resource leaks.
+   * **Does NOT apply to**: {@link SessionRpcClientTransport.callRawPipelined},
+   * which **never** auto-finishes regardless of this setting. Pipelining
+   * requires the question to remain open so that downstream calls can
+   * reference it by question ID. You MUST manually call
+   * {@link SessionRpcClientTransport.finish} when done with the pipeline.
+   *
+   * **Consequence of disabling**: If you set `autoFinish: false` and never
+   * call {@link SessionRpcClientTransport.finish}, the server's answer table
+   * entry for this question will persist indefinitely, causing a resource
+   * leak.
+   *
+   * @default true
+   * @see {@link SessionRpcClientTransport.finish} to manually finish a question.
+   * @see {@link SessionRpcClientTransport.callRawPipelined} for the pipelined call path.
+   * @see {@link RpcClientCallResult.noFinishNeeded} for the server-side flag that gates auto-finish.
    */
   autoFinish?: boolean;
-  /** Options forwarded to the auto-finish message, if `autoFinish` is enabled. */
+  /**
+   * Options forwarded to the auto-finish message when `autoFinish` is enabled
+   * and the server's `noFinishNeeded` is `false`. Has no effect when
+   * `autoFinish` is `false` or when using {@link SessionRpcClientTransport.callRawPipelined}.
+   *
+   * @see {@link RpcFinishOptions} for available options.
+   */
   finish?: RpcFinishOptions;
   /**
    * Capability descriptors to include in the params cap table, allowing
@@ -186,7 +205,18 @@ export interface RpcClientCallResult {
   capTable: RpcCapDescriptor[];
   /** Whether the server has already released the params capabilities. */
   releaseParamCaps: boolean;
-  /** Whether the server indicated that no `finish` message is needed. */
+  /**
+   * Whether the server indicated that no `finish` message is needed.
+   *
+   * When `true`, the server has already released the answer table entry and
+   * does not expect a `finish` message. When `false`, the client should send
+   * a `finish` (either automatically via {@link RpcClientCallOptions.autoFinish}
+   * or manually via {@link SessionRpcClientTransport.finish}) to allow the
+   * server to clean up.
+   *
+   * @see {@link RpcClientCallOptions.autoFinish} which uses this flag to decide
+   *   whether to send `finish` automatically.
+   */
   noFinishNeeded: boolean;
 }
 
@@ -458,9 +488,14 @@ export class SessionRpcClientTransport {
   /**
    * Send a bootstrap request to obtain the server's root capability.
    *
+   * Respects the `autoFinish` option (defaults to `true`). When enabled, a
+   * `finish` message is sent automatically after the bootstrap response,
+   * unless the server's return has `noFinishNeeded === true`.
+   *
    * @param options - Call options including timeout and abort signal.
    * @returns An object containing the `capabilityIndex` of the bootstrap capability.
    * @throws {ProtocolError} If the server returns an exception.
+   * @see {@link RpcClientCallOptions.autoFinish} for auto-finish semantics.
    */
   async bootstrap(
     options: RpcClientCallOptions = {},
@@ -490,12 +525,18 @@ export class SessionRpcClientTransport {
    * This is a convenience wrapper around {@link callRaw} that discards
    * metadata (cap table, flags) and returns only the payload.
    *
+   * Auto-finish behavior is inherited from the `options.autoFinish` setting
+   * (defaults to `true`). See {@link RpcClientCallOptions.autoFinish} for
+   * details on when a `finish` message is actually sent.
+   *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
    * @param methodOrdinal - The zero-based method index within the interface.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout and abort signal.
    * @returns The raw content bytes of the response struct.
    * @throws {ProtocolError} If the server returns an exception.
+   * @see {@link callRaw} for the full-result variant.
+   * @see {@link callRawPipelined} for the pipelined variant (requires manual {@link finish}).
    */
   async call(
     capability: { capabilityIndex: number },
@@ -515,12 +556,25 @@ export class SessionRpcClientTransport {
   /**
    * Send an RPC call and return the full result including metadata.
    *
+   * When `options.autoFinish` is `true` (the default), a `finish` message is
+   * sent automatically after receiving the response -- but only if the server's
+   * return message has `noFinishNeeded === false`. If the server already set
+   * `noFinishNeeded` to `true`, no `finish` is sent because the server has
+   * already released the answer table entry.
+   *
+   * If you set `autoFinish: false`, you take responsibility for calling
+   * {@link finish} yourself. Failing to do so will leak the server's answer
+   * table entry for this question indefinitely.
+   *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
    * @param methodOrdinal - The zero-based method index within the interface.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout, abort signal, and cap table.
    * @returns The full call result including content bytes, cap table, and flags.
    * @throws {ProtocolError} If the server returns an exception.
+   * @see {@link call} for the convenience variant that returns only content bytes.
+   * @see {@link callRawPipelined} for the pipelined variant (requires manual {@link finish}).
+   * @see {@link RpcClientCallOptions.autoFinish} for full auto-finish semantics.
    */
   async callRaw(
     capability: { capabilityIndex: number },
@@ -599,17 +653,31 @@ export class SessionRpcClientTransport {
    * used to make pipelined calls on the (not-yet-resolved) result, plus
    * a promise for the actual result.
    *
-   * **No auto-finish**: Unlike {@link callRaw}, this method does NOT
-   * automatically send a `finish` message, even if `autoFinish` is `true` in
-   * the options. This is necessary for promise pipelining to work correctly,
-   * as the question must remain open to allow downstream pipelined calls to
-   * reference it.
+   * **No auto-finish**: Unlike {@link call} and {@link callRaw}, this method
+   * **never** sends a `finish` message automatically, regardless of the
+   * `autoFinish` option. The `autoFinish` setting in
+   * {@link RpcClientCallOptions} is completely ignored by this method. This is
+   * necessary because promise pipelining requires the question to remain open
+   * so that downstream pipelined calls can reference it by question ID.
    *
-   * The caller MUST eventually call {@link finish} with the returned
-   * `pipeline.questionId` to clean up server-side state and prevent resource
-   * leaks.
+   * **Caller responsibility**: You MUST eventually call {@link finish} with
+   * the returned `pipeline.questionId` once you are done with both the
+   * pipeline and the result. Failing to do so will leak the server's answer
+   * table entry for this question indefinitely.
    *
    * This is the core method for promise pipelining (Level 2 RPC).
+   *
+   * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
+   * @param methodOrdinal - The zero-based method index within the interface.
+   * @param params - The raw Cap'n Proto params struct bytes.
+   * @param options - Call options including timeout and abort signal. Note that
+   *   `autoFinish` is ignored by this method.
+   * @returns An object with a `pipeline` for making pipelined calls and a
+   *   `result` promise that resolves to the full {@link RpcClientCallResult}.
+   * @throws {ProtocolError} If the server returns an exception (via the `result` promise).
+   * @see {@link callRaw} for the non-pipelined variant with auto-finish support.
+   * @see {@link finish} to release the question when done with the pipeline.
+   * @see {@link RpcPipeline} for how to make pipelined calls on the result.
    */
   async callRawPipelined(
     capability: { capabilityIndex: number },
@@ -659,10 +727,22 @@ export class SessionRpcClientTransport {
 
   /**
    * Send a `finish` message to the server for a specific question, signaling
-   * that the client is done with the answer.
+   * that the client is done with the answer and allowing the server to free
+   * the corresponding answer table entry.
+   *
+   * You typically do not need to call this directly when using {@link call} or
+   * {@link callRaw} with the default `autoFinish: true` setting, because those
+   * methods send `finish` automatically (conditioned on the server's
+   * `noFinishNeeded` flag).
+   *
+   * You MUST call this method manually when:
+   * - Using {@link callRawPipelined}, which never auto-finishes.
+   * - Using {@link callRaw} with `autoFinish: false`.
    *
    * @param questionId - The question ID to finish.
    * @param options - Options controlling capability release behavior.
+   * @see {@link callRawPipelined} which requires manual finish.
+   * @see {@link RpcClientCallOptions.autoFinish} for auto-finish semantics.
    */
   async finish(
     questionId: number,

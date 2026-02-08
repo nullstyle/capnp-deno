@@ -130,6 +130,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
   #warmupRequested = 0;
   #warmupSucceeded = 0;
   #warmupFailed = 0;
+  #warmupClosePromises: Promise<void>[] = [];
 
   constructor(
     connect: () => Promise<RpcClientTransportLike>,
@@ -377,6 +378,13 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     // captured and cleaned up below rather than being created after close.
     await this.#warmupComplete;
 
+    // Await any warm-up connections that raced with close and were
+    // closed inline (fire-and-forget prevention).
+    if (this.#warmupClosePromises.length > 0) {
+      await Promise.all(this.#warmupClosePromises);
+      this.#warmupClosePromises.length = 0;
+    }
+
     // Reject all pending acquires.
     const pendingCopy = this.#pending.splice(0);
     this.#pendingSettled = 0;
@@ -468,7 +476,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
           (conn) => {
             this.#warmupSucceeded++;
             if (this.#closed) {
-              this.#closeConnection(conn);
+              this.#warmupClosePromises.push(this.#closeConnection(conn));
               return;
             }
             const timer = setTimeout(() => {

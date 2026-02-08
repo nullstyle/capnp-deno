@@ -58,7 +58,7 @@ jobs:
   # ── Real WASM: build wasm from capnp-zig, run real-wasm tests ─────
   real-wasm:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     needs: verify
     steps:
       - uses: actions/checkout@v4.3.1  # actions/checkout v4
@@ -94,7 +94,7 @@ jobs:
   # ── Performance benchmarks ────────────────────────────────────────
   bench:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     needs: verify
     if: always() && needs.verify.result == 'success'
     steps:
@@ -149,7 +149,6 @@ jobs:
 
       - name: Compare against previous results
         if: always()
-        continue-on-error: true
         run: |
           if [ ! -f bench/previous/results.json ] || [ ! -f bench/results.json ]; then
             echo "No previous or current results to compare, skipping."
@@ -179,6 +178,7 @@ jobs:
             }
             if (regressions > 0) {
               console.log(`\n${regressions} benchmark(s) regressed by >50%.`);
+              Deno.exit(1);
             } else {
               console.log("\nNo significant regressions detected.");
             }
