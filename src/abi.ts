@@ -1,5 +1,10 @@
 import { AbiError } from "./errors.ts";
 
+// Cached TextEncoder and TextDecoder instances for efficient string conversion.
+// These are stateless and can be reused across all WasmAbi instances.
+const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
+
 /**
  * Typed interface describing the raw exports from a Cap'n Proto WASM module.
  *
@@ -795,7 +800,7 @@ export class WasmAbi {
 
     this.assertU32(questionId, "questionId");
     const bytes = typeof reason === "string"
-      ? new TextEncoder().encode(reason)
+      ? TEXT_ENCODER.encode(reason)
       : reason;
     const ptr = this.alloc(bytes.byteLength);
     try {
@@ -1127,7 +1132,7 @@ export class WasmAbi {
       return "invalid wasm error buffer bounds";
     }
     const slice = memory.subarray(ptr, ptr + len);
-    return new TextDecoder().decode(slice);
+    return TEXT_DECODER.decode(slice);
   }
 
   private copyBytes(ptr: number, len: number): Uint8Array {

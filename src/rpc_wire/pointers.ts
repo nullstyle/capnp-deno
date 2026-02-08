@@ -313,10 +313,16 @@ export function decodeStructListPointer(
 class WordBuffer {
   private bytes: Uint8Array;
   private _words: number;
+  #view: DataView;
 
   constructor(initialWords: number) {
     this._words = initialWords;
     this.bytes = new Uint8Array(initialWords * WORD_BYTES);
+    this.#view = new DataView(
+      this.bytes.buffer,
+      this.bytes.byteOffset,
+      this.bytes.byteLength,
+    );
   }
 
   get words(): number {
@@ -331,12 +337,7 @@ class WordBuffer {
   }
 
   writeWord(wordIndex: number, value: bigint): void {
-    const view = new DataView(
-      this.bytes.buffer,
-      this.bytes.byteOffset,
-      this.bytes.byteLength,
-    );
-    view.setBigUint64(wordIndex * WORD_BYTES, value, true);
+    this.#view.setBigUint64(wordIndex * WORD_BYTES, value, true);
   }
 
   copyFromSegment(
@@ -364,6 +365,11 @@ class WordBuffer {
     const grown = new Uint8Array(next);
     grown.set(this.bytes);
     this.bytes = grown;
+    this.#view = new DataView(
+      this.bytes.buffer,
+      this.bytes.byteOffset,
+      this.bytes.byteLength,
+    );
   }
 }
 

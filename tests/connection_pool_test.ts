@@ -464,9 +464,7 @@ Deno.test("RpcConnectionPool Symbol.dispose delegates to close", async () => {
 
   pool[Symbol.dispose]();
 
-  // Allow any promises to settle.
-  await new Promise((r) => setTimeout(r, 10));
-
+  // The closed flag is set synchronously, so acquires should immediately fail.
   let thrown: unknown;
   try {
     await pool.acquire();
@@ -478,6 +476,33 @@ Deno.test("RpcConnectionPool Symbol.dispose delegates to close", async () => {
     thrown instanceof SessionError &&
       /connection pool is closed/i.test(thrown.message),
     `expected pool closed after dispose, got: ${String(thrown)}`,
+  );
+
+  // Wait for background cleanup to complete to avoid leaking timers.
+  await pool.close();
+});
+
+Deno.test("RpcConnectionPool Symbol.asyncDispose properly awaits close", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory);
+  const conn = await pool.acquire();
+  pool.release(conn);
+
+  // Call asyncDispose and verify it completes cleanly.
+  await pool[Symbol.asyncDispose]();
+
+  // Verify pool is closed.
+  let thrown: unknown;
+  try {
+    await pool.acquire();
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /connection pool is closed/i.test(thrown.message),
+    `expected pool closed after asyncDispose, got: ${String(thrown)}`,
   );
 });
 

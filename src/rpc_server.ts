@@ -240,6 +240,13 @@ export interface RpcServerBridgeOptions {
    */
   answerEvictionTimeoutMs?: number;
   /**
+   * Maximum number of times to retry evicting an answer table entry
+   * when pipelineRefCount > 0. After this limit is reached, the entry
+   * is force-evicted and a warning is reported via onUnhandledError.
+   * Defaults to 10. Set to 0 or Infinity to disable the limit.
+   */
+  maxEvictionRetries?: number;
+  /**
    * Optional array of server-side middleware interceptors. Middleware
    * hooks are executed in array order for `onIncomingFrame`, `onDispatch`,
    * and `onError`. For `onResponse`, middleware is executed in reverse
@@ -308,6 +315,11 @@ interface AnswerTableEntry {
    * entry. Eviction is deferred while this count is greater than zero.
    */
   pipelineRefCount: number;
+  /**
+   * Number of times eviction has been attempted for this entry.
+   * Incremented each time eviction is deferred due to pipelineRefCount > 0.
+   */
+  evictionAttempts: number;
 }
 
 function normalizeCapability(
@@ -408,6 +420,7 @@ export class RpcServerBridge {
   #answerTable = new Map<number, AnswerTableEntry>();
   #maxAnswerTableSize: number;
   #answerEvictionTimeoutMs: number;
+  #maxEvictionRetries: number;
   #middleware: readonly RpcServerMiddleware[];
 
   constructor(options: RpcServerBridgeOptions = {}) {
@@ -416,6 +429,7 @@ export class RpcServerBridge {
     this.#onFinish = options.onFinish;
     this.#maxAnswerTableSize = options.maxAnswerTableSize ?? 4096;
     this.#answerEvictionTimeoutMs = options.answerEvictionTimeoutMs ?? Infinity;
+    this.#maxEvictionRetries = options.maxEvictionRetries ?? 10;
     this.#middleware = options.middleware ? [...options.middleware] : [];
   }
 
@@ -601,6 +615,7 @@ export class RpcServerBridge {
         resolveEntry = resolve;
       }),
       pipelineRefCount: 0,
+      evictionAttempts: 0,
     };
     this.#answerTable.set(call.questionId, entry);
 
@@ -637,6 +652,10 @@ export class RpcServerBridge {
    * Schedule automatic eviction of a completed answer table entry.
    * If the peer does not send a Finish within the configured timeout,
    * the entry is silently removed to prevent unbounded growth.
+   *
+   * If eviction is deferred due to pipelineRefCount > 0, the eviction
+   * is rescheduled up to maxEvictionRetries times. After the limit is
+   * reached, the entry is force-evicted and a warning is reported.
    */
   #scheduleEviction(questionId: number, entry: AnswerTableEntry): void {
     if (
@@ -652,6 +671,40 @@ export class RpcServerBridge {
       }
       // Defer eviction while pipelined calls are in-flight.
       if (entry.pipelineRefCount > 0) {
+        entry.evictionAttempts += 1;
+
+        // Check if we've exceeded the maximum retry limit.
+        if (
+          this.#maxEvictionRetries > 0 &&
+          this.#maxEvictionRetries !== Infinity &&
+          entry.evictionAttempts > this.#maxEvictionRetries
+        ) {
+          // Force-evict the entry and report a warning.
+          this.#answerTable.delete(questionId);
+          if (this.#onUnhandledError) {
+            const error = new Error(
+              `Force-evicted answer table entry for question ${questionId} after ${entry.evictionAttempts} eviction attempts (pipelineRefCount=${entry.pipelineRefCount})`,
+            );
+            // Create a synthetic call request for the error handler.
+            const syntheticCall: RpcCallRequest = {
+              questionId,
+              target: { tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP, importedCap: 0 },
+              interfaceId: 0n,
+              methodId: 0,
+              paramsContent: new Uint8Array(0),
+              paramsCapTable: [],
+            };
+            // Fire and forget - don't await to avoid blocking the timer.
+            Promise.resolve(this.#onUnhandledError(error, syntheticCall)).catch(
+              () => {
+                // Silently ignore errors from the error handler itself.
+              },
+            );
+          }
+          return;
+        }
+
+        // Reschedule eviction since pipelineRefCount is still > 0.
         this.#scheduleEviction(questionId, entry);
         return;
       }

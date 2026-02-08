@@ -48,7 +48,7 @@ ci-bench:
     @echo "=========================================="
     deno task bench:fast 2>&1 || echo "WARNING: bench:fast exited with non-zero status (non-blocking)"
     @echo "=========================================="
-    @echo "  Benchmark Regression Checks"
+    @echo "  Benchmark Regression Checks (blocking)"
     @echo "=========================================="
     deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts
     @echo "=========================================="

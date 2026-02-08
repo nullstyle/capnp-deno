@@ -70,11 +70,20 @@ export class CapnpFrameFramer {
     if (this.#length < this.#expectedTotal) return null;
 
     const total = this.#expectedTotal;
-    const frame = this.#buffer.slice(0, total);
     const remaining = this.#length - total;
-    if (remaining > 0) {
+    let frame: Uint8Array;
+
+    if (remaining === 0) {
+      // Optimization: take ownership of the buffer when fully consumed,
+      // avoiding a copy. Allocate a fresh buffer for future frames.
+      frame = this.#buffer.subarray(0, total);
+      this.#buffer = new Uint8Array(0);
+    } else {
+      // Must copy because we'll mutate the buffer via copyWithin
+      frame = this.#buffer.slice(0, total);
       this.#buffer.copyWithin(0, total, this.#length);
     }
+
     this.#length = remaining;
     this.#expectedTotal = null;
     if (this.options.maxNestingDepth !== undefined) {

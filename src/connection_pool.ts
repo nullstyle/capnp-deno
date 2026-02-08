@@ -49,6 +49,18 @@ export interface RpcConnectionPoolStats {
   pending: number;
 }
 
+/**
+ * Warm-up statistics returned by {@link RpcConnectionPool.warmupStats}.
+ */
+export interface RpcConnectionPoolWarmupStats {
+  /** Number of warm-up connections requested (same as minConnections). */
+  requested: number;
+  /** Number of warm-up connections that successfully connected. */
+  succeeded: number;
+  /** Number of warm-up connections that failed. */
+  failed: number;
+}
+
 interface IdleEntry {
   conn: RpcClientTransportLike;
   timer: ReturnType<typeof setTimeout>;
@@ -73,9 +85,14 @@ interface PendingAcquire {
  * block until a connection is released or `acquireTimeoutMs` is exceeded.
  *
  * On construction, if `minConnections` is greater than 0, the pool will
- * pre-warm by creating that many connections eagerly.
+ * pre-warm by creating that many connections eagerly. Warm-up is best-effort:
+ * individual connection failures during warm-up are silently ignored, and
+ * {@link whenReady} will resolve even if some or all warm-up connections fail.
+ * Use {@link warmupStats} to inspect warm-up success/failure counts after
+ * {@link whenReady} resolves.
  *
- * Implements `Disposable` so it can be used with `using` declarations.
+ * Implements `Disposable` and `AsyncDisposable` so it can be used with `using`
+ * and `await using` declarations.
  *
  * @example
  * ```ts
@@ -92,7 +109,7 @@ interface PendingAcquire {
  * await pool.close();
  * ```
  */
-export class RpcConnectionPool implements Disposable {
+export class RpcConnectionPool implements Disposable, AsyncDisposable {
   readonly #connect: () => Promise<RpcClientTransportLike>;
   readonly #minConnections: number;
   readonly #maxConnections: number;
@@ -108,7 +125,11 @@ export class RpcConnectionPool implements Disposable {
   #pending: PendingAcquire[] = [];
   #pendingSettled = 0;
   #closed = false;
+  #closePromise?: Promise<void>;
   #warmupComplete: Promise<void>;
+  #warmupRequested = 0;
+  #warmupSucceeded = 0;
+  #warmupFailed = 0;
 
   constructor(
     connect: () => Promise<RpcClientTransportLike>,
@@ -135,6 +156,7 @@ export class RpcConnectionPool implements Disposable {
     }
 
     if (this.#minConnections > 0) {
+      this.#warmupRequested = this.#minConnections;
       this.#warmupComplete = this.#warmUp();
     } else {
       this.#warmupComplete = Promise.resolve();
@@ -158,12 +180,29 @@ export class RpcConnectionPool implements Disposable {
    * established (or attempted). If `minConnections` is 0 the returned
    * promise is already resolved.
    *
-   * Individual warm-up failures do not cause the promise to reject --
-   * connections that fail during warm-up are silently skipped and will be
-   * created on demand via {@link acquire}.
+   * **Important**: Warm-up is best-effort. Individual warm-up failures do not
+   * cause the promise to reject. Connections that fail during warm-up are
+   * silently skipped and will be created on demand via {@link acquire}.
+   * After `whenReady()` resolves, use {@link warmupStats} to inspect how
+   * many warm-up connections succeeded vs. failed.
    */
   whenReady(): Promise<void> {
     return this.#warmupComplete;
+  }
+
+  /**
+   * Returns warm-up statistics showing how many warm-up connections were
+   * requested, succeeded, and failed.
+   *
+   * This is useful for inspecting warm-up results after {@link whenReady}
+   * resolves, since warm-up failures are silently ignored (best-effort).
+   */
+  warmupStats(): RpcConnectionPoolWarmupStats {
+    return {
+      requested: this.#warmupRequested,
+      succeeded: this.#warmupSucceeded,
+      failed: this.#warmupFailed,
+    };
   }
 
   /**
@@ -288,49 +327,82 @@ export class RpcConnectionPool implements Disposable {
    * Close all connections in the pool and reject any pending acquire requests.
    *
    * After calling close, no further operations are allowed on the pool.
+   * This method is idempotent -- multiple calls will reuse the same close
+   * promise and only perform cleanup once.
    */
   async close(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closed) {
+      // If already closed, return the existing close promise if available.
+      return this.#closePromise ?? Promise.resolve();
+    }
     this.#closed = true;
 
-    // Wait for warm-up to finish so that any in-flight connections are
-    // captured and cleaned up below rather than being created after close.
-    await this.#warmupComplete;
+    // Store the close promise so subsequent calls can await it.
+    this.#closePromise = (async () => {
+      // Wait for warm-up to finish so that any in-flight connections are
+      // captured and cleaned up below rather than being created after close.
+      await this.#warmupComplete;
 
-    // Reject all pending acquires.
-    const pendingCopy = this.#pending.splice(0);
-    this.#pendingSettled = 0;
-    for (const waiter of pendingCopy) {
-      clearTimeout(waiter.timer);
-      if (!waiter.settled) {
-        waiter.reject(new SessionError("connection pool is closed"));
+      // Reject all pending acquires.
+      const pendingCopy = this.#pending.splice(0);
+      this.#pendingSettled = 0;
+      for (const waiter of pendingCopy) {
+        clearTimeout(waiter.timer);
+        if (!waiter.settled) {
+          waiter.reject(new SessionError("connection pool is closed"));
+        }
       }
-    }
 
-    // Close all idle connections.
-    const idleCopy = [...this.#idle.values()];
-    this.#idle.clear();
-    const closePromises: Promise<void>[] = [];
-    for (const entry of idleCopy) {
-      clearTimeout(entry.timer);
-      closePromises.push(this.#closeConnection(entry.conn));
-    }
+      // Close all idle connections.
+      const idleCopy = [...this.#idle.values()];
+      this.#idle.clear();
+      const closePromises: Promise<void>[] = [];
+      for (const entry of idleCopy) {
+        clearTimeout(entry.timer);
+        closePromises.push(this.#closeConnection(entry.conn));
+      }
 
-    // Close all active connections.
-    const activeCopy = [...this.#active];
-    this.#active.clear();
-    for (const conn of activeCopy) {
-      closePromises.push(this.#closeConnection(conn));
-    }
+      // Close all active connections.
+      const activeCopy = [...this.#active];
+      this.#active.clear();
+      for (const conn of activeCopy) {
+        closePromises.push(this.#closeConnection(conn));
+      }
 
-    await Promise.all(closePromises);
+      await Promise.all(closePromises);
+    })();
+
+    return this.#closePromise;
   }
 
   /**
-   * Disposable implementation -- delegates to {@link close}.
+   * Synchronous dispose implementation for use with `using` declarations.
+   *
+   * **Important limitation**: Because {@link Symbol.dispose} must be
+   * synchronous, this method fires {@link close} in the background without
+   * waiting for it to complete. The `#closed` flag is set synchronously
+   * (by close()), preventing new acquires immediately, but the actual cleanup
+   * (closing connections, rejecting pending requests, waiting for warm-up)
+   * happens asynchronously. Resources may not be fully cleaned up when this
+   * method returns.
+   *
+   * For proper async cleanup, use `await using` with {@link Symbol.asyncDispose}
+   * or call {@link close} directly and await the result.
    */
   [Symbol.dispose](): void {
-    this.close();
+    // Fire close() in background without awaiting.
+    // close() will set #closed immediately, preventing new acquires.
+    void this.close();
+  }
+
+  /**
+   * Async dispose implementation for use with `await using` declarations.
+   *
+   * This properly awaits the close operation, ensuring all connections are
+   * closed and all pending requests are rejected before returning.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
   }
 
   async #createConnection(): Promise<RpcClientTransportLike> {
@@ -393,6 +465,7 @@ export class RpcConnectionPool implements Disposable {
       promises.push(
         this.#connect().then(
           (conn) => {
+            this.#warmupSucceeded++;
             if (this.#closed) {
               this.#closeConnection(conn);
               return;
@@ -403,6 +476,7 @@ export class RpcConnectionPool implements Disposable {
             this.#idle.set(conn, { conn, timer, lastUsedAt: Date.now() });
           },
           () => {
+            this.#warmupFailed++;
             // Warm-up failures are silently ignored -- connections will be
             // created on demand when acquire() is called.
           },

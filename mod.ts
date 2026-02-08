@@ -193,6 +193,7 @@ export {
   RpcConnectionPool,
   type RpcConnectionPoolOptions,
   type RpcConnectionPoolStats,
+  type RpcConnectionPoolWarmupStats,
   withConnection,
 } from "./src/connection_pool.ts";
 

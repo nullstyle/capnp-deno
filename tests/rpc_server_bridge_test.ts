@@ -1679,3 +1679,102 @@ Deno.test("RpcServerBridge multiple concurrent pipelined calls against same ques
   await new Promise((resolve) => setTimeout(resolve, 50));
   assertEquals(bridge.answerTableSize, 0);
 });
+
+Deno.test("RpcServerBridge force-evicts entry after maxEvictionRetries and reports error", async () => {
+  const errors: Array<{ error: unknown; questionId: number }> = [];
+
+  // Use a very short eviction timeout (10ms) and a low retry limit (3).
+  const bridge = new RpcServerBridge({
+    answerEvictionTimeoutMs: 10,
+    maxEvictionRetries: 3,
+    onUnhandledError: (error, call) => {
+      errors.push({ error, questionId: call.questionId });
+    },
+  });
+
+  // Never-resolving gate to keep pipelineRefCount > 0 indefinitely.
+  const gate = deferred<void>();
+
+  // Factory capability: returns a cap id in its result.
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Target capability: blocks indefinitely on the gate.
+  bridge.exportCapability({
+    interfaceId: 0x5678n,
+    dispatch: async () => {
+      await gate.promise;
+      return encodeSingleU32StructMessage(42);
+    },
+  }, { capabilityIndex: 10 });
+
+  // Step 1: Make the initial call (question 1) to the factory.
+  const factoryResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(factoryResponse !== null, "expected factory response");
+  assertEquals(decodeReturnFrame(factoryResponse).kind, "results");
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Step 2: Start a pipelined call targeting question 1. This will block
+  // indefinitely because we never resolve the gate.
+  const pipelinedPromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x5678n,
+    methodId: 0,
+    target: {
+      tag: 1,
+      promisedAnswer: {
+        questionId: 1,
+        transform: [],
+      },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Step 3: Wait long enough for multiple eviction attempts to occur.
+  // With timeout=10ms and maxRetries=3, we need to wait at least 40ms
+  // for 4 eviction timer firings (initial + 3 retries, then force-evict).
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  // The entry for question 1 should have been force-evicted after exceeding
+  // the retry limit, despite the pipelined call still being in-flight.
+  assertEquals(bridge.answerTableSize, 1); // Only question 2 should remain
+
+  // Verify that the error handler was called with a force-eviction warning.
+  assertEquals(errors.length, 1);
+  const errorMsg = errors[0].error instanceof Error
+    ? errors[0].error.message
+    : String(errors[0].error);
+  assert(
+    errorMsg.includes("Force-evicted"),
+    `Expected force-eviction error, got: ${errorMsg}`,
+  );
+  assert(
+    errorMsg.includes("question 1"),
+    `Expected error to mention question 1, got: ${errorMsg}`,
+  );
+  assert(
+    errorMsg.includes("eviction attempts"),
+    `Expected error to mention eviction attempts, got: ${errorMsg}`,
+  );
+  assert(
+    errorMsg.includes("pipelineRefCount=1"),
+    `Expected error to mention pipelineRefCount, got: ${errorMsg}`,
+  );
+
+  // Clean up: release the gate and finish the pipelined call.
+  gate.resolve();
+  await pipelinedPromise;
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 2 }));
+});
