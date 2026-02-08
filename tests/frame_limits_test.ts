@@ -125,6 +125,94 @@ function buildDoubleFarRootFrame(depth: number): Uint8Array {
   return buildMessage([segment0, segment1, segment2]);
 }
 
+// ---------------------------------------------------------------------------
+// Basic structural validation
+// ---------------------------------------------------------------------------
+
+Deno.test("validateCapnpFrame accepts a valid single-segment frame", () => {
+  const segment = new Uint8Array(2 * WORD_BYTES);
+  setWord(segment, 0, structPointerWord(0, 1, 0)); // root struct: 1 data word, 0 pointers
+  const frame = buildMessage([segment]);
+  // Should not throw with default limits
+  validateCapnpFrame(frame);
+  // Should not throw with explicit limits
+  validateCapnpFrame(frame, {
+    maxSegmentCount: 10,
+    maxFrameBytes: 1024,
+    maxTraversalWords: 100,
+    maxNestingDepth: 10,
+  });
+});
+
+Deno.test("validateCapnpFrame accepts a valid multi-segment frame", () => {
+  const segment0 = new Uint8Array(WORD_BYTES);
+  setWord(segment0, 0, farPointerWord(1, 0, false));
+  const segment1 = new Uint8Array(2 * WORD_BYTES);
+  setWord(segment1, 0, structPointerWord(0, 1, 0));
+  const frame = buildMessage([segment0, segment1]);
+  validateCapnpFrame(frame, { maxNestingDepth: 10 });
+});
+
+Deno.test("validateCapnpFrame accepts a frame with a zero-length segment", () => {
+  // A zero-word segment is structurally valid (empty segment).
+  const segment0 = new Uint8Array(WORD_BYTES);
+  setWord(segment0, 0, 0n); // null root pointer
+  const segment1 = new Uint8Array(0); // zero-length segment
+  const frame = buildMessage([segment0, segment1]);
+  validateCapnpFrame(frame);
+});
+
+Deno.test("validateCapnpFrame accepts a frame with only zero-word segments", () => {
+  const segment = new Uint8Array(0);
+  const frame = buildMessage([segment]);
+  // Frame should be valid structurally (root segment has 0 words)
+  validateCapnpFrame(frame);
+});
+
+Deno.test("validateCapnpFrame rejects frame exceeding maxFrameBytes with exact boundary", () => {
+  const segment = new Uint8Array(WORD_BYTES);
+  const frame = buildMessage([segment]);
+  // frame has 8 bytes header + 8 bytes segment = 16 bytes total
+  // Setting limit to exactly the frame size should pass
+  validateCapnpFrame(frame, { maxFrameBytes: frame.byteLength });
+  // Setting limit to one byte less should fail
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxFrameBytes: frame.byteLength - 1 }),
+    /frame size .* exceeds configured limit/i,
+  );
+});
+
+Deno.test("validateCapnpFrame rejects frame exceeding maxSegmentCount at exact boundary", () => {
+  const segments = [
+    new Uint8Array(WORD_BYTES),
+    new Uint8Array(WORD_BYTES),
+    new Uint8Array(WORD_BYTES),
+  ];
+  const frame = buildMessage(segments);
+  // Exactly 3 segments -- limit of 3 should pass, limit of 2 should fail
+  validateCapnpFrame(frame, { maxSegmentCount: 3 });
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxSegmentCount: 2 }),
+    /segment count .* exceeds configured limit/i,
+  );
+});
+
+Deno.test("validateCapnpFrame root pointer out of bounds rejects correctly", () => {
+  // Root pointer pointing beyond the segment
+  const segment = new Uint8Array(WORD_BYTES);
+  // struct pointer with offset 0 and 2 data words -- needs words at [1,2] but segment only has 1 word
+  setWord(segment, 0, structPointerWord(0, 2, 0));
+  const frame = buildMessage([segment]);
+  assertThrows(
+    () => validateCapnpFrame(frame, { maxNestingDepth: 4 }),
+    /struct pointer target out of range/i,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Limit enforcement
+// ---------------------------------------------------------------------------
+
 Deno.test("validateCapnpFrame enforces maxTraversalWords", () => {
   const frame = buildPointerChainFrame(3);
   assertThrows(

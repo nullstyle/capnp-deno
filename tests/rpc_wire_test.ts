@@ -762,6 +762,8 @@ Deno.test("rpc wire encode/decode handles null-root payloads and far-pointer rej
   );
   assertEquals(paramsView.getBigUint64(8, true), 0n);
 
+  // A self-referential far pointer (segment 0 word 0 -> segment 0 word 0)
+  // is now followed by the resolver and hits the hop limit.
   const farRootPayload = new Uint8Array(16);
   const farRootView = new DataView(
     farRootPayload.buffer,
@@ -781,7 +783,7 @@ Deno.test("rpc wire encode/decode handles null-root payloads and far-pointer rej
         targetImportedCap: 1,
         paramsContent: farRootPayload,
       }),
-    /does not support far pointers yet/i,
+    /far pointer chain exceeded maximum hop count/i,
   );
   assertThrows(
     () =>
@@ -789,7 +791,7 @@ Deno.test("rpc wire encode/decode handles null-root payloads and far-pointer rej
         answerId: 16,
         content: farRootPayload,
       }),
-    /does not support far pointers yet/i,
+    /far pointer chain exceeded maximum hop count/i,
   );
 });
 
@@ -1355,29 +1357,253 @@ Deno.test("rpc wire handles multi-segment frame with all data in segment 0", () 
   assertEquals(decoded.questionId, 123);
 });
 
-Deno.test("rpc wire encoding still rejects far pointers in payload content input", () => {
-  // The encoding path (encodeCallRequestFrame with paramsContent) still uses
-  // segmentFromFrame which only accepts single-segment content and
-  // rebaseCopiedRootPointer which rejects far pointers.
-  const farRootPayload = new Uint8Array(16);
-  const farRootView = new DataView(
-    farRootPayload.buffer,
-    farRootPayload.byteOffset,
-    farRootPayload.byteLength,
-  );
-  farRootView.setUint32(0, 0, true);
-  farRootView.setUint32(4, 1, true);
-  farRootView.setBigUint64(8, 0x2n, true);
+Deno.test("rpc wire encoding resolves far pointers in multi-segment payload content", () => {
+  // Build a two-segment content frame with a far pointer root.
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (offset=0, data=1, ptr=0)
+  //            word 1 = data word (value = 0xDEAD)
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = segmentFromWords(structPtr(0, 1, 0), 0xDEADn);
+  const multiSegContent = buildMultiSegmentFrame([seg0, seg1]);
 
-  assertThrows(
-    () =>
-      encodeCallRequestFrame({
-        questionId: 50,
-        interfaceId: 0x1234n,
-        methodId: 0,
-        targetImportedCap: 0,
-        paramsContent: farRootPayload,
-      }),
-    /does not support far pointers yet/i,
+  const encoded = encodeCallRequestFrame({
+    questionId: 50,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+    paramsContent: multiSegContent,
+  });
+  const decoded = decodeCallRequestFrame(encoded);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 0xDEAD);
+});
+
+// ----------------------------------------------------------------
+// Far pointer rebase tests: encode/decode content with far pointers
+// ----------------------------------------------------------------
+
+Deno.test("rpc wire resolves single-far pointer in content during encode round-trip", () => {
+  // Build a two-segment content frame where the root is a far pointer to
+  // a struct in segment 1.
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (offset=0, data=1, ptr=0) -> word 1
+  //            word 1 = data word (value = 42)
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = segmentFromWords(structPtr(0, 1, 0), 42n);
+  const content = buildMultiSegmentFrame([seg0, seg1]);
+
+  // Encode into a Call frame and decode back
+  const frame = encodeCallRequestFrame({
+    questionId: 100,
+    interfaceId: 0xABCDn,
+    methodId: 1,
+    targetImportedCap: 0,
+    paramsContent: content,
+  });
+  const decoded = decodeCallRequestFrame(frame);
+  assertEquals(decoded.questionId, 100);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 42);
+});
+
+Deno.test("rpc wire resolves single-far pointer in return results content", () => {
+  // Two-segment content for a Return results frame.
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = segmentFromWords(structPtr(0, 1, 0), 999n);
+  const content = buildMultiSegmentFrame([seg0, seg1]);
+
+  const frame = encodeReturnResultsFrame({
+    answerId: 200,
+    content,
+    capTable: [{ tag: 1, id: 5 }],
+  });
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 200);
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 999);
+    assertEquals(decoded.capTable.length, 1);
+    assertEquals(decoded.capTable[0].tag, 1);
+    assertEquals(decoded.capTable[0].id, 5);
+  }
+});
+
+Deno.test("rpc wire resolves double-far pointer in content during encode round-trip", () => {
+  // Three-segment content with double-far pointer:
+  // Segment 0: word 0 = double-far pointer to segment 1, word 0
+  // Segment 1: word 0 = single-far pointer to segment 2, word 0 (landing pad[0])
+  //            word 1 = struct tag (data=1, ptr=0) (landing pad[1])
+  // Segment 2: word 0 = data word (value = 0xBEEF)
+  const seg0 = segmentFromWords(doubleFarPtr(0, 1));
+  const seg1 = segmentFromWords(
+    singleFarPtr(0, 2), // pad[0]: far ptr to segment 2, word 0
+    structPtr(0, 1, 0), // pad[1]: struct tag (data=1, ptr=0)
   );
+  const seg2 = segmentFromWords(0xBEEFn);
+  const content = buildMultiSegmentFrame([seg0, seg1, seg2]);
+
+  const frame = encodeCallRequestFrame({
+    questionId: 101,
+    interfaceId: 0x5678n,
+    methodId: 3,
+    targetImportedCap: 2,
+    paramsContent: content,
+  });
+  const decoded = decodeCallRequestFrame(frame);
+  assertEquals(decoded.questionId, 101);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 0xBEEF);
+});
+
+Deno.test("rpc wire resolves far pointer in struct pointer section during decode", () => {
+  // Build a multi-segment Call frame where the content struct has a pointer
+  // field that is a far pointer to data in another segment.
+  //
+  // The content is a struct with data=1 and ptr=1.  The pointer field
+  // is a far pointer to a nested struct in a different segment.
+  //
+  // We build this as a multi-segment frame and pass it through
+  // decodeCallRequestFrame which extracts the content.
+
+  // Content layout (3 segments):
+  // Segment 0: word 0 = struct pointer (offset=0, data=1, ptr=1) -> word 1
+  //            word 1 = data word (value = 0xAAAA)
+  //            word 2 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (offset=0, data=1, ptr=0) -> word 1
+  //            word 1 = data word (value = 0xBBBB)
+  const contentSeg0 = segmentFromWords(
+    structPtr(0, 1, 1), // root struct: offset=0, data=1, ptr=1
+    0xAAAAn, // data word
+    singleFarPtr(0, 1), // ptr[0] = far ptr to segment 1, word 0
+  );
+  const contentSeg1 = segmentFromWords(
+    structPtr(0, 1, 0), // nested struct: offset=0, data=1, ptr=0
+    0xBBBBn, // data word
+  );
+  const content = buildMultiSegmentFrame([contentSeg0, contentSeg1]);
+
+  const frame = encodeCallRequestFrame({
+    questionId: 102,
+    interfaceId: 0x9999n,
+    methodId: 7,
+    targetImportedCap: 0,
+    paramsContent: content,
+  });
+  const decoded = decodeCallRequestFrame(frame);
+  assertEquals(decoded.questionId, 102);
+
+  // The extracted content should be a single-segment message containing
+  // both the outer struct and the nested struct (flattened, no far pointers).
+  const contentView = new DataView(
+    decoded.paramsContent.buffer,
+    decoded.paramsContent.byteOffset,
+    decoded.paramsContent.byteLength,
+  );
+  // Parse the root struct pointer
+  const rootPtr = contentView.getBigUint64(8, true);
+  const rootKind = Number(rootPtr & 0x3n);
+  assertEquals(rootKind, 0); // struct pointer, not far
+
+  // Read the data word of the outer struct
+  const rootOffset = signed30((rootPtr >> 2n) & MASK_30);
+  const rootDataStart = 1 + rootOffset;
+  const outerValue = contentView.getUint32(8 + rootDataStart * 8, true);
+  assertEquals(outerValue, 0xAAAA);
+
+  // Read the pointer section of the outer struct
+  const rootDataWords = Number((rootPtr >> 32n) & 0xFFFFn);
+  const ptrSlotWordIndex = rootDataStart + rootDataWords;
+  const nestedPtr = contentView.getBigUint64(8 + ptrSlotWordIndex * 8, true);
+  const nestedKind = Number(nestedPtr & 0x3n);
+  assertEquals(nestedKind, 0); // nested pointer is a direct struct pointer, not far
+
+  // Follow the nested struct pointer to get its data
+  const nestedOffset = signed30((nestedPtr >> 2n) & MASK_30);
+  const nestedDataStart = ptrSlotWordIndex + 1 + nestedOffset;
+  const nestedValue = contentView.getUint32(8 + nestedDataStart * 8, true);
+  assertEquals(nestedValue, 0xBBBB);
+});
+
+Deno.test("rpc wire resolves chained far pointers in content root", () => {
+  // Three-segment content with chained single-far pointers:
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = far pointer to segment 2, word 0 (chain hop)
+  // Segment 2: word 0 = struct pointer (offset=0, data=1, ptr=0) -> word 1
+  //            word 1 = data word (value = 0xCAFE)
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = segmentFromWords(singleFarPtr(0, 2));
+  const seg2 = segmentFromWords(structPtr(0, 1, 0), 0xCAFEn);
+  const content = buildMultiSegmentFrame([seg0, seg1, seg2]);
+
+  const frame = encodeReturnResultsFrame({
+    answerId: 300,
+    content,
+  });
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 0xCAFE);
+  }
+});
+
+Deno.test("rpc wire decodes multi-segment content with far pointer in nested struct", () => {
+  // Build a Call frame manually where the payload content struct contains
+  // a far pointer in its pointer section, exercised through the decode path.
+  //
+  // This tests extractPointerContentAsMessage's deep copy when the content
+  // lives in a multi-segment frame.
+
+  // We encode a single-segment Call frame, then split it into two segments
+  // where we inject a far pointer in the content area.
+
+  // Start with a struct that has data=1 and ptr=1.
+  // Content: struct with value 0x1111 and a pointer to another struct with 0x2222.
+  //
+  // Build the content as two segments:
+  // Seg 0: word 0 = struct ptr (data=1, ptr=1), word 1 = 0x1111, word 2 = far ptr to seg1 word 0
+  // Seg 1: word 0 = struct ptr (data=1, ptr=0), word 1 = 0x2222
+  const cSeg0 = segmentFromWords(
+    structPtr(0, 1, 1),
+    0x1111n,
+    singleFarPtr(0, 1),
+  );
+  const cSeg1 = segmentFromWords(
+    structPtr(0, 1, 0),
+    0x2222n,
+  );
+  const content = buildMultiSegmentFrame([cSeg0, cSeg1]);
+
+  // Use content in a Return results frame
+  const frame = encodeReturnResultsFrame({
+    answerId: 400,
+    content,
+    capTable: [{ tag: 1, id: 8 }],
+  });
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 400);
+  if (decoded.kind === "results") {
+    // The content should be a valid single-segment message
+    const cv = new DataView(
+      decoded.contentBytes.buffer,
+      decoded.contentBytes.byteOffset,
+      decoded.contentBytes.byteLength,
+    );
+    const rootPtr = cv.getBigUint64(8, true);
+    assertEquals(Number(rootPtr & 0x3n), 0); // struct pointer
+
+    const rootOffset = signed30((rootPtr >> 2n) & MASK_30);
+    const rootStart = 1 + rootOffset;
+    assertEquals(cv.getUint32(8 + rootStart * 8, true), 0x1111);
+
+    // Follow the pointer to the nested struct
+    const rootDataWords = Number((rootPtr >> 32n) & 0xFFFFn);
+    const ptrWord = rootStart + rootDataWords;
+    const nestedPtr = cv.getBigUint64(8 + ptrWord * 8, true);
+    assertEquals(Number(nestedPtr & 0x3n), 0); // direct struct, not far
+
+    const nOffset = signed30((nestedPtr >> 2n) & MASK_30);
+    const nStart = ptrWord + 1 + nOffset;
+    assertEquals(cv.getUint32(8 + nStart * 8, true), 0x2222);
+
+    assertEquals(decoded.capTable.length, 1);
+    assertEquals(decoded.capTable[0].id, 8);
+  }
 });

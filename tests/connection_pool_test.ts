@@ -1114,3 +1114,116 @@ Deno.test("RpcConnectionPool release before timeout correctly satisfies pending 
     await pool.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// whenReady() resolves after all warm-up connections are created
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool whenReady() resolves after warm-up connections are created", async () => {
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    return Promise.resolve(makeConn(createCount));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    minConnections: 3,
+    maxConnections: 4,
+  });
+
+  try {
+    await withTimeout(pool.whenReady(), 1000, "whenReady");
+    assertEquals(createCount, 3);
+    assertEquals(pool.stats.idle, 3);
+    assertEquals(pool.stats.active, 0);
+    assertEquals(pool.stats.total, 3);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// whenReady() resolves even if some warm-up connections fail
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool whenReady() resolves even if some warm-up connections fail", async () => {
+  let attempt = 0;
+  const factory = () => {
+    attempt += 1;
+    // Odd attempts fail, even attempts succeed.
+    if (attempt % 2 === 1) {
+      return Promise.reject(new Error(`warm-up failed #${attempt}`));
+    }
+    return Promise.resolve(makeConn(attempt));
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    minConnections: 4,
+    maxConnections: 8,
+  });
+
+  try {
+    // whenReady() must resolve even though 2 of 4 connections failed.
+    await withTimeout(pool.whenReady(), 1000, "whenReady with failures");
+    assertEquals(attempt, 4);
+    // Only the even attempts succeeded.
+    assertEquals(pool.stats.idle, 2);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// whenReady() resolves immediately if minConnections=0
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool whenReady() resolves immediately if minConnections=0", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory, {
+    minConnections: 0,
+    maxConnections: 4,
+  });
+
+  try {
+    // Should resolve without delay since there is nothing to warm up.
+    await withTimeout(pool.whenReady(), 100, "whenReady with minConnections=0");
+    assertEquals(pool.stats.total, 0);
+  } finally {
+    await pool.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// close() after construction doesn't leak warm-up connections
+// ---------------------------------------------------------------------------
+
+Deno.test("RpcConnectionPool close() after construction doesn't leak warm-up connections", async () => {
+  const closedIds: number[] = [];
+  let createCount = 0;
+  const factory = () => {
+    createCount += 1;
+    const id = createCount;
+    const conn: RpcClientTransportLike = {
+      call: () => Promise.resolve(EMPTY),
+      close: () => {
+        closedIds.push(id);
+        return Promise.resolve();
+      },
+    };
+    return Promise.resolve(conn);
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    minConnections: 3,
+    maxConnections: 4,
+  });
+
+  // Close immediately after construction -- warm-up is in flight.
+  await pool.close();
+
+  // close() awaits warmupComplete, so all warm-up connections should have
+  // been created and then closed during cleanup.
+  assertEquals(createCount, 3);
+  assertEquals(closedIds.length, 3);
+  assertEquals(pool.stats.total, 0);
+});

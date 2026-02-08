@@ -76,12 +76,11 @@ jobs:
       - name: Real WASM tests
         run: deno task test:real
 
-  # ── Performance benchmarks (non-blocking) ─────────────────────────
+  # ── Performance benchmarks ────────────────────────────────────────
   bench:
     runs-on: ubuntu-latest
     needs: verify
     if: always() && needs.verify.result == 'success'
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -110,8 +109,11 @@ jobs:
             echo "No previous benchmark results found."
           fi
 
-      - name: Run benchmarks and regression checks
-        run: just ci-bench
+      - name: Run Deno benchmarks
+        run: deno task bench:fast
+
+      - name: Run benchmark regression tests
+        run: deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts
 
       - name: Upload benchmark results artifact
         if: always()
@@ -131,6 +133,7 @@ jobs:
 
       - name: Compare against previous results
         if: always()
+        continue-on-error: true
         run: |
           if [ ! -f bench/previous/results.json ] || [ ! -f bench/results.json ]; then
             echo "No previous or current results to compare, skipping."
