@@ -33,6 +33,16 @@ export interface RpcConnectionPoolOptions {
    * Only meaningful when {@link healthCheck} is configured.
    */
   healthCheckIdleMs?: number;
+  /**
+   * Upper bound (milliseconds) for waiting on late warm-up closure tasks during
+   * {@link close}. Defaults to 25.
+   *
+   * When `close()` races with in-flight warm-up connect attempts, those connects
+   * are detached and closed in the background once they eventually resolve.
+   * `close()` waits for at most this long for those background closes.
+   * Set to `0` to make this path fully fire-and-forget.
+   */
+  closeWarmupSettleMs?: number;
 }
 
 /**
@@ -75,6 +85,8 @@ interface PendingAcquire {
   /** Whether this entry has already been resolved or rejected. */
   settled: boolean;
 }
+
+const DEFAULT_CLOSE_WARMUP_SETTLE_MS = 25;
 
 /**
  * A connection pool for managing multiple RPC client transport connections.
@@ -119,6 +131,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     conn: RpcClientTransportLike,
   ) => boolean | Promise<boolean>;
   readonly #healthCheckIdleMs: number;
+  readonly #closeWarmupSettleMs: number;
 
   #idle: Map<RpcClientTransportLike, IdleEntry> = new Map();
   #active: Set<RpcClientTransportLike> = new Set();
@@ -126,6 +139,10 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
   #pendingSettled = 0;
   #closed = false;
   #closePromise?: Promise<void>;
+  #connecting = 0;
+  #closeSignal: Promise<void>;
+  #resolveCloseSignal!: () => void;
+  #pendingCreateDrainRunning = false;
   #warmupComplete: Promise<void>;
   #warmupRequested = 0;
   #warmupSucceeded = 0;
@@ -143,12 +160,21 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     this.#acquireTimeoutMs = options.acquireTimeoutMs ?? 5000;
     this.#healthCheck = options.healthCheck;
     this.#healthCheckIdleMs = options.healthCheckIdleMs ?? 10000;
+    this.#closeWarmupSettleMs = options.closeWarmupSettleMs ??
+      DEFAULT_CLOSE_WARMUP_SETTLE_MS;
+    this.#closeSignal = new Promise<void>((resolve) => {
+      this.#resolveCloseSignal = resolve;
+    });
 
     assertNonNegativeInteger(this.#minConnections, "minConnections");
     assertPositiveInteger(this.#maxConnections, "maxConnections");
     assertNonNegativeFinite(this.#idleTimeoutMs, "idleTimeoutMs");
     assertNonNegativeFinite(this.#acquireTimeoutMs, "acquireTimeoutMs");
     assertNonNegativeFinite(this.#healthCheckIdleMs, "healthCheckIdleMs");
+    assertNonNegativeFinite(
+      this.#closeWarmupSettleMs,
+      "closeWarmupSettleMs",
+    );
 
     if (this.#minConnections > this.#maxConnections) {
       throw new SessionError(
@@ -255,7 +281,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     }
 
     // Try to create a new connection if under the limit.
-    if (this.#active.size < this.#maxConnections) {
+    if (this.#canCreateConnection()) {
       return await this.#createConnection();
     }
 
@@ -301,27 +327,10 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       return;
     }
 
-    // Hand off to a pending waiter if one exists, skipping any that
-    // have already been settled (e.g. by a concurrent timeout).
-    while (this.#pending.length > 0) {
-      const waiter = this.#pending.shift()!;
-      if (waiter.settled) {
-        this.#pendingSettled--;
-        continue;
-      }
-      waiter.settled = true;
-      clearTimeout(waiter.timer);
-      this.#active.add(conn);
-      waiter.resolve(conn);
-      this.#compactPending();
-      return;
-    }
+    if (this.#handoffPendingAcquire(conn)) return;
 
     // Return to idle pool with a timeout.
-    const timer = setTimeout(() => {
-      this.#evictIdle(conn);
-    }, this.#idleTimeoutMs);
-    this.#idle.set(conn, { conn, timer, lastUsedAt: Date.now() });
+    this.#parkIdleConnection(conn);
   }
 
   /**
@@ -337,6 +346,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       return this.#closePromise ?? Promise.resolve();
     }
     this.#closed = true;
+    this.#resolveCloseSignal();
 
     // Store the close promise so subsequent calls can await it.
     this.#closePromise = this.#doClose();
@@ -379,9 +389,26 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     await this.#warmupComplete;
 
     // Await any warm-up connections that raced with close and were
-    // closed inline (fire-and-forget prevention).
+    // closed inline. This is bounded best-effort: close must not hang forever
+    // if a warm-up connect attempt never settles.
     if (this.#warmupClosePromises.length > 0) {
-      await Promise.all(this.#warmupClosePromises);
+      const pendingClosures = this.#warmupClosePromises.splice(0);
+      if (this.#closeWarmupSettleMs > 0) {
+        await new Promise<void>((resolve) => {
+          let done = false;
+          const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            resolve();
+          }, this.#closeWarmupSettleMs);
+          void Promise.allSettled(pendingClosures).then(() => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
       this.#warmupClosePromises.length = 0;
     }
 
@@ -414,17 +441,107 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     await Promise.all(closePromises);
   }
 
+  #canCreateConnection(): boolean {
+    const managed = this.#idle.size + this.#active.size + this.#connecting;
+    return managed < this.#maxConnections;
+  }
+
+  #hasPendingAcquires(): boolean {
+    return this.#pending.length > this.#pendingSettled;
+  }
+
+  #takeNextPendingAcquire(): PendingAcquire | undefined {
+    while (this.#pending.length > 0) {
+      const waiter = this.#pending.shift()!;
+      if (waiter.settled) {
+        this.#pendingSettled--;
+        continue;
+      }
+      waiter.settled = true;
+      clearTimeout(waiter.timer);
+      this.#compactPending();
+      return waiter;
+    }
+    return undefined;
+  }
+
+  #normalizeConnectionCreateError(error: unknown): SessionError {
+    if (error instanceof SessionError) return error;
+    return new SessionError("connection pool: failed to create connection", {
+      cause: error,
+    });
+  }
+
+  #schedulePendingCreateDrain(): void {
+    if (this.#pendingCreateDrainRunning) return;
+    if (this.#closed) return;
+    if (!this.#hasPendingAcquires()) return;
+    if (!this.#canCreateConnection()) return;
+
+    this.#pendingCreateDrainRunning = true;
+    void this.#drainPendingAcquires().finally(() => {
+      this.#pendingCreateDrainRunning = false;
+      // State may have changed while draining (timeouts, releases, failures).
+      this.#schedulePendingCreateDrain();
+    });
+  }
+
+  async #drainPendingAcquires(): Promise<void> {
+    while (
+      !this.#closed && this.#hasPendingAcquires() && this.#canCreateConnection()
+    ) {
+      const connectAttempt = this.#beginConnectAttempt();
+      if (!connectAttempt) return;
+
+      try {
+        const conn = await connectAttempt;
+        if (this.#closed) {
+          await this.#closeConnection(conn);
+          return;
+        }
+        if (this.#handoffPendingAcquire(conn)) {
+          continue;
+        }
+        this.#parkIdleConnection(conn);
+        return;
+      } catch (error) {
+        const waiter = this.#takeNextPendingAcquire();
+        if (!waiter) {
+          continue;
+        }
+        waiter.reject(this.#normalizeConnectionCreateError(error));
+      }
+    }
+  }
+
+  #beginConnectAttempt(): Promise<RpcClientTransportLike> | null {
+    if (!this.#canCreateConnection()) return null;
+    this.#connecting++;
+    return Promise.resolve()
+      .then(() => this.#connect())
+      .finally(() => {
+        this.#connecting = Math.max(0, this.#connecting - 1);
+      });
+  }
+
   async #createConnection(): Promise<RpcClientTransportLike> {
+    const connectAttempt = this.#beginConnectAttempt();
+    if (!connectAttempt) {
+      throw new SessionError("connection pool is at capacity");
+    }
+
     try {
-      const conn = await this.#connect();
+      const conn = await connectAttempt;
+      if (this.#closed) {
+        await this.#closeConnection(conn);
+        throw new SessionError("connection pool is closed");
+      }
       this.#active.add(conn);
       return conn;
     } catch (error) {
-      // If creation failed and there is still capacity, try once more.
-      // This handles transient failures without blocking callers indefinitely.
-      throw new SessionError("connection pool: failed to create connection", {
-        cause: error,
-      });
+      const normalized = this.#normalizeConnectionCreateError(error);
+      this.#schedulePendingCreateDrain();
+      throw normalized;
     }
   }
 
@@ -434,6 +551,27 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       await conn.close();
     } catch {
       // Swallow close errors -- best effort cleanup.
+    }
+  }
+
+  #parkIdleConnection(
+    conn: RpcClientTransportLike,
+    lastUsedAt: number = Date.now(),
+  ): void {
+    const timer = setTimeout(() => {
+      this.#evictIdle(conn);
+    }, this.#idleTimeoutMs);
+    this.#idle.set(conn, { conn, timer, lastUsedAt });
+  }
+
+  #handoffPendingAcquire(conn: RpcClientTransportLike): boolean {
+    // Hand off to the next unresolved waiter.
+    while (true) {
+      const waiter = this.#takeNextPendingAcquire();
+      if (!waiter) return false;
+      this.#active.add(conn);
+      waiter.resolve(conn);
+      return true;
     }
   }
 
@@ -448,11 +586,8 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     if (total >= this.#minConnections) {
       this.#closeConnection(conn);
     } else {
-      // Re-add with a fresh timer.
-      const timer = setTimeout(() => {
-        this.#evictIdle(conn);
-      }, this.#idleTimeoutMs);
-      this.#idle.set(conn, { conn, timer, lastUsedAt: entry.lastUsedAt });
+      // Re-add with a fresh timer, preserving the original idle timestamp.
+      this.#parkIdleConnection(conn, entry.lastUsedAt);
     }
   }
 
@@ -471,26 +606,56 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     const count = this.#minConnections;
     const promises: Promise<void>[] = [];
     for (let i = 0; i < count; i++) {
-      promises.push(
-        this.#connect().then(
-          (conn) => {
-            this.#warmupSucceeded++;
-            if (this.#closed) {
-              this.#warmupClosePromises.push(this.#closeConnection(conn));
-              return;
-            }
-            const timer = setTimeout(() => {
-              this.#evictIdle(conn);
-            }, this.#idleTimeoutMs);
-            this.#idle.set(conn, { conn, timer, lastUsedAt: Date.now() });
-          },
-          () => {
+      const connectAttempt = this.#beginConnectAttempt();
+      if (!connectAttempt) {
+        this.#warmupFailed++;
+        continue;
+      }
+
+      const attempt = Promise.race([
+        connectAttempt.then(
+          (conn) => ({ kind: "connected" as const, conn }),
+          () => ({ kind: "failed" as const }),
+        ),
+        this.#closeSignal.then(() => ({ kind: "closed" as const })),
+      ])
+        .then((outcome) => {
+          if (outcome.kind === "failed") {
             this.#warmupFailed++;
             // Warm-up failures are silently ignored -- connections will be
             // created on demand when acquire() is called.
-          },
-        ),
-      );
+            return;
+          }
+
+          if (outcome.kind === "closed") {
+            // If close won the race, stop waiting for this attempt. If the
+            // connection resolves later, close it in the background.
+            this.#warmupClosePromises.push(
+              connectAttempt.then(
+                (conn) => this.#closeConnection(conn),
+                () => {
+                  // no-op
+                },
+              ),
+            );
+            return;
+          }
+
+          const conn = outcome.conn;
+          this.#warmupSucceeded++;
+          if (this.#closed) {
+            this.#warmupClosePromises.push(this.#closeConnection(conn));
+            return;
+          }
+          if (this.#handoffPendingAcquire(conn)) {
+            return;
+          }
+          this.#parkIdleConnection(conn);
+        })
+        .finally(() => {
+          this.#schedulePendingCreateDrain();
+        });
+      promises.push(attempt);
     }
     await Promise.allSettled(promises);
   }

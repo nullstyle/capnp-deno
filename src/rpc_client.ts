@@ -18,6 +18,7 @@ import {
   type RpcCallTarget,
   type RpcCapDescriptor,
   type RpcPromisedAnswerOp,
+  type RpcReturnMessage,
 } from "./rpc_wire.ts";
 
 /**
@@ -317,6 +318,15 @@ export interface SessionRpcClientTransportOptions {
   middleware?: RpcClientMiddleware[];
 }
 
+interface PendingReturnWaiter {
+  resolve: (message: RpcReturnMessage) => void;
+  reject: (error: unknown) => void;
+  timeout?: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  settled: boolean;
+}
+
 /**
  * An in-memory implementation of {@link RpcSessionHarnessTransport} for testing.
  *
@@ -468,6 +478,11 @@ export class SessionRpcClientTransport {
   #defaultTimeoutMs: number | undefined;
   #middleware: RpcClientMiddleware[];
   #opChain: Promise<void> = Promise.resolve();
+  #expectedReturns: Set<number> = new Set();
+  #pendingReturns: Map<number, PendingReturnWaiter[]> = new Map();
+  #queuedReturns: Map<number, RpcReturnMessage[]> = new Map();
+  #responsePump: Promise<void> | null = null;
+  #responsePumpAbort: AbortController | null = null;
 
   constructor(
     session: RpcSession,
@@ -711,9 +726,15 @@ export class SessionRpcClientTransport {
       });
 
       // Send the call frame but do NOT wait for the response yet.
-      await this.#ensureStarted();
-      await this.transport.emitInbound(frame);
-      await this.session.flush();
+      this.#markReturnExpected(questionId);
+      try {
+        await this.#ensureStarted();
+        await this.transport.emitInbound(frame);
+        await this.session.flush();
+      } catch (error) {
+        this.#abandonExpectedReturn(questionId);
+        throw error;
+      }
 
       const pipeline = new RpcPipeline(questionId);
 
@@ -834,31 +855,16 @@ export class SessionRpcClientTransport {
     questionId: number,
     frame: Uint8Array,
     options: RpcClientCallOptions,
-  ) {
-    await this.#ensureStarted();
-    await this.transport.emitInbound(frame);
-    await this.session.flush();
-
-    const effectiveTimeout = options.timeoutMs ?? this.#defaultTimeoutMs;
-    const started = Date.now();
-    while (true) {
-      const remaining = effectiveTimeout === undefined
-        ? undefined
-        : Math.max(0, effectiveTimeout - (Date.now() - started));
-      const outbound = await this.transport.nextOutboundFrame({
-        signal: options.signal,
-        timeoutMs: remaining,
-      });
-      let decoded;
-      try {
-        decoded = decodeReturnFrame(outbound);
-      } catch {
-        continue;
-      }
-      if (decoded.answerId !== questionId) {
-        continue;
-      }
-      return decoded;
+  ): Promise<RpcReturnMessage> {
+    this.#markReturnExpected(questionId);
+    try {
+      await this.#ensureStarted();
+      await this.transport.emitInbound(frame);
+      await this.session.flush();
+      return await this.#awaitReturn(questionId, options);
+    } catch (error) {
+      this.#abandonExpectedReturn(questionId);
+      throw error;
     }
   }
 
@@ -872,57 +878,278 @@ export class SessionRpcClientTransport {
     options: RpcClientCallOptions,
     mwCtx?: ClientMiddlewareContext,
   ): Promise<RpcClientCallResult> {
-    const effectiveTimeout = options.timeoutMs ?? this.#defaultTimeoutMs;
-    const started = Date.now();
-    while (true) {
-      const remaining = effectiveTimeout === undefined
-        ? undefined
-        : Math.max(0, effectiveTimeout - (Date.now() - started));
-      let outbound;
+    let decoded: RpcReturnMessage;
+    try {
+      decoded = await this.#awaitReturn(questionId, options);
+    } catch (error) {
+      if (mwCtx) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        await this.#runOnError(err, mwCtx);
+      }
+      throw error;
+    }
+
+    if (decoded.kind === "exception") {
+      const err = new ProtocolError(`rpc call failed: ${decoded.reason}`);
+      if (mwCtx) {
+        await this.#runOnError(err, mwCtx);
+      }
+      throw err;
+    }
+
+    let contentBytes = new Uint8Array(decoded.contentBytes);
+    if (mwCtx) {
+      contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
+    }
+
+    return {
+      answerId: decoded.answerId,
+      contentBytes,
+      capTable: decoded.capTable.map((entry) => ({
+        tag: entry.tag,
+        id: entry.id,
+      })),
+      releaseParamCaps: decoded.releaseParamCaps,
+      noFinishNeeded: decoded.noFinishNeeded,
+    };
+  }
+
+  async #awaitReturn(
+    questionId: number,
+    options: RpcClientCallOptions,
+  ): Promise<RpcReturnMessage> {
+    if (!this.#expectedReturns.has(questionId)) {
+      throw new SessionError(
+        `rpc wait rejected: question ${questionId} is not awaiting a return`,
+      );
+    }
+    const queued = this.#takeQueuedReturn(questionId);
+    if (queued) {
+      this.#markReturnObserved(questionId);
+      return queued;
+    }
+
+    const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
+
+    return await new Promise<RpcReturnMessage>((resolve, reject) => {
+      const waiter: PendingReturnWaiter = {
+        resolve,
+        reject,
+        settled: false,
+      };
+
+      const rejectAndRemove = (error: unknown): void => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        this.#clearPendingReturnWaiter(waiter);
+        this.#removePendingReturnWaiter(questionId, waiter);
+        this.#abandonExpectedReturnIfUnobserved(questionId);
+        reject(error);
+      };
+
+      if (options.signal?.aborted) {
+        this.#abandonExpectedReturn(questionId);
+        reject(new SessionError("rpc wait aborted"));
+        return;
+      }
+
+      if (timeoutMs !== undefined) {
+        waiter.timeout = setTimeout(() => {
+          rejectAndRemove(
+            new SessionError(`rpc wait timed out after ${timeoutMs}ms`),
+          );
+        }, timeoutMs);
+      }
+
+      if (options.signal) {
+        waiter.signal = options.signal;
+        waiter.onAbort = () => {
+          rejectAndRemove(new SessionError("rpc wait aborted"));
+        };
+        options.signal.addEventListener("abort", waiter.onAbort, {
+          once: true,
+        });
+      }
+
+      const existing = this.#pendingReturns.get(questionId);
+      if (existing) {
+        existing.push(waiter);
+      } else {
+        this.#pendingReturns.set(questionId, [waiter]);
+      }
+      this.#ensureResponsePump();
+    });
+  }
+
+  #takeQueuedReturn(questionId: number): RpcReturnMessage | undefined {
+    const queued = this.#queuedReturns.get(questionId);
+    if (!queued || queued.length === 0) return undefined;
+    const next = queued.shift()!;
+    if (queued.length === 0) {
+      this.#queuedReturns.delete(questionId);
+    }
+    return next;
+  }
+
+  #queueReturn(message: RpcReturnMessage): void {
+    if (!this.#expectedReturns.has(message.answerId)) {
+      return;
+    }
+    const queued = this.#queuedReturns.get(message.answerId);
+    if (queued) {
+      // A question should produce a single return; keep at most one queued frame.
+      return;
+    }
+    this.#queuedReturns.set(message.answerId, [message]);
+  }
+
+  #removePendingReturnWaiter(
+    questionId: number,
+    waiter: PendingReturnWaiter,
+  ): void {
+    const pending = this.#pendingReturns.get(questionId);
+    if (!pending) return;
+    const index = pending.indexOf(waiter);
+    if (index >= 0) {
+      pending.splice(index, 1);
+    }
+    if (pending.length === 0) {
+      this.#pendingReturns.delete(questionId);
+      this.#abortResponsePumpReadIfIdle();
+    }
+  }
+
+  #clearPendingReturnWaiter(waiter: PendingReturnWaiter): void {
+    if (waiter.timeout !== undefined) {
+      clearTimeout(waiter.timeout);
+      waiter.timeout = undefined;
+    }
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.onAbort = undefined;
+      waiter.signal = undefined;
+    }
+  }
+
+  #hasPendingReturnWaiters(): boolean {
+    return this.#pendingReturns.size > 0;
+  }
+
+  #markReturnExpected(questionId: number): void {
+    this.#expectedReturns.add(questionId);
+  }
+
+  #markReturnObserved(questionId: number): void {
+    this.#expectedReturns.delete(questionId);
+    this.#queuedReturns.delete(questionId);
+  }
+
+  #abandonExpectedReturn(questionId: number): void {
+    this.#markReturnObserved(questionId);
+  }
+
+  #abandonExpectedReturnIfUnobserved(questionId: number): void {
+    const pending = this.#pendingReturns.get(questionId);
+    if (pending && pending.length > 0) return;
+    this.#abandonExpectedReturn(questionId);
+  }
+
+  #resolvePendingReturn(message: RpcReturnMessage): boolean {
+    const pending = this.#pendingReturns.get(message.answerId);
+    if (!pending || pending.length === 0) {
+      return false;
+    }
+
+    while (pending.length > 0) {
+      const waiter = pending.shift()!;
+      if (waiter.settled) continue;
+      waiter.settled = true;
+      this.#clearPendingReturnWaiter(waiter);
+      if (pending.length === 0) {
+        this.#pendingReturns.delete(message.answerId);
+      }
+      this.#markReturnObserved(message.answerId);
+      waiter.resolve(message);
+      return true;
+    }
+
+    this.#pendingReturns.delete(message.answerId);
+    this.#abortResponsePumpReadIfIdle();
+    this.#abandonExpectedReturn(message.answerId);
+    return false;
+  }
+
+  #rejectAllPendingReturns(error: unknown): void {
+    const pendingEntries = [...this.#pendingReturns.entries()];
+    this.#pendingReturns.clear();
+    this.#abortResponsePumpReadIfIdle();
+    for (const [questionId, waiters] of pendingEntries) {
+      for (const waiter of waiters) {
+        if (waiter.settled) continue;
+        waiter.settled = true;
+        this.#clearPendingReturnWaiter(waiter);
+        waiter.reject(error);
+      }
+      this.#abandonExpectedReturn(questionId);
+    }
+  }
+
+  #abortResponsePumpReadIfIdle(): void {
+    if (this.#hasPendingReturnWaiters()) return;
+    this.#responsePumpAbort?.abort();
+  }
+
+  #ensureResponsePump(): void {
+    if (this.#responsePump) return;
+    this.#responsePump = this.#pumpResponses()
+      .catch((_error) => {
+        // Individual waiters receive transport/decode failures directly.
+      })
+      .finally(() => {
+        this.#responsePump = null;
+        if (this.#hasPendingReturnWaiters()) {
+          this.#ensureResponsePump();
+        }
+      });
+  }
+
+  async #pumpResponses(): Promise<void> {
+    while (this.#hasPendingReturnWaiters()) {
+      const abortController = new AbortController();
+      this.#responsePumpAbort = abortController;
+      let outbound: Uint8Array;
       try {
         outbound = await this.transport.nextOutboundFrame({
-          signal: options.signal,
-          timeoutMs: remaining,
+          signal: abortController.signal,
         });
       } catch (error) {
-        if (mwCtx) {
-          const err = error instanceof Error ? error : new Error(String(error));
-          await this.#runOnError(err, mwCtx);
+        if (
+          abortController.signal.aborted && !this.#hasPendingReturnWaiters()
+        ) {
+          return;
         }
-        throw error;
+        this.#rejectAllPendingReturns(error);
+        return;
+      } finally {
+        if (this.#responsePumpAbort === abortController) {
+          this.#responsePumpAbort = null;
+        }
       }
-      let decoded;
+
+      let decoded: RpcReturnMessage;
       try {
         decoded = decodeReturnFrame(outbound);
       } catch {
         continue;
       }
-      if (decoded.answerId !== questionId) {
+
+      if (!this.#expectedReturns.has(decoded.answerId)) {
+        // Ignore stale/forged returns for unknown or already-finished questions.
         continue;
       }
-      if (decoded.kind === "exception") {
-        const err = new ProtocolError(`rpc call failed: ${decoded.reason}`);
-        if (mwCtx) {
-          await this.#runOnError(err, mwCtx);
-        }
-        throw err;
+      if (!this.#resolvePendingReturn(decoded)) {
+        this.#queueReturn(decoded);
       }
-
-      let contentBytes = new Uint8Array(decoded.contentBytes);
-      if (mwCtx) {
-        contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
-      }
-
-      return {
-        answerId: decoded.answerId,
-        contentBytes,
-        capTable: decoded.capTable.map((entry) => ({
-          tag: entry.tag,
-          id: entry.id,
-        })),
-        releaseParamCaps: decoded.releaseParamCaps,
-        noFinishNeeded: decoded.noFinishNeeded,
-      };
     }
   }
 

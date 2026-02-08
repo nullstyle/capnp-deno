@@ -15,12 +15,18 @@ class MockTransport implements RpcTransport {
   started = false;
   closed = false;
   closeCalls = 0;
+  throwOnStart: unknown = null;
   throwOnSend: unknown = null;
   throwOnClose: unknown = null;
 
   start(
     onFrame: (frame: Uint8Array) => void | Promise<void>,
   ): void {
+    if (this.throwOnStart !== null) {
+      const error = this.throwOnStart;
+      this.throwOnStart = null;
+      throw error;
+    }
     this.started = true;
     this.onFrame = onFrame;
   }
@@ -136,6 +142,35 @@ Deno.test("RpcSession rejects start after close and preserves state flags", asyn
       /RpcSession is closed/i.test(thrown.message),
     `expected closed SessionError, got: ${String(thrown)}`,
   );
+});
+
+Deno.test("RpcSession can retry start after an initial start failure", async () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnStart = new Error("start failed once");
+  const session = new RpcSession(peer, transport);
+
+  let firstError: unknown;
+  try {
+    await session.start();
+  } catch (error) {
+    firstError = error;
+  }
+
+  assert(
+    firstError instanceof SessionError &&
+      /rpc session start failed/i.test(firstError.message),
+    `expected normalized start failure, got: ${String(firstError)}`,
+  );
+  assertEquals(session.started, false);
+  assertEquals(transport.started, false);
+
+  await session.start();
+  assertEquals(session.started, true);
+  assertEquals(transport.started, true);
+
+  await session.close();
 });
 
 Deno.test("RpcSession pumpInboundFrame normalizes transport send failures", async () => {

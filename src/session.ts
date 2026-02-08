@@ -48,6 +48,7 @@ export class RpcSession {
   readonly transport: RpcTransport;
 
   #started = false;
+  #starting = false;
   #closed = false;
   #inboundChain: Promise<void> = Promise.resolve();
   #onError: RpcSessionOptions["onError"];
@@ -92,15 +93,18 @@ export class RpcSession {
     const startedAt = performance.now();
     if (this.#closed) throw new SessionError("RpcSession is closed");
     if (this.#started) throw new SessionError("RpcSession already started");
+    if (this.#starting) {
+      throw new SessionError("RpcSession start is already in progress");
+    }
+    this.#starting = true;
     try {
-      this.#started = true;
-
       await this.transport.start((frame) => {
         this.#inboundChain = this.#inboundChain
           .then(() => this.pumpInboundFrame(frame))
           .catch((error) => this.handleError(error));
         return this.#inboundChain;
       });
+      this.#started = true;
       emitObservabilityEvent(this.#observability, {
         name: "rpc.session.start",
         attributes: {
@@ -123,6 +127,8 @@ export class RpcSession {
         error: normalized,
       });
       throw normalized;
+    } finally {
+      this.#starting = false;
     }
   }
 

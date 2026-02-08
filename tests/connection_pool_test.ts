@@ -250,6 +250,87 @@ Deno.test("RpcConnectionPool reports connection creation failure", async () => {
   }
 });
 
+Deno.test("RpcConnectionPool normalizes sync connect throws and recovers capacity", async () => {
+  let attempt = 0;
+  const pool = new RpcConnectionPool(() => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new Error("sync dial failed");
+    }
+    return Promise.resolve(makeConn(attempt));
+  }, {
+    maxConnections: 1,
+    acquireTimeoutMs: 200,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      await pool.acquire();
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /failed to create connection/i.test(thrown.message),
+      `expected normalized sync connect failure, got: ${String(thrown)}`,
+    );
+
+    const conn = await withTimeout(
+      pool.acquire(),
+      1000,
+      "acquire after sync connect failure",
+    );
+    assertEquals(pool.stats.active, 1);
+    pool.release(conn);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool retries pending acquires after connect failures", async () => {
+  let attempt = 0;
+  const pool = new RpcConnectionPool(async () => {
+    attempt += 1;
+    if (attempt === 1) {
+      await new Promise((r) => setTimeout(r, 20));
+      throw new Error("dial failed once");
+    }
+    return makeConn(attempt);
+  }, {
+    maxConnections: 1,
+    acquireTimeoutMs: 500,
+  });
+
+  try {
+    const first = pool.acquire();
+    const second = pool.acquire();
+
+    let firstErr: unknown;
+    try {
+      await first;
+    } catch (error) {
+      firstErr = error;
+    }
+    assert(
+      firstErr instanceof SessionError &&
+        /failed to create connection/i.test(firstErr.message),
+      `expected first connect failure, got: ${String(firstErr)}`,
+    );
+
+    const conn = await withTimeout(
+      second,
+      1000,
+      "pending acquire after failed in-flight connect",
+    );
+    assertEquals(attempt, 2);
+    assertEquals(pool.stats.active, 1);
+    pool.release(conn);
+  } finally {
+    await pool.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // withConnection helper releases on success
 // ---------------------------------------------------------------------------
@@ -409,6 +490,54 @@ Deno.test("RpcConnectionPool pre-warms minConnections", async () => {
     assertEquals(pool.stats.idle, 2);
     assertEquals(pool.stats.active, 0);
     assertEquals(pool.stats.total, 2);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool warm-up/acquire race still enforces maxConnections", async () => {
+  let createCount = 0;
+  let releaseFirstWarmup!: () => void;
+  const firstWarmupGate = new Promise<void>((resolve) => {
+    releaseFirstWarmup = resolve;
+  });
+  const factory = () => {
+    createCount += 1;
+    const conn = makeConn(createCount);
+    if (createCount === 1) {
+      return firstWarmupGate.then(() => conn);
+    }
+    return Promise.resolve(conn);
+  };
+
+  const pool = new RpcConnectionPool(factory, {
+    minConnections: 1,
+    maxConnections: 1,
+    acquireTimeoutMs: 2000,
+  });
+
+  try {
+    const acquirePromise = pool.acquire();
+
+    // Ensure acquire() observes warm-up's in-flight connect and waits.
+    await Promise.resolve();
+    releaseFirstWarmup();
+
+    const conn = await withTimeout(
+      acquirePromise,
+      1000,
+      "acquire after warm-up",
+    );
+    await withTimeout(pool.whenReady(), 1000, "whenReady after warm-up race");
+
+    // Even with the race, the pool must never create more than maxConnections.
+    assertEquals(createCount, 1);
+    assertEquals(pool.stats.total, 1);
+    assertEquals(pool.stats.active, 1);
+
+    pool.release(conn);
+    assertEquals(pool.stats.total, 1);
+    assertEquals(pool.stats.idle, 1);
   } finally {
     await pool.close();
   }
@@ -606,6 +735,41 @@ Deno.test("RpcConnectionPool warm-up failure is silently ignored", async () => {
     assertEquals(pool.stats.idle, 0);
     const conn = await pool.acquire();
     assert(conn !== undefined, "expected on-demand connection to succeed");
+    pool.release(conn);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool warm-up handles sync connect throws as failed attempts", async () => {
+  let attempt = 0;
+  const pool = new RpcConnectionPool(() => {
+    attempt += 1;
+    if (attempt === 1) {
+      throw new Error("sync warm-up failure");
+    }
+    return Promise.resolve(makeConn(attempt));
+  }, {
+    minConnections: 1,
+    maxConnections: 2,
+  });
+
+  try {
+    await withTimeout(
+      pool.whenReady(),
+      1000,
+      "whenReady with sync warm-up throw",
+    );
+    const warmup = pool.warmupStats();
+    assertEquals(warmup.requested, 1);
+    assertEquals(warmup.succeeded, 0);
+    assertEquals(warmup.failed, 1);
+
+    const conn = await withTimeout(
+      pool.acquire(),
+      1000,
+      "acquire after sync warm-up throw",
+    );
     pool.release(conn);
   } finally {
     await pool.close();
@@ -1251,4 +1415,79 @@ Deno.test("RpcConnectionPool close() after construction doesn't leak warm-up con
   assertEquals(createCount, 3);
   assertEquals(closedIds.length, 3);
   assertEquals(pool.stats.total, 0);
+});
+
+Deno.test("RpcConnectionPool close() does not hang when warm-up connect never resolves", async () => {
+  const neverConnect = () =>
+    new Promise<RpcClientTransportLike>(() => {
+      // Intentionally never resolves.
+    });
+
+  const pool = new RpcConnectionPool(neverConnect, {
+    minConnections: 1,
+    maxConnections: 1,
+  });
+
+  await withTimeout(pool.close(), 200, "close with hanging warm-up connect");
+  assertEquals(pool.stats.total, 0);
+});
+
+Deno.test("RpcConnectionPool closeWarmupSettleMs can await late warm-up close tasks", async () => {
+  let releaseConnect!: () => void;
+  const connectGate = new Promise<void>((resolve) => {
+    releaseConnect = resolve;
+  });
+  let closeFinished = false;
+
+  const pool = new RpcConnectionPool(() =>
+    connectGate.then(() => ({
+      call: () => Promise.resolve(EMPTY),
+      close: async () => {
+        await new Promise((r) => setTimeout(r, 80));
+        closeFinished = true;
+      },
+    })), {
+    minConnections: 1,
+    maxConnections: 1,
+    closeWarmupSettleMs: 250,
+  });
+
+  const closePromise = pool.close();
+  await Promise.resolve();
+  releaseConnect();
+  await withTimeout(closePromise, 1000, "close waiting for warm-up close task");
+  assertEquals(closeFinished, true);
+});
+
+Deno.test("RpcConnectionPool closeWarmupSettleMs=0 is fire-and-forget for late warm-up close tasks", async () => {
+  let releaseConnect!: () => void;
+  const connectGate = new Promise<void>((resolve) => {
+    releaseConnect = resolve;
+  });
+  let closeFinished = false;
+
+  const pool = new RpcConnectionPool(() =>
+    connectGate.then(() => ({
+      call: () => Promise.resolve(EMPTY),
+      close: async () => {
+        await new Promise((r) => setTimeout(r, 100));
+        closeFinished = true;
+      },
+    })), {
+    minConnections: 1,
+    maxConnections: 1,
+    closeWarmupSettleMs: 0,
+  });
+
+  const closePromise = pool.close();
+  await Promise.resolve();
+  releaseConnect();
+  await withTimeout(closePromise, 300, "close with zero warm-up settle time");
+  assertEquals(closeFinished, false);
+  await withTimeout(
+    new Promise<void>((resolve) => setTimeout(resolve, 250)),
+    1000,
+    "late warm-up close completion",
+  );
+  assertEquals(closeFinished, true);
 });
