@@ -121,7 +121,7 @@ Deno.test("middleware onCall is called with correct context", async () => {
     assertEquals(seen[0].questionId, 1);
     assertEquals(seen[0].interfaceId, 0xABCDn);
     assertEquals(seen[0].methodId, 7);
-    assertEquals(seen[0].targetCapId, 5);
+    assertEquals(seen[0].capabilityIndex, 5);
     assert(seen[0].state instanceof Map, "state should be a Map");
     assertEquals(seen[0].state.size, 0);
   } finally {
@@ -240,7 +240,7 @@ Deno.test("multiple middleware execute onResponse in order and chain transforms"
 
 Deno.test("middleware onError is called on server exception", async () => {
   const fake = createExceptionFake("server exploded");
-  const seenErrors: Error[] = [];
+  const seenErrors: unknown[] = [];
   const seenContexts: ClientMiddlewareContext[] = [];
   const mw: RpcClientMiddleware = {
     onError(error, ctx) {
@@ -264,9 +264,10 @@ Deno.test("middleware onError is called on server exception", async () => {
       `expected ProtocolError, got: ${String(thrown)}`,
     );
     assertEquals(seenErrors.length, 1);
+    const err0 = seenErrors[0] as Error;
     assert(
-      /server exploded/.test(seenErrors[0].message),
-      `expected error about server explosion, got: ${seenErrors[0].message}`,
+      /server exploded/.test(err0.message),
+      `expected error about server explosion, got: ${err0.message}`,
     );
     assertEquals(seenContexts[0].questionId, 1);
     assertEquals(seenContexts[0].methodId, 5);
@@ -419,7 +420,7 @@ Deno.test("callRaw also triggers middleware hooks", async () => {
     assertEquals(seen.length, 1);
     assertEquals(seen[0].questionId, 1);
     assertEquals(seen[0].methodId, 11);
-    assertEquals(seen[0].targetCapId, 3);
+    assertEquals(seen[0].capabilityIndex, 3);
     assertEquals(responseReceived, true);
     assertEquals(decodeSingleU32StructMessage(result.contentBytes), 88);
   } finally {
@@ -484,7 +485,7 @@ Deno.test("onError called on timeout errors", async () => {
     },
   });
 
-  const seenErrors: Error[] = [];
+  const seenErrors: unknown[] = [];
   const mw: RpcClientMiddleware = {
     onError(error, _ctx) {
       seenErrors.push(error);
@@ -500,9 +501,10 @@ Deno.test("onError called on timeout errors", async () => {
       // expected
     }
     assertEquals(seenErrors.length, 1);
+    const err0 = seenErrors[0] as Error;
     assert(
-      /timed out/.test(seenErrors[0].message),
-      `expected timeout error, got: ${seenErrors[0].message}`,
+      /timed out/.test(err0.message),
+      `expected timeout error, got: ${err0.message}`,
     );
   } finally {
     await session.close();

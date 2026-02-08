@@ -1,3 +1,13 @@
+/**
+ * Cap'n Proto RPC server bridge.
+ *
+ * Decodes inbound RPC frames, dispatches calls to registered capability
+ * handlers via {@link RpcServerBridge}, manages the answer table for
+ * promise pipelining, and encodes return/exception frames.
+ *
+ * @module
+ */
+
 import type { WasmHostCallRecord } from "./abi.ts";
 import { ProtocolError } from "./errors.ts";
 import {
@@ -39,7 +49,7 @@ export interface ServerMiddlewareContext {
   /** The Cap'n Proto interface ID. */
   readonly interfaceId: bigint;
   /** The method ordinal within the interface. */
-  readonly methodOrdinal: number;
+  readonly methodId: number;
   /** The capability index being called. */
   readonly capabilityIndex: number;
   /**
@@ -166,7 +176,7 @@ export interface RpcCallContext {
   /** The capability being called. */
   readonly capability: CapabilityPointer;
   /** The method ordinal within the interface. */
-  readonly methodOrdinal: number;
+  readonly methodId: number;
   /** The question ID for this call. */
   readonly questionId: number;
   /** The Cap'n Proto interface ID. */
@@ -204,13 +214,13 @@ export interface RpcServerDispatch {
   /**
    * Handles an incoming RPC call.
    *
-   * @param methodOrdinal - The method number within the interface.
+   * @param methodId - The method number within the interface.
    * @param params - The serialized parameter content.
    * @param ctx - Full call context including capability and question info.
    * @returns The response bytes or a full response object.
    */
   dispatch(
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     ctx: RpcCallContext,
   ): Promise<Uint8Array | RpcCallResponse> | Uint8Array | RpcCallResponse;
@@ -964,7 +974,7 @@ export class RpcServerBridge {
     const mwCtx: ServerMiddlewareContext = {
       questionId: call.questionId,
       interfaceId: call.interfaceId,
-      methodOrdinal: call.methodId,
+      methodId: call.methodId,
       capabilityIndex,
       state: middlewareState,
     };
@@ -972,7 +982,7 @@ export class RpcServerBridge {
     const ctx: RpcCallContext = {
       target: call.target,
       capability: { capabilityIndex },
-      methodOrdinal: call.methodId,
+      methodId: call.methodId,
       questionId: call.questionId,
       interfaceId: call.interfaceId,
       paramsCapTable: call.paramsCapTable.map((entry) => ({

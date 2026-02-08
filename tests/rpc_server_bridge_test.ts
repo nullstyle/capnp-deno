@@ -87,12 +87,12 @@ Deno.test("RpcServerBridge dispatches call frames via registered server", async 
 
   bridge.exportCapability({
     interfaceId: 0x1234n,
-    dispatch: (methodOrdinal, params, ctx) => {
-      assertEquals(methodOrdinal, 9);
+    dispatch: (methodId, params, ctx) => {
+      assertEquals(methodId, 9);
       assertEquals(decodeSingleU32StructMessage(params), 77);
       seenCtx = {
         capabilityIndex: ctx.capability.capabilityIndex,
-        methodOrdinal: ctx.methodOrdinal,
+        methodId: ctx.methodId,
         questionId: ctx.questionId,
         interfaceId: ctx.interfaceId,
         paramsCapTable: ctx.paramsCapTable,
@@ -129,7 +129,7 @@ Deno.test("RpcServerBridge dispatches call frames via registered server", async 
   }
 
   assertEquals(seenCtx?.capabilityIndex as number, 5);
-  assertEquals(seenCtx?.methodOrdinal as number, 9);
+  assertEquals(seenCtx?.methodId as number, 9);
   assertEquals(seenCtx?.questionId as number, 11);
   assertEquals(seenCtx?.interfaceId as bigint, 0x1234n);
   assertEquals(
@@ -241,7 +241,7 @@ Deno.test("RpcServerBridge pumps wasm host calls and responds with results paylo
   const bridge = new RpcServerBridge();
   bridge.exportCapability({
     interfaceId: 0x1234n,
-    dispatch: (_methodOrdinal, _params, _ctx) =>
+    dispatch: (_methodId, _params, _ctx) =>
       Promise.resolve(encodeSingleU32StructMessage(321)),
   }, { capabilityIndex: 5 });
 
@@ -836,7 +836,7 @@ Deno.test("RpcServerBridge pipelining: dispatches promisedAnswer call to resolve
   // Register a "factory" capability at index 5 that returns a cap in its result.
   bridge.exportCapability({
     interfaceId: 0x1234n,
-    dispatch: (_methodOrdinal, _params, _ctx) =>
+    dispatch: (_methodId, _params, _ctx) =>
       Promise.resolve({
         content: encodeSingleU32StructMessage(100),
         capTable: [{ tag: 1, id: 10 }], // senderHosted cap at id=10
@@ -846,7 +846,7 @@ Deno.test("RpcServerBridge pipelining: dispatches promisedAnswer call to resolve
   // Register the target capability at index 10 that the pipelined call will reach.
   bridge.exportCapability({
     interfaceId: 0x5678n,
-    dispatch: (_methodOrdinal, _params, _ctx) =>
+    dispatch: (_methodId, _params, _ctx) =>
       Promise.resolve(encodeSingleU32StructMessage(999)),
   }, { capabilityIndex: 10 });
 

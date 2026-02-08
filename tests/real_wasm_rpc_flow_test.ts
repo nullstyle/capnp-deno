@@ -140,7 +140,7 @@ function decodeSingleU32StructMessage(frame: Uint8Array): number {
 
 function assertUnknownCapabilityCall(
   peer: WasmPeer,
-  targetCapId: number,
+  capabilityIndex: number,
   questionId: number,
   callTemplate: {
     interfaceId: bigint;
@@ -154,7 +154,7 @@ function assertUnknownCapabilityCall(
       questionId,
       interfaceId: callTemplate.interfaceId,
       methodId: callTemplate.methodId,
-      targetImportedCap: targetCapId,
+      targetImportedCap: capabilityIndex,
       paramsContent: callTemplate.paramsContent,
       paramsCapTable: callTemplate.paramsCapTable,
     }),

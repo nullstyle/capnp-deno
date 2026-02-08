@@ -1,3 +1,13 @@
+/**
+ * Deno OpenTelemetry observability adapter.
+ *
+ * Bridges capnp-deno's {@link RpcObservability} hook to Deno's built-in
+ * OpenTelemetry integration (`Deno.telemetry`), emitting spans and events
+ * for RPC lifecycle operations.
+ *
+ * @module
+ */
+
 import {
   getErrorType,
   type RpcObservability,

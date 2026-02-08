@@ -1,3 +1,13 @@
+/**
+ * Reconnecting RPC client transport with capability remapping.
+ *
+ * Wraps a {@link SessionRpcClientTransport}-compatible factory with automatic
+ * reconnection, re-bootstrap, and capability ID remapping so that callers
+ * can hold stable capability references across connection cycles.
+ *
+ * @module
+ */
+
 import {
   normalizeSessionError,
   SessionError,
@@ -30,7 +40,7 @@ export interface RpcClientTransportLike {
   /** Send an RPC call and return the response content bytes. */
   call(
     capability: RpcCapabilityPointer,
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     options?: RpcClientCallOptions,
   ): Promise<Uint8Array>;
@@ -100,7 +110,7 @@ export interface ReconnectCapabilityRemapContext {
   /** The bootstrap capability from the new connection, or `null` if not yet bootstrapped. */
   currentBootstrapCapability: RpcCapabilityPointer | null;
   /** The method ordinal of the call that triggered the reconnect. */
-  methodOrdinal: number;
+  methodId: number;
   /** The error that caused the reconnect. */
   error: unknown;
 }
@@ -201,7 +211,7 @@ export class ReconnectingRpcClientTransport {
    * connection drops (when `retryInFlightCalls` is enabled).
    *
    * @param capability - The target capability.
-   * @param methodOrdinal - The zero-based method index.
+   * @param methodId - The zero-based method index.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout and abort signal.
    * @returns The raw content bytes of the response.
@@ -209,7 +219,7 @@ export class ReconnectingRpcClientTransport {
    */
   async call(
     capability: RpcCapabilityPointer,
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     options: RpcClientCallOptions = {},
   ): Promise<Uint8Array> {
@@ -219,7 +229,7 @@ export class ReconnectingRpcClientTransport {
       const client = await this.#ensureConnected();
 
       try {
-        return await client.call(callCap, methodOrdinal, params, options);
+        return await client.call(callCap, methodId, params, options);
       } catch (error) {
         const normalized = normalizeSessionError(error, "rpc call failed");
         const retryEnabled = this.options.retryInFlightCalls ?? true;
@@ -234,13 +244,13 @@ export class ReconnectingRpcClientTransport {
         const remappedCap = await this.#mapCapabilityAfterReconnect(
           callCap,
           previousBootstrap,
-          methodOrdinal,
+          methodId,
           normalized,
         );
         try {
           return await reconnected.call(
             remappedCap,
-            methodOrdinal,
+            methodId,
             params,
             options,
           );
@@ -340,7 +350,7 @@ export class ReconnectingRpcClientTransport {
   async #mapCapabilityAfterReconnect(
     capability: RpcCapabilityPointer,
     previousBootstrap: RpcCapabilityPointer | null,
-    methodOrdinal: number,
+    methodId: number,
     error: unknown,
   ): Promise<RpcCapabilityPointer> {
     if (!previousBootstrap) {
@@ -389,7 +399,7 @@ export class ReconnectingRpcClientTransport {
       currentBootstrapCapability: currentBootstrapCapability
         ? cloneCapability(currentBootstrapCapability)
         : null,
-      methodOrdinal,
+      methodId,
       error,
     });
     if (!remapped) {

@@ -144,7 +144,7 @@ Deno.test("ServerMiddleware onDispatch is called before handler with correct con
   assertEquals(seenContexts.length, 1);
   assertEquals(seenContexts[0].questionId, 7);
   assertEquals(seenContexts[0].interfaceId, 0x1234n);
-  assertEquals(seenContexts[0].methodOrdinal, 3);
+  assertEquals(seenContexts[0].methodId, 3);
   assertEquals(seenContexts[0].capabilityIndex, 5);
 });
 

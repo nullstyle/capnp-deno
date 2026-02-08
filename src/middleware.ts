@@ -210,7 +210,7 @@ export interface FrameSizeLimitMiddlewareOptions {
    * - `"receive"` - Only limit inbound frames.
    * - `"both"` - Limit frames in both directions.
    */
-  direction?: "send" | "receive" | "both";
+  direction?: RpcFrameDirectionFilter;
 }
 
 /**
@@ -261,6 +261,11 @@ export function createFrameSizeLimitMiddleware(
  * Direction a frame is flowing through the transport.
  */
 export type RpcFrameDirection = "send" | "receive";
+
+/**
+ * Direction filter for middleware that can target one or both frame directions.
+ */
+export type RpcFrameDirectionFilter = RpcFrameDirection | "both";
 
 /**
  * Callbacks for {@link createRpcIntrospectionMiddleware}.

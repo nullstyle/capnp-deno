@@ -78,8 +78,8 @@ Deno.test("real wasm service flow: bootstrap -> host dispatch -> explicit finish
     const bootstrap = await client.bootstrap();
     bridge.exportCapability({
       interfaceId: INTERFACE_ID,
-      dispatch(methodOrdinal, params, ctx) {
-        assertEquals(methodOrdinal, 7);
+      dispatch(methodId, params, ctx) {
+        assertEquals(methodId, 7);
         assertEquals(ctx.target.tag, 0);
         assertEquals(ctx.capability.capabilityIndex, bootstrap.capabilityIndex);
         const value = decodeSingleU32StructMessage(params);
@@ -120,7 +120,7 @@ Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
 
     bridge.exportCapability({
       interfaceId: INTERFACE_ID,
-      dispatch(_methodOrdinal, params) {
+      dispatch(_methodId, params) {
         dispatchCount += 1;
         if (dispatchCount % 9 === 0) {
           throw new Error("fault injection");

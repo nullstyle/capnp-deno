@@ -191,7 +191,7 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
     }) => {
       interfaceId: bigint;
       dispatch(
-        methodOrdinal: number,
+        methodId: number,
         params: Uint8Array,
         ctx: unknown,
       ): Promise<Uint8Array>;
@@ -210,7 +210,7 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
   const encoded = await dispatch.dispatch(
     0,
     paramsCodec.encode({}),
-    { capability: { capabilityIndex: 7 }, methodOrdinal: 0 },
+    { capability: { capabilityIndex: 7 }, methodId: 0 },
   );
   const decoded = resultsCodec.decode(encoded) as Record<string, unknown>;
   assertEquals(Object.keys(decoded).length, 0);
@@ -221,7 +221,7 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
     await dispatch.dispatch(
       999,
       paramsCodec.encode({}),
-      { capability: { capabilityIndex: 7 }, methodOrdinal: 999 },
+      { capability: { capabilityIndex: 7 }, methodId: 999 },
     );
   } catch (error) {
     thrown = error;
@@ -254,7 +254,7 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
     | ((transport: {
       call(
         capability: unknown,
-        methodOrdinal: number,
+        methodId: number,
         params: Uint8Array,
         options?: {
           onQuestionId?: (questionId: number) => void;
@@ -287,9 +287,9 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
   let finishQuestionId = -1;
   let releaseResultCaps = false;
   const client = createClient({
-    call(_capability, methodOrdinal, params, options) {
+    call(_capability, methodId, params, options) {
       callCount += 1;
-      assertEquals(methodOrdinal, 0);
+      assertEquals(methodId, 0);
       const decoded = paramsCodec.decode(params) as Record<string, unknown>;
       assertEquals(Object.keys(decoded).length, 0);
       options?.onQuestionId?.(42);

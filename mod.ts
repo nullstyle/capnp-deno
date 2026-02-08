@@ -168,6 +168,7 @@ export {
   type MiddlewareResult,
   MiddlewareTransport,
   type RpcFrameDirection,
+  type RpcFrameDirectionFilter,
   type RpcIntrospectionCallbacks,
   type RpcMetricsFramesByType,
   type RpcMetricsMiddleware,

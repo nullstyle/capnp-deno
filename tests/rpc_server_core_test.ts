@@ -64,32 +64,32 @@ Deno.test("server core: dispatches to the correct capability by index", async ()
   const bridge = new RpcServerBridge();
   const dispatched: Array<{
     capIndex: number;
-    methodOrdinal: number;
+    methodId: number;
     paramValue: number;
   }> = [];
 
   // Export two capabilities at different indices.
   bridge.exportCapability({
     interfaceId: 0xAAAAn,
-    dispatch: (methodOrdinal, params, ctx) => {
+    dispatch: (methodId, params, ctx) => {
       dispatched.push({
         capIndex: ctx.capability.capabilityIndex,
-        methodOrdinal,
+        methodId,
         paramValue: decodeSingleU32StructMessage(params),
       });
-      return encodeSingleU32StructMessage(100 + methodOrdinal);
+      return encodeSingleU32StructMessage(100 + methodId);
     },
   }, { capabilityIndex: 3 });
 
   bridge.exportCapability({
     interfaceId: 0xBBBBn,
-    dispatch: (methodOrdinal, params, ctx) => {
+    dispatch: (methodId, params, ctx) => {
       dispatched.push({
         capIndex: ctx.capability.capabilityIndex,
-        methodOrdinal,
+        methodId,
         paramValue: decodeSingleU32StructMessage(params),
       });
-      return encodeSingleU32StructMessage(200 + methodOrdinal);
+      return encodeSingleU32StructMessage(200 + methodId);
     },
   }, { capabilityIndex: 7 });
 
@@ -128,10 +128,10 @@ Deno.test("server core: dispatches to the correct capability by index", async ()
   // Verify dispatch routing.
   assertEquals(dispatched.length, 2);
   assertEquals(dispatched[0].capIndex, 3);
-  assertEquals(dispatched[0].methodOrdinal, 5);
+  assertEquals(dispatched[0].methodId, 5);
   assertEquals(dispatched[0].paramValue, 11);
   assertEquals(dispatched[1].capIndex, 7);
-  assertEquals(dispatched[1].methodOrdinal, 2);
+  assertEquals(dispatched[1].methodId, 2);
   assertEquals(dispatched[1].paramValue, 22);
 });
 
@@ -142,7 +142,7 @@ Deno.test("server core: dispatch context includes interfaceId and paramsCapTable
 
   bridge.exportCapability({
     interfaceId: 0xDEADn,
-    dispatch: (_methodOrdinal, _params, ctx) => {
+    dispatch: (_methodId, _params, ctx) => {
       seenInterfaceId = ctx.interfaceId;
       seenParamsCapTable = [...ctx.paramsCapTable];
       return encodeSingleU32StructMessage(0);
@@ -744,8 +744,7 @@ Deno.test("server core: interleaved calls, finishes, and releases work correctly
   const bridge = new RpcServerBridge();
   bridge.exportCapability({
     interfaceId: 0x1234n,
-    dispatch: (methodOrdinal) =>
-      encodeSingleU32StructMessage(methodOrdinal * 10),
+    dispatch: (methodId) => encodeSingleU32StructMessage(methodId * 10),
   }, { capabilityIndex: 0, referenceCount: 5 });
 
   // Call 1.

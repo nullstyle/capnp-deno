@@ -133,7 +133,7 @@ async function createLoopbackClient(
 const bridge = new RpcServerBridge();
 bridge.exportCapability({
   interfaceId: 0x1234n,
-  dispatch: (_methodOrdinal, _params, _ctx) => resultPayload,
+  dispatch: (_methodId, _params, _ctx) => resultPayload,
 }, { capabilityIndex: 5 });
 
 let bridgeFinishCount = 0;

@@ -118,7 +118,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability via ca
     capabilityIndex: number;
     previousBootstrap: number | null;
     currentBootstrap: number | null;
-    methodOrdinal: number;
+    methodId: number;
     errorKind: string;
   }> = [];
   let connectCount = 0;
@@ -158,7 +158,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability via ca
             null,
         currentBootstrap: context.currentBootstrapCapability?.capabilityIndex ??
           null,
-        methodOrdinal: context.methodOrdinal,
+        methodId: context.methodId,
         errorKind: context.error instanceof TransportError
           ? "transport"
           : "other",
@@ -186,7 +186,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability via ca
         capabilityIndex: 99,
         previousBootstrap: 10,
         currentBootstrap: 20,
-        methodOrdinal: 7,
+        methodId: 7,
         errorKind: "transport",
       }]),
     );
@@ -406,7 +406,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability across
     previousBootstrap: number | null;
     currentBootstrap: number | null;
     capability: number;
-    methodOrdinal: number;
+    methodId: number;
   }> = [];
   let connectCount = 0;
 
@@ -445,7 +445,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability across
         currentBootstrap: context.currentBootstrapCapability?.capabilityIndex ??
           null,
         capability: context.capability.capabilityIndex,
-        methodOrdinal: context.methodOrdinal,
+        methodId: context.methodId,
       });
       const currentBootstrap = context.currentBootstrapCapability;
       assert(
@@ -473,7 +473,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capability across
     assertEquals(remapHistory.length, 5);
     for (const entry of remapHistory) {
       assertEquals(entry.capability, 99);
-      assertEquals(entry.methodOrdinal, 7);
+      assertEquals(entry.methodId, 7);
       assert(entry.previousBootstrap !== null, "expected previous bootstrap");
       assert(entry.currentBootstrap !== null, "expected current bootstrap");
       assert(

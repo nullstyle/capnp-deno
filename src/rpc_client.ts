@@ -35,11 +35,11 @@ export interface ClientMiddlewareContext {
   /** The method ordinal within the interface. */
   readonly methodId: number;
   /**
-   * The target capability ID. For imported-cap targets this is the
-   * capability index; for promised-answer targets this is the
-   * question ID of the promise being pipelined.
+   * The capability index of the call target. For imported-cap targets this
+   * is the index in the capability table; for promised-answer targets this
+   * is the question ID of the promise being pipelined.
    */
-  readonly targetCapId: number;
+  readonly capabilityIndex: number;
   /**
    * Mutable key-value map that middleware can use to pass data between hooks
    * and to downstream middleware in the chain.
@@ -106,7 +106,7 @@ export interface RpcClientMiddleware {
    * @param context - The call context.
    */
   onError?: (
-    error: Error,
+    error: unknown,
     context: ClientMiddlewareContext,
   ) => void | Promise<void>;
 }
@@ -564,7 +564,7 @@ export class SessionRpcClientTransport {
    * details on when a `finish` message is actually sent.
    *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
-   * @param methodOrdinal - The zero-based method index within the interface.
+   * @param methodId - The zero-based method index within the interface.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout and abort signal.
    * @returns The raw content bytes of the response struct.
@@ -574,13 +574,13 @@ export class SessionRpcClientTransport {
    */
   async call(
     capability: { capabilityIndex: number },
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     options: RpcClientCallOptions = {},
   ): Promise<Uint8Array> {
     const response = await this.callRaw(
       capability,
-      methodOrdinal,
+      methodId,
       params,
       options,
     );
@@ -601,7 +601,7 @@ export class SessionRpcClientTransport {
    * table entry for this question indefinitely, including timeout/abort paths.
    *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
-   * @param methodOrdinal - The zero-based method index within the interface.
+   * @param methodId - The zero-based method index within the interface.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout, abort signal, and cap table.
    * @returns The full call result including content bytes, cap table, and flags.
@@ -612,7 +612,7 @@ export class SessionRpcClientTransport {
    */
   async callRaw(
     capability: { capabilityIndex: number },
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     options: RpcClientCallOptions = {},
   ): Promise<RpcClientCallResult> {
@@ -625,7 +625,7 @@ export class SessionRpcClientTransport {
       };
 
       const mwCtx = this.#middleware.length > 0
-        ? this.#buildMiddlewareContext(questionId, methodOrdinal, target)
+        ? this.#buildMiddlewareContext(questionId, methodId, target)
         : undefined;
 
       if (mwCtx) {
@@ -635,7 +635,7 @@ export class SessionRpcClientTransport {
       const frame = encodeCallRequestFrame({
         questionId,
         interfaceId: this.#interfaceId,
-        methodId: methodOrdinal,
+        methodId: methodId,
         target,
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
@@ -646,8 +646,7 @@ export class SessionRpcClientTransport {
         message = await this.#request(questionId, frame, options);
       } catch (error) {
         if (mwCtx) {
-          const err = error instanceof Error ? error : new Error(String(error));
-          await this.#runOnError(err, mwCtx);
+          await this.#runOnError(error, mwCtx);
         }
         throw error;
       }
@@ -702,7 +701,7 @@ export class SessionRpcClientTransport {
    * This is the core method for promise pipelining (Level 2 RPC).
    *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
-   * @param methodOrdinal - The zero-based method index within the interface.
+   * @param methodId - The zero-based method index within the interface.
    * @param params - The raw Cap'n Proto params struct bytes.
    * @param options - Call options including timeout and abort signal. Note that
    *   `autoFinish` is ignored by this method.
@@ -715,7 +714,7 @@ export class SessionRpcClientTransport {
    */
   async callRawPipelined(
     capability: { capabilityIndex: number },
-    methodOrdinal: number,
+    methodId: number,
     params: Uint8Array,
     options: RpcClientCallOptions = {},
   ): Promise<{ pipeline: RpcPipeline; result: Promise<RpcClientCallResult> }> {
@@ -728,7 +727,7 @@ export class SessionRpcClientTransport {
       };
 
       const mwCtx = this.#middleware.length > 0
-        ? this.#buildMiddlewareContext(questionId, methodOrdinal, target)
+        ? this.#buildMiddlewareContext(questionId, methodId, target)
         : undefined;
 
       if (mwCtx) {
@@ -738,7 +737,7 @@ export class SessionRpcClientTransport {
       const frame = encodeCallRequestFrame({
         questionId,
         interfaceId: this.#interfaceId,
-        methodId: methodOrdinal,
+        methodId: methodId,
         target,
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
@@ -814,14 +813,14 @@ export class SessionRpcClientTransport {
     methodId: number,
     target: RpcCallTarget,
   ): ClientMiddlewareContext {
-    const targetCapId = target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP
+    const capabilityIndex = target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP
       ? target.importedCap
       : target.promisedAnswer.questionId;
     return {
       questionId,
       interfaceId: this.#interfaceId,
       methodId,
-      targetCapId,
+      capabilityIndex,
       state: new Map(),
     };
   }
@@ -850,7 +849,10 @@ export class SessionRpcClientTransport {
     return result;
   }
 
-  async #runOnError(error: Error, ctx: ClientMiddlewareContext): Promise<void> {
+  async #runOnError(
+    error: unknown,
+    ctx: ClientMiddlewareContext,
+  ): Promise<void> {
     for (const mw of this.#middleware) {
       if (mw.onError) {
         await mw.onError(error, ctx);
@@ -921,8 +923,7 @@ export class SessionRpcClientTransport {
       decoded = await this.#awaitReturn(questionId, options);
     } catch (error) {
       if (mwCtx) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        await this.#runOnError(err, mwCtx);
+        await this.#runOnError(error, mwCtx);
       }
       throw error;
     }

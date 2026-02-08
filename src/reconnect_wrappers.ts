@@ -1,3 +1,13 @@
+/**
+ * Convenience factories for common reconnecting transport patterns.
+ *
+ * Combines {@link connectWithReconnect} with concrete transport constructors
+ * (TCP, WebSocket) and optional {@link RpcSession} wiring to reduce
+ * boilerplate for the most common reconnection setups.
+ *
+ * @module
+ */
+
 import {
   connectWithReconnect,
   type ConnectWithReconnectOptions,

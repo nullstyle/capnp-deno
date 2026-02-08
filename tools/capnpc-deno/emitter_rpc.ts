@@ -80,7 +80,7 @@ export function emitRpcModule(
   out.push("");
   out.push("export interface RpcCallContext {");
   out.push("  readonly capability: CapabilityPointer;");
-  out.push("  readonly methodOrdinal: number;");
+  out.push("  readonly methodId: number;");
   out.push("  readonly questionId?: number;");
   out.push("  readonly interfaceId?: bigint;");
   out.push("}");
@@ -88,7 +88,7 @@ export function emitRpcModule(
   out.push("export interface RpcClientTransport {");
   out.push("  call(");
   out.push("    capability: CapabilityPointer,");
-  out.push("    methodOrdinal: number,");
+  out.push("    methodId: number,");
   out.push("    params: Uint8Array,");
   out.push("    options?: RpcCallOptions,");
   out.push("  ): Promise<Uint8Array>;");
@@ -99,7 +99,7 @@ export function emitRpcModule(
   out.push("export interface RpcServerDispatch {");
   out.push("  readonly interfaceId: bigint;");
   out.push("  dispatch(");
-  out.push("    methodOrdinal: number,");
+  out.push("    methodId: number,");
   out.push("    params: Uint8Array,");
   out.push("    ctx: RpcCallContext,");
   out.push("  ): Promise<Uint8Array>;");
@@ -224,9 +224,9 @@ function emitInterfaceCode(
   out.push("  return {");
   out.push(`    interfaceId: ${info.typeName}InterfaceId,`);
   out.push(
-    "    dispatch: async (methodOrdinal: number, params: Uint8Array, ctx: RpcCallContext): Promise<Uint8Array> => {",
+    "    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<Uint8Array> => {",
   );
-  out.push("      switch (methodOrdinal) {");
+  out.push("      switch (methodId) {");
   for (const method of methods) {
     const params = structById.get(method.paramStructTypeId);
     const results = structById.get(method.resultStructTypeId);
@@ -251,7 +251,7 @@ function emitInterfaceCode(
     out.push("        }");
   }
   out.push("        default:");
-  out.push('          throw new Error("unknown method ordinal: " + methodOrdinal);');
+  out.push('          throw new Error("unknown method ordinal: " + methodId);');
   out.push("      }");
   out.push("    },");
   out.push("  };");

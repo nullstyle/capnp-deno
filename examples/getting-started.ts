@@ -190,9 +190,9 @@ async function _serverRuntimeExample() {
   const interfaceId = 0xabcd_1234_5678_9012n;
   const dispatch: RpcServerDispatch = {
     interfaceId,
-    dispatch(methodOrdinal, params, ctx) {
+    dispatch(methodId, params, ctx) {
       console.log(
-        `Received call: interface=${ctx.interfaceId} method=${methodOrdinal} params=${params.byteLength}b`,
+        `Received call: interface=${ctx.interfaceId} method=${methodId} params=${params.byteLength}b`,
       );
 
       // Return a response (can be a Uint8Array or an RpcCallResponse object)
