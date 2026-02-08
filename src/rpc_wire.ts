@@ -1,8 +1,10 @@
 import { ProtocolError } from "./errors.ts";
 
 const WORD_BYTES = 8;
+const MASK_29 = 0x1fff_ffffn;
 const MASK_30 = 0x3fff_ffffn;
 const POINTER_OFFSET_MASK = MASK_30 << 2n;
+const FAR_POINTER_HOP_LIMIT = 8;
 
 /** Tag value for a Cap'n Proto RPC Call message. */
 export const RPC_MESSAGE_TAG_CALL = 2;
@@ -169,21 +171,33 @@ export interface RpcReturnExceptionFrameRequest {
 }
 
 interface StructRef {
+  segmentId: number;
   startWord: number;
   dataWordCount: number;
   pointerCount: number;
 }
 
 interface ByteListRef {
+  segmentId: number;
   startWord: number;
   elementCount: number;
 }
 
 interface StructListRef {
+  segmentId: number;
   elementsStartWord: number;
   elementCount: number;
   dataWordCount: number;
   pointerCount: number;
+}
+
+/**
+ * Parsed representation of a multi-segment Cap'n Proto frame.
+ * Provides per-segment DataViews and word-level read access with
+ * bounds checking and far pointer resolution.
+ */
+interface SegmentTable {
+  readonly segments: Uint8Array[];
 }
 
 function signed30(value: bigint): number {
@@ -204,23 +218,68 @@ function ensureRange(
   }
 }
 
-function segmentFromFrame(frame: Uint8Array): Uint8Array {
+function segmentsFromFrame(frame: Uint8Array): SegmentTable {
   if (frame.byteLength < 8) {
     throw new ProtocolError("rpc frame is too short");
   }
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const segmentCount = view.getUint32(0, true) + 1;
-  if (segmentCount !== 1) {
+
+  // Header: (segmentCount + 1) u32 values, padded to 8-byte alignment.
+  // First u32 is segmentCount-1, followed by segmentCount u32 word counts.
+  const headerU32Count = 1 + segmentCount;
+  const headerBytes = Math.ceil((headerU32Count * 4) / WORD_BYTES) * WORD_BYTES;
+  if (frame.byteLength < headerBytes) {
+    throw new ProtocolError("rpc frame header is truncated");
+  }
+
+  const segments: Uint8Array[] = [];
+  let cursor = headerBytes;
+  for (let i = 0; i < segmentCount; i += 1) {
+    const segmentWords = view.getUint32(4 + i * 4, true);
+    const segmentBytes = segmentWords * WORD_BYTES;
+    if (cursor + segmentBytes > frame.byteLength) {
+      throw new ProtocolError("rpc frame segment payload is truncated");
+    }
+    segments.push(frame.subarray(cursor, cursor + segmentBytes));
+    cursor += segmentBytes;
+  }
+
+  return { segments };
+}
+
+/**
+ * Legacy single-segment accessor for encoding paths that always produce
+ * single-segment messages. Rejects multi-segment input.
+ */
+function segmentFromFrame(frame: Uint8Array): Uint8Array {
+  const table = segmentsFromFrame(frame);
+  if (table.segments.length !== 1) {
     throw new ProtocolError(
-      `rpc frame currently supports single segment only, got ${segmentCount}`,
+      `expected single-segment payload message, got ${table.segments.length}`,
     );
   }
-  const segmentWords = view.getUint32(4, true);
-  const segmentBytes = segmentWords * WORD_BYTES;
-  if (frame.byteLength < 8 + segmentBytes) {
-    throw new ProtocolError("rpc frame segment payload is truncated");
+  return table.segments[0];
+}
+
+function ensureSegmentRange(
+  table: SegmentTable,
+  segmentId: number,
+  byteOffset: number,
+  len: number,
+  context: string,
+): void {
+  if (segmentId < 0 || segmentId >= table.segments.length) {
+    throw new ProtocolError(
+      `${context} references missing segment ${segmentId}`,
+    );
   }
-  return frame.subarray(8, 8 + segmentBytes);
+  const seg = table.segments[segmentId];
+  if (byteOffset < 0 || byteOffset + len > seg.byteLength) {
+    throw new ProtocolError(
+      `${context} out of range: segment=${segmentId} offset=${byteOffset} len=${len} segmentSize=${seg.byteLength}`,
+    );
+  }
 }
 
 function frameFromSegment(segment: Uint8Array): Uint8Array {
@@ -247,6 +306,135 @@ function readWord(segment: Uint8Array, wordIndex: number): bigint {
     segment.byteLength,
   );
   return view.getBigUint64(byteOffset, true);
+}
+
+function readWordFromTable(
+  table: SegmentTable,
+  segmentId: number,
+  wordIndex: number,
+  context: string,
+): bigint {
+  ensureSegmentRange(
+    table,
+    segmentId,
+    wordIndex * WORD_BYTES,
+    WORD_BYTES,
+    context,
+  );
+  const seg = table.segments[segmentId];
+  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+    .getBigUint64(wordIndex * WORD_BYTES, true);
+}
+
+/**
+ * Result of resolving a pointer through any far pointer indirection.
+ * After resolution, segmentId/pointerWord point at the effective pointer
+ * word and `word` holds its content (a struct or list pointer, not far).
+ *
+ * For a double-far pointer the effective pointer word is a synthetic
+ * location in the target segment; `word` is the tag word from the
+ * landing pad, and the struct/list data starts at `pointerWord` in
+ * `segmentId`.
+ */
+interface ResolvedPointer {
+  segmentId: number;
+  pointerWord: number;
+  word: bigint;
+}
+
+function resolvePointer(
+  table: SegmentTable,
+  segmentId: number,
+  pointerWord: number,
+): ResolvedPointer {
+  let curSegment = segmentId;
+  let curWord = pointerWord;
+  let word = readWordFromTable(table, curSegment, curWord, "resolvePointer");
+
+  for (let hop = 0; hop < FAR_POINTER_HOP_LIMIT; hop += 1) {
+    const kind = Number(word & 0x3n);
+    if (kind !== 2) {
+      return { segmentId: curSegment, pointerWord: curWord, word };
+    }
+
+    const isDoubleFar = ((word >> 2n) & 0x1n) === 1n;
+    const landingPadWord = Number((word >> 3n) & MASK_29);
+    const landingSegmentId = Number((word >> 32n) & 0xffff_ffffn);
+
+    if (!isDoubleFar) {
+      // Single-far: the landing pad is an ordinary (non-far) pointer in the
+      // target segment. Its offset field is relative to the landing pad word.
+      curSegment = landingSegmentId;
+      curWord = landingPadWord;
+      word = readWordFromTable(
+        table,
+        curSegment,
+        curWord,
+        "single-far landing pointer",
+      );
+      continue;
+    }
+
+    // Double-far: two words in the landing segment.
+    // pad[0] is a far pointer to the actual data (segment + offset).
+    // pad[1] is a tag word (struct or list pointer with offset=0).
+    ensureSegmentRange(
+      table,
+      landingSegmentId,
+      landingPadWord * WORD_BYTES,
+      2 * WORD_BYTES,
+      "double-far landing pad",
+    );
+
+    const pad0 = readWordFromTable(
+      table,
+      landingSegmentId,
+      landingPadWord,
+      "double-far landing pad[0]",
+    );
+    const pad0Kind = Number(pad0 & 0x3n);
+    if (pad0Kind !== 2) {
+      throw new ProtocolError(
+        `double-far landing pad[0] must be far pointer, got kind=${pad0Kind}`,
+      );
+    }
+    const pad0IsDoubleFar = ((pad0 >> 2n) & 0x1n) === 1n;
+    if (pad0IsDoubleFar) {
+      throw new ProtocolError(
+        "double-far landing pad[0] must be a single-far pointer",
+      );
+    }
+
+    const targetSegment = Number((pad0 >> 32n) & 0xffff_ffffn);
+    const targetWord = Number((pad0 >> 3n) & MASK_29);
+    ensureSegmentRange(
+      table,
+      targetSegment,
+      targetWord * WORD_BYTES,
+      WORD_BYTES,
+      "double-far target word",
+    );
+
+    const tagWord = readWordFromTable(
+      table,
+      landingSegmentId,
+      landingPadWord + 1,
+      "double-far landing pad[1]",
+    );
+
+    // The tag word is a struct/list pointer whose offset field is
+    // interpreted as 0 (relative to targetWord). We synthesize a
+    // ResolvedPointer where `pointerWord` is (targetWord - 1) so
+    // that the standard `pointerWord + 1 + offset` arithmetic
+    // resolves to `targetWord` (since offset in the tag is 0).
+    return {
+      segmentId: targetSegment,
+      pointerWord: targetWord - 1,
+      word: tagWord,
+    };
+  }
+
+  throw new ProtocolError("far pointer chain exceeded maximum hop count");
 }
 
 function writeWord(
@@ -305,27 +493,33 @@ function rebaseCopiedRootPointer(
 }
 
 function extractPointerContentAsMessage(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
   context: string,
 ): Uint8Array {
-  const contentPointer = readWord(segment, pointerWord);
-  if (contentPointer === 0n) {
+  const resolved = resolvePointer(table, loc.segmentId, loc.wordIndex);
+  if (resolved.word === 0n) {
     return new Uint8Array(EMPTY_STRUCT_MESSAGE);
   }
+
+  // The resolved pointer lives in a specific segment.  For single-segment
+  // frames we use the original fast path.  For multi-segment frames
+  // (or when far pointers are involved) we also use the segment the pointer
+  // resolved to.
+  const seg = table.segments[resolved.segmentId];
   const rebasedRoot = rebasePointerWord(
-    contentPointer,
-    pointerWord,
+    resolved.word,
+    resolved.pointerWord,
     0,
     context,
   );
-  const outSegment = new Uint8Array(segment);
+  const outSegment = new Uint8Array(seg);
   writeWord(outSegment, 0, rebasedRoot);
   return frameFromSegment(outSegment);
 }
 
 function readU16InStruct(
-  segment: Uint8Array,
+  table: SegmentTable,
   structRef: StructRef,
   byteOffset: number,
 ): number {
@@ -333,16 +527,14 @@ function readU16InStruct(
     throw new ProtocolError(`readU16InStruct out of range: ${byteOffset}`);
   }
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
-  ensureRange(segment, absolute, 2, "readU16InStruct");
-  return new DataView(
-    segment.buffer,
-    segment.byteOffset,
-    segment.byteLength,
-  ).getUint16(absolute, true);
+  const seg = table.segments[structRef.segmentId];
+  ensureRange(seg, absolute, 2, "readU16InStruct");
+  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+    .getUint16(absolute, true);
 }
 
 function readU32InStruct(
-  segment: Uint8Array,
+  table: SegmentTable,
   structRef: StructRef,
   byteOffset: number,
 ): number {
@@ -350,16 +542,14 @@ function readU32InStruct(
     throw new ProtocolError(`readU32InStruct out of range: ${byteOffset}`);
   }
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
-  ensureRange(segment, absolute, 4, "readU32InStruct");
-  return new DataView(
-    segment.buffer,
-    segment.byteOffset,
-    segment.byteLength,
-  ).getUint32(absolute, true);
+  const seg = table.segments[structRef.segmentId];
+  ensureRange(seg, absolute, 4, "readU32InStruct");
+  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+    .getUint32(absolute, true);
 }
 
 function readU64InStruct(
-  segment: Uint8Array,
+  table: SegmentTable,
   structRef: StructRef,
   byteOffset: number,
 ): bigint {
@@ -367,40 +557,53 @@ function readU64InStruct(
     throw new ProtocolError(`readU64InStruct out of range: ${byteOffset}`);
   }
   const absolute = structRef.startWord * WORD_BYTES + byteOffset;
-  ensureRange(segment, absolute, 8, "readU64InStruct");
-  return new DataView(
-    segment.buffer,
-    segment.byteOffset,
-    segment.byteLength,
-  ).getBigUint64(absolute, true);
+  const seg = table.segments[structRef.segmentId];
+  ensureRange(seg, absolute, 8, "readU64InStruct");
+  return new DataView(seg.buffer, seg.byteOffset, seg.byteLength)
+    .getBigUint64(absolute, true);
 }
 
-function pointerWordIndex(structRef: StructRef, pointerOffset: number): number {
+interface PointerLocation {
+  segmentId: number;
+  wordIndex: number;
+}
+
+function pointerWordIndex(
+  structRef: StructRef,
+  pointerOffset: number,
+): PointerLocation {
   if (pointerOffset < 0 || pointerOffset >= structRef.pointerCount) {
     throw new ProtocolError(`pointer offset out of range: ${pointerOffset}`);
   }
-  return structRef.startWord + structRef.dataWordCount + pointerOffset;
+  return {
+    segmentId: structRef.segmentId,
+    wordIndex: structRef.startWord + structRef.dataWordCount + pointerOffset,
+  };
 }
 
 function decodeStructPointer(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
 ): StructRef | null {
-  const word = readWord(segment, pointerWord);
-  if (word === 0n) return null;
-  const kind = Number(word & 0x3n);
+  const resolved = resolvePointer(table, loc.segmentId, loc.wordIndex);
+  if (resolved.word === 0n) return null;
+  const kind = Number(resolved.word & 0x3n);
   if (kind !== 0) {
     throw new ProtocolError(`expected struct pointer, got kind=${kind}`);
   }
-  const offsetWords = signed30((word >> 2n) & MASK_30);
-  const dataWordCount = Number((word >> 32n) & 0xffffn);
-  const pointerCount = Number((word >> 48n) & 0xffffn);
-  const startWord = pointerWord + 1 + offsetWords;
+  const offsetWords = signed30((resolved.word >> 2n) & MASK_30);
+  const dataWordCount = Number((resolved.word >> 32n) & 0xffffn);
+  const pointerCount = Number((resolved.word >> 48n) & 0xffffn);
+  const startWord = resolved.pointerWord + 1 + offsetWords;
   const words = dataWordCount + pointerCount;
-  if (startWord < 0 || (startWord + words) * WORD_BYTES > segment.byteLength) {
+  const seg = table.segments[resolved.segmentId];
+  if (
+    !seg || startWord < 0 || (startWord + words) * WORD_BYTES > seg.byteLength
+  ) {
     throw new ProtocolError("struct pointer target out of range");
   }
   return {
+    segmentId: resolved.segmentId,
     startWord,
     dataWordCount,
     pointerCount,
@@ -408,55 +611,63 @@ function decodeStructPointer(
 }
 
 function decodeByteListPointer(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
 ): ByteListRef | null {
-  const word = readWord(segment, pointerWord);
-  if (word === 0n) return null;
-  const kind = Number(word & 0x3n);
+  const resolved = resolvePointer(table, loc.segmentId, loc.wordIndex);
+  if (resolved.word === 0n) return null;
+  const kind = Number(resolved.word & 0x3n);
   if (kind !== 1) {
     throw new ProtocolError(`expected list pointer, got kind=${kind}`);
   }
-  const offsetWords = signed30((word >> 2n) & MASK_30);
-  const elementSize = Number((word >> 32n) & 0x7n);
-  const elementCount = Number((word >> 35n) & 0x1fff_ffffn);
+  const offsetWords = signed30((resolved.word >> 2n) & MASK_30);
+  const elementSize = Number((resolved.word >> 32n) & 0x7n);
+  const elementCount = Number((resolved.word >> 35n) & 0x1fff_ffffn);
   if (elementSize !== 2) {
     throw new ProtocolError(
       `expected byte list element size, got ${elementSize}`,
     );
   }
-  const startWord = pointerWord + 1 + offsetWords;
+  const startWord = resolved.pointerWord + 1 + offsetWords;
   const wordCount = Math.ceil(elementCount / WORD_BYTES);
+  const seg = table.segments[resolved.segmentId];
   if (
-    startWord < 0 || (startWord + wordCount) * WORD_BYTES > segment.byteLength
+    !seg || startWord < 0 ||
+    (startWord + wordCount) * WORD_BYTES > seg.byteLength
   ) {
     throw new ProtocolError("byte list pointer target out of range");
   }
   return {
+    segmentId: resolved.segmentId,
     startWord,
     elementCount,
   };
 }
 
 function decodeStructListPointer(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
 ): StructListRef | null {
-  const word = readWord(segment, pointerWord);
-  if (word === 0n) return null;
-  const kind = Number(word & 0x3n);
+  const resolved = resolvePointer(table, loc.segmentId, loc.wordIndex);
+  if (resolved.word === 0n) return null;
+  const kind = Number(resolved.word & 0x3n);
   if (kind !== 1) {
     throw new ProtocolError(`expected list pointer, got kind=${kind}`);
   }
-  const offsetWords = signed30((word >> 2n) & MASK_30);
-  const elementSize = Number((word >> 32n) & 0x7n);
+  const offsetWords = signed30((resolved.word >> 2n) & MASK_30);
+  const elementSize = Number((resolved.word >> 32n) & 0x7n);
   if (elementSize !== 7) {
     throw new ProtocolError(
       `expected inline composite list pointer, got elementSize=${elementSize}`,
     );
   }
-  const tagWord = pointerWord + 1 + offsetWords;
-  const tag = readWord(segment, tagWord);
+  const tagWord = resolved.pointerWord + 1 + offsetWords;
+  const tag = readWordFromTable(
+    table,
+    resolved.segmentId,
+    tagWord,
+    "inline composite tag",
+  );
   const tagKind = Number(tag & 0x3n);
   if (tagKind !== 0) {
     throw new ProtocolError(`invalid inline composite tag kind=${tagKind}`);
@@ -465,6 +676,7 @@ function decodeStructListPointer(
   const dataWordCount = Number((tag >> 32n) & 0xffffn);
   const pointerCount = Number((tag >> 48n) & 0xffffn);
   return {
+    segmentId: resolved.segmentId,
     elementsStartWord: tagWord + 1,
     elementCount,
     dataWordCount,
@@ -473,11 +685,11 @@ function decodeStructListPointer(
 }
 
 function decodeCapTableFromPayload(
-  segment: Uint8Array,
-  payloadPointerWord: number,
+  table: SegmentTable,
+  payloadPointerLoc: PointerLocation,
 ): RpcCapDescriptor[] {
   const capTable: RpcCapDescriptor[] = [];
-  const capList = decodeStructListPointer(segment, payloadPointerWord);
+  const capList = decodeStructListPointer(table, payloadPointerLoc);
   if (!capList) {
     return capTable;
   }
@@ -486,13 +698,14 @@ function decodeCapTableFromPayload(
   for (let i = 0; i < capList.elementCount; i += 1) {
     const itemStart = capList.elementsStartWord + (i * stride);
     const itemRef: StructRef = {
+      segmentId: capList.segmentId,
       startWord: itemStart,
       dataWordCount: capList.dataWordCount,
       pointerCount: capList.pointerCount,
     };
     capTable.push({
-      tag: readU16InStruct(segment, itemRef, 0),
-      id: readU32InStruct(segment, itemRef, 4),
+      tag: readU16InStruct(table, itemRef, 0),
+      id: readU32InStruct(table, itemRef, 4),
     });
   }
 
@@ -500,15 +713,16 @@ function decodeCapTableFromPayload(
 }
 
 function readTextFromPointer(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
 ): string | null {
-  const list = decodeByteListPointer(segment, pointerWord);
+  const list = decodeByteListPointer(table, loc);
   if (!list) return null;
+  const seg = table.segments[list.segmentId];
   const start = list.startWord * WORD_BYTES;
   const end = start + list.elementCount;
-  ensureRange(segment, start, list.elementCount, "readTextFromPointer");
-  const bytes = segment.subarray(start, end);
+  ensureRange(seg, start, list.elementCount, "readTextFromPointer");
+  const bytes = seg.subarray(start, end);
   const payload = bytes.byteLength > 0 && bytes[bytes.byteLength - 1] === 0
     ? bytes.subarray(0, bytes.byteLength - 1)
     : bytes;
@@ -634,21 +848,22 @@ function encodePromisedAnswerTransform(
 }
 
 function decodePromisedAnswerTransform(
-  segment: Uint8Array,
-  pointerWord: number,
+  table: SegmentTable,
+  loc: PointerLocation,
 ): RpcPromisedAnswerOp[] {
-  const list = decodeStructListPointer(segment, pointerWord);
+  const list = decodeStructListPointer(table, loc);
   if (!list) return [];
   const stride = list.dataWordCount + list.pointerCount;
   const out: RpcPromisedAnswerOp[] = [];
   for (let i = 0; i < list.elementCount; i += 1) {
     const elemWord = list.elementsStartWord + (i * stride);
     const elemRef: StructRef = {
+      segmentId: list.segmentId,
       startWord: elemWord,
       dataWordCount: list.dataWordCount,
       pointerCount: list.pointerCount,
     };
-    const tag = readU16InStruct(segment, elemRef, 0);
+    const tag = readU16InStruct(table, elemRef, 0);
     if (tag === RPC_PROMISED_ANSWER_OP_TAG_NOOP) {
       out.push({ tag: RPC_PROMISED_ANSWER_OP_TAG_NOOP });
       continue;
@@ -656,7 +871,7 @@ function decodePromisedAnswerTransform(
     if (tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
       out.push({
         tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
-        pointerIndex: readU16InStruct(segment, elemRef, 2),
+        pointerIndex: readU16InStruct(table, elemRef, 2),
       });
       continue;
     }
@@ -666,19 +881,19 @@ function decodePromisedAnswerTransform(
 }
 
 function decodeCallTarget(
-  segment: Uint8Array,
+  table: SegmentTable,
   target: StructRef,
 ): RpcCallTarget {
-  const targetTag = readU16InStruct(segment, target, 4);
+  const targetTag = readU16InStruct(table, target, 4);
   if (targetTag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
     return {
       tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
-      importedCap: readU32InStruct(segment, target, 0),
+      importedCap: readU32InStruct(table, target, 0),
     };
   }
   if (targetTag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
     const promisedRef = decodeStructPointer(
-      segment,
+      table,
       pointerWordIndex(target, 0),
     );
     if (!promisedRef) {
@@ -687,9 +902,9 @@ function decodeCallTarget(
     return {
       tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
       promisedAnswer: {
-        questionId: readU32InStruct(segment, promisedRef, 0),
+        questionId: readU32InStruct(table, promisedRef, 0),
         transform: decodePromisedAnswerTransform(
-          segment,
+          table,
           pointerWordIndex(promisedRef, 0),
         ),
       },
@@ -767,11 +982,11 @@ function encodeReturnFlags(
   builder.writeU32(returnWord, 4, flags);
 }
 
-function decodeReturnFlags(segment: Uint8Array, ret: StructRef): {
+function decodeReturnFlags(table: SegmentTable, ret: StructRef): {
   releaseParamCaps: boolean;
   noFinishNeeded: boolean;
 } {
-  const flags = readU32InStruct(segment, ret, 4);
+  const flags = readU32InStruct(table, ret, 4);
   return {
     releaseParamCaps: (flags & 0x1) === 0,
     noFinishNeeded: (flags & 0x2) !== 0,
@@ -973,10 +1188,10 @@ class MessageBuilder {
  * @throws {ProtocolError} If the frame is too short or malformed.
  */
 export function decodeRpcMessageTag(frame: Uint8Array): number {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  return readU16InStruct(segment, root, 0);
+  return readU16InStruct(table, root, 0);
 }
 
 /**
@@ -1207,16 +1422,16 @@ export function encodeReturnExceptionFrame(
 export function decodeBootstrapRequestFrame(
   frame: Uint8Array,
 ): RpcBootstrapRequest {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(segment, root, 0) !== RPC_MESSAGE_TAG_BOOTSTRAP) {
+  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_BOOTSTRAP) {
     throw new ProtocolError("rpc message is not bootstrap");
   }
-  const bootstrap = decodeStructPointer(segment, pointerWordIndex(root, 0));
+  const bootstrap = decodeStructPointer(table, pointerWordIndex(root, 0));
   if (!bootstrap) throw new ProtocolError("bootstrap payload pointer is null");
   return {
-    questionId: readU32InStruct(segment, bootstrap, 0),
+    questionId: readU32InStruct(table, bootstrap, 0),
   };
 }
 
@@ -1228,39 +1443,39 @@ export function decodeBootstrapRequestFrame(
  * @throws {ProtocolError} If the frame is not a valid call message.
  */
 export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(segment, root, 0) !== RPC_MESSAGE_TAG_CALL) {
+  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_CALL) {
     throw new ProtocolError("rpc message is not call");
   }
-  const call = decodeStructPointer(segment, pointerWordIndex(root, 0));
+  const call = decodeStructPointer(table, pointerWordIndex(root, 0));
   if (!call) throw new ProtocolError("call payload pointer is null");
-  const target = decodeStructPointer(segment, pointerWordIndex(call, 0));
+  const target = decodeStructPointer(table, pointerWordIndex(call, 0));
   if (!target) throw new ProtocolError("call target pointer is null");
-  const callTarget = decodeCallTarget(segment, target);
+  const callTarget = decodeCallTarget(table, target);
 
   let paramsContent = new Uint8Array(EMPTY_STRUCT_MESSAGE);
   let paramsCapTable: RpcCapDescriptor[] = [];
-  const payload = decodeStructPointer(segment, pointerWordIndex(call, 1));
+  const payload = decodeStructPointer(table, pointerWordIndex(call, 1));
   if (payload) {
     paramsContent = new Uint8Array(
       extractPointerContentAsMessage(
-        segment,
+        table,
         pointerWordIndex(payload, 0),
         "decodeCallRequestFrame",
       ),
     );
     paramsCapTable = decodeCapTableFromPayload(
-      segment,
+      table,
       pointerWordIndex(payload, 1),
     );
   }
 
   const request: RpcCallRequest = {
-    questionId: readU32InStruct(segment, call, 0),
-    interfaceId: readU64InStruct(segment, call, 8),
-    methodId: readU16InStruct(segment, call, 4),
+    questionId: readU32InStruct(table, call, 0),
+    interfaceId: readU64InStruct(table, call, 8),
+    methodId: readU16InStruct(table, call, 4),
     target: callTarget,
     paramsContent,
     paramsCapTable,
@@ -1279,17 +1494,17 @@ export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
  * @throws {ProtocolError} If the frame is not a valid finish message.
  */
 export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(segment, root, 0) !== RPC_MESSAGE_TAG_FINISH) {
+  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_FINISH) {
     throw new ProtocolError("rpc message is not finish");
   }
-  const finish = decodeStructPointer(segment, pointerWordIndex(root, 0));
+  const finish = decodeStructPointer(table, pointerWordIndex(root, 0));
   if (!finish) throw new ProtocolError("finish payload pointer is null");
-  const flags = readU32InStruct(segment, finish, 4);
+  const flags = readU32InStruct(table, finish, 4);
   return {
-    questionId: readU32InStruct(segment, finish, 0),
+    questionId: readU32InStruct(table, finish, 0),
     releaseResultCaps: (flags & 0x1) === 0,
     requireEarlyCancellation: (flags & 0x2) === 0,
   };
@@ -1303,17 +1518,17 @@ export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {
  * @throws {ProtocolError} If the frame is not a valid release message.
  */
 export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(segment, root, 0) !== RPC_MESSAGE_TAG_RELEASE) {
+  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_RELEASE) {
     throw new ProtocolError("rpc message is not release");
   }
-  const release = decodeStructPointer(segment, pointerWordIndex(root, 0));
+  const release = decodeStructPointer(table, pointerWordIndex(root, 0));
   if (!release) throw new ProtocolError("release payload pointer is null");
   return {
-    id: readU32InStruct(segment, release, 0),
-    referenceCount: readU32InStruct(segment, release, 4),
+    id: readU32InStruct(table, release, 0),
+    referenceCount: readU32InStruct(table, release, 4),
   };
 }
 
@@ -1325,25 +1540,25 @@ export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
  * @throws {ProtocolError} If the frame is not a valid return message.
  */
 export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
-  const segment = segmentFromFrame(frame);
-  const root = decodeStructPointer(segment, 0);
+  const table = segmentsFromFrame(frame);
+  const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(segment, root, 0) !== RPC_MESSAGE_TAG_RETURN) {
+  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_RETURN) {
     throw new ProtocolError("rpc message is not return");
   }
-  const ret = decodeStructPointer(segment, pointerWordIndex(root, 0));
+  const ret = decodeStructPointer(table, pointerWordIndex(root, 0));
   if (!ret) throw new ProtocolError("return payload pointer is null");
 
-  const answerId = readU32InStruct(segment, ret, 0);
-  const tag = readU16InStruct(segment, ret, 6);
-  const returnFlags = decodeReturnFlags(segment, ret);
+  const answerId = readU32InStruct(table, ret, 0);
+  const tag = readU16InStruct(table, ret, 6);
+  const returnFlags = decodeReturnFlags(table, ret);
 
   if (tag === RETURN_TAG_EXCEPTION) {
-    const ex = decodeStructPointer(segment, pointerWordIndex(ret, 0));
+    const ex = decodeStructPointer(table, pointerWordIndex(ret, 0));
     if (!ex) {
       throw new ProtocolError("return.exception payload pointer is null");
     }
-    const reason = readTextFromPointer(segment, pointerWordIndex(ex, 0)) ?? "";
+    const reason = readTextFromPointer(table, pointerWordIndex(ex, 0)) ?? "";
     return {
       kind: "exception",
       answerId,
@@ -1354,20 +1569,20 @@ export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   }
 
   if (tag === RETURN_TAG_RESULTS) {
-    const payload = decodeStructPointer(segment, pointerWordIndex(ret, 0));
+    const payload = decodeStructPointer(table, pointerWordIndex(ret, 0));
     const capTable: RpcCapDescriptor[] = [];
     let contentBytes = new Uint8Array(EMPTY_STRUCT_MESSAGE);
 
     if (payload) {
       contentBytes = new Uint8Array(
         extractPointerContentAsMessage(
-          segment,
+          table,
           pointerWordIndex(payload, 0),
           "decodeReturnFrame",
         ),
       );
       const payloadCapTable = decodeCapTableFromPayload(
-        segment,
+        table,
         pointerWordIndex(payload, 1),
       );
       capTable.push(...payloadCapTable);

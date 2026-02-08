@@ -140,6 +140,15 @@ export {
   type CreateRpcSessionWithReconnectOptions,
 } from "./src/reconnect_wrappers.ts";
 export {
+  createFrameSizeLimitMiddleware,
+  createLoggingMiddleware,
+  type FrameSizeLimitMiddlewareOptions,
+  type LoggingMiddlewareOptions,
+  type MiddlewareResult,
+  MiddlewareTransport,
+  type RpcTransportMiddleware,
+} from "./src/middleware.ts";
+export {
   MessagePortTransport,
   type MessagePortTransportOptions,
 } from "./src/transports/message_port.ts";

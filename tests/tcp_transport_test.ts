@@ -752,3 +752,53 @@ Deno.test("TcpTransport close is idempotent", async () => {
 
   assertEquals(fake.getCloseCalls(), 1);
 });
+
+Deno.test("TcpTransport drain loop does not start duplicate loops under rapid send interleaving", async () => {
+  // Simulate a write that yields to the event loop, creating a window where
+  // a second send() could race with the .finally() block that resets the drain
+  // loop state. With the #draining flag fix, only one drain loop should ever
+  // be active at a time.
+  let concurrentDrains = 0;
+  let maxConcurrentDrains = 0;
+  let writeCallCount = 0;
+
+  const fake = createFakeConn({
+    write(buffer) {
+      writeCallCount += 1;
+      concurrentDrains += 1;
+      if (concurrentDrains > maxConcurrentDrains) {
+        maxConcurrentDrains = concurrentDrains;
+      }
+      // Return a promise that yields to the event loop, giving send() a
+      // chance to interleave and potentially start a second drain loop.
+      return new Promise<number>((resolve) => {
+        setTimeout(() => {
+          concurrentDrains -= 1;
+          resolve(buffer.byteLength);
+        }, 1);
+      });
+    },
+  });
+
+  const transport = new TcpTransport(fake.conn);
+
+  try {
+    transport.start((_frame) => {});
+
+    // Fire many sends rapidly without awaiting, so they all queue up and
+    // each .finally() re-check could race with the next send() call.
+    const sends: Promise<void>[] = [];
+    for (let i = 0; i < 20; i++) {
+      sends.push(transport.send(new Uint8Array([i])));
+    }
+
+    await Promise.all(sends);
+
+    // All 20 frames should have been written exactly once each.
+    assertEquals(writeCallCount, 20);
+    // The drain loop should never have been running concurrently with itself.
+    assertEquals(maxConcurrentDrains, 1);
+  } finally {
+    await transport.close();
+  }
+});

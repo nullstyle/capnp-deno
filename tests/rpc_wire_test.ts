@@ -286,7 +286,8 @@ Deno.test("rpc wire bootstrap capability extraction reports failure cases", () =
   );
 });
 
-Deno.test("rpc wire rejects multi-segment frames", () => {
+Deno.test("rpc wire rejects truncated multi-segment frame header", () => {
+  // Two segments declared, but no room for the second segment size.
   const frame = new Uint8Array(8);
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   // segmentCountMinusOne=1 => two segments.
@@ -294,7 +295,7 @@ Deno.test("rpc wire rejects multi-segment frames", () => {
 
   assertThrows(
     () => decodeCallRequestFrame(frame),
-    /single segment only, got 2/i,
+    /rpc frame header is truncated/i,
   );
 });
 
@@ -412,7 +413,10 @@ Deno.test("rpc wire rejects unsupported promisedAnswer transform op tags", () =>
   );
 });
 
-Deno.test("rpc wire rejects far pointers in payload rebasing paths", () => {
+Deno.test("rpc wire resolves far pointers in content pointer during decode", () => {
+  // When a content pointer slot contains a far pointer in a single-segment
+  // message, the far pointer resolution follows it within the same segment.
+  // This verifies no crash occurs and the decoder proceeds.
   const frame = withFrameMutation(
     encodeCallRequestFrame({
       questionId: 3,
@@ -423,15 +427,22 @@ Deno.test("rpc wire rejects far pointers in payload rebasing paths", () => {
     }),
     (view) => {
       // Payload struct is at word 11; pointer slot 0 (content) at word 11.
-      // Force a far pointer kind.
-      view.setBigUint64(8 + (11 * 8), 2n, true);
+      // Set a single-far pointer to segment 0, word 13 (where the actual
+      // content struct pointer data lives).
+      // Far pointer: kind=2, doubleFar=0, offset=13 words, segmentId=0
+      const farPtr = 2n | (13n << 3n) | (0n << 32n);
+      view.setBigUint64(8 + (11 * 8), farPtr, true);
+      // At word 13 write a struct pointer with offset=0, data=1, ptr=0
+      // pointing to word 14 which contains the value 99.
+      const structPtr = 0n | (0n << 2n) | (1n << 32n) | (0n << 48n);
+      view.setBigUint64(8 + (13 * 8), structPtr, true);
+      view.setUint32(8 + (14 * 8), 99, true);
     },
   );
 
-  assertThrows(
-    () => decodeCallRequestFrame(frame),
-    /does not support far pointers yet/i,
-  );
+  const decoded = decodeCallRequestFrame(frame);
+  assertEquals(decoded.questionId, 3);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 99);
 });
 
 Deno.test("rpc wire rejects unsupported return tags", () => {
@@ -948,4 +959,425 @@ Deno.test("rpc wire rejects non-struct root pointers and preserves opaque source
     decoded.paramsContent.byteLength,
   ).getBigUint64(8, true);
   assertEquals(Number(copiedRoot & 0x3n), 3);
+});
+
+// ----------------------------------------------------------------
+// Multi-segment and far pointer tests
+// ----------------------------------------------------------------
+
+/**
+ * Helper to build a raw multi-segment Cap'n Proto frame from an array
+ * of segment byte arrays. Each segment must be word-aligned.
+ */
+function buildMultiSegmentFrame(segments: Uint8Array[]): Uint8Array {
+  const segmentCount = segments.length;
+  // Header: (1 + segmentCount) u32 values, padded to 8-byte alignment
+  const headerU32Count = 1 + segmentCount;
+  const headerBytes = Math.ceil((headerU32Count * 4) / 8) * 8;
+
+  let totalSegmentBytes = 0;
+  for (const seg of segments) totalSegmentBytes += seg.byteLength;
+
+  const out = new Uint8Array(headerBytes + totalSegmentBytes);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, segmentCount - 1, true);
+  for (let i = 0; i < segmentCount; i += 1) {
+    view.setUint32(4 + i * 4, segments[i].byteLength / 8, true);
+  }
+
+  let cursor = headerBytes;
+  for (const seg of segments) {
+    out.set(seg, cursor);
+    cursor += seg.byteLength;
+  }
+  return out;
+}
+
+/**
+ * Helper: build a segment as a typed Uint8Array from word-level bigints.
+ */
+function segmentFromWords(...words: bigint[]): Uint8Array {
+  const buf = new Uint8Array(words.length * 8);
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  for (let i = 0; i < words.length; i += 1) {
+    dv.setBigUint64(i * 8, words[i], true);
+  }
+  return buf;
+}
+
+/**
+ * Encode a struct pointer word.
+ * kind=0, offset in bits[2..31], dataWords in bits[32..47], ptrCount in bits[48..63]
+ */
+function structPtr(
+  offset: number,
+  dataWords: number,
+  ptrCount: number,
+): bigint {
+  const off = offset < 0 ? offset + (1 << 30) : offset;
+  return (BigInt(off & 0x3fffffff) << 2n) |
+    (BigInt(dataWords & 0xffff) << 32n) |
+    (BigInt(ptrCount & 0xffff) << 48n);
+}
+
+/**
+ * Encode a single-far pointer word.
+ * kind=2, B=0, offset (word in target segment), segmentId
+ */
+function singleFarPtr(wordOffset: number, segmentId: number): bigint {
+  return 2n |
+    (BigInt(wordOffset) << 3n) |
+    (BigInt(segmentId) << 32n);
+}
+
+/**
+ * Encode a double-far pointer word.
+ * kind=2, B=1, offset (word in landing pad segment), segmentId
+ */
+function doubleFarPtr(wordOffset: number, segmentId: number): bigint {
+  return 2n |
+    (1n << 2n) |
+    (BigInt(wordOffset) << 3n) |
+    (BigInt(segmentId) << 32n);
+}
+
+Deno.test("rpc wire decodes a two-segment bootstrap frame with far pointer to root", () => {
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (Message) to word 1
+  //            word 1 = data word (tag = bootstrap = 8)
+  //            word 2 = struct pointer (Bootstrap) to word 3
+  //            word 3 = data word (questionId = 42)
+  //            word 4 = padding (Bootstrap ptr slot)
+  const seg0 = segmentFromWords(
+    singleFarPtr(0, 1), // far ptr -> segment 1, word 0
+  );
+  const seg1 = segmentFromWords(
+    structPtr(0, 1, 1), // Message: offset=0 -> word 1, data=1, ptr=1
+    8n, // Message.data[0]: tag = 8 (bootstrap), u16 at byte 0
+    structPtr(0, 1, 1), // ptr[0] -> Bootstrap struct at word 3, data=1, ptr=1
+    42n, // Bootstrap.data[0]: questionId = 42
+    0n, // Bootstrap.ptr[0]: null (deprecatedObjectId)
+  );
+
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  const decoded = decodeBootstrapRequestFrame(frame);
+  assertEquals(decoded.questionId, 42);
+});
+
+Deno.test("rpc wire decodes a two-segment release frame with far pointer", () => {
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (Message) -> word 1
+  //            word 1 = data (tag = release = 6)
+  //            word 2 = struct pointer (Release) -> word 3
+  //            word 3 = data (id=7, referenceCount=3)
+  const seg0 = segmentFromWords(
+    singleFarPtr(0, 1),
+  );
+  // Build segment 1 data manually for Release
+  const seg1Buf = new Uint8Array(4 * 8);
+  const seg1View = new DataView(seg1Buf.buffer);
+  // word 0: Message struct pointer: offset=0, data=1, ptr=1
+  seg1View.setBigUint64(0, structPtr(0, 1, 1), true);
+  // word 1: Message data: tag = 6 (release) as u16 at byte 0
+  seg1View.setUint16(8, 6, true);
+  // word 2: ptr[0] = struct pointer -> word 3, data=1, ptr=0
+  seg1View.setBigUint64(16, structPtr(0, 1, 0), true);
+  // word 3: Release data: id=7 (u32 at byte 0), referenceCount=3 (u32 at byte 4)
+  seg1View.setUint32(24, 7, true);
+  seg1View.setUint32(28, 3, true);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1Buf]);
+  const decoded = decodeReleaseFrame(frame);
+  assertEquals(decoded.id, 7);
+  assertEquals(decoded.referenceCount, 3);
+});
+
+Deno.test("rpc wire decodes a three-segment finish frame with chained far pointers", () => {
+  // Segment 0: word 0 = far pointer to segment 1, word 0
+  // Segment 1: word 0 = far pointer to segment 2, word 0  (chained single-far)
+  // Segment 2: word 0 = struct pointer (Message) -> word 1
+  //            word 1 = data (tag = finish = 4)
+  //            word 2 = struct pointer (Finish) -> word 3
+  //            word 3 = data (questionId=99, flags)
+  const seg0 = segmentFromWords(
+    singleFarPtr(0, 1),
+  );
+  const seg1 = segmentFromWords(
+    singleFarPtr(0, 2),
+  );
+
+  const seg2Buf = new Uint8Array(4 * 8);
+  const seg2View = new DataView(seg2Buf.buffer);
+  seg2View.setBigUint64(0, structPtr(0, 1, 1), true);
+  seg2View.setUint16(8, 4, true); // tag = finish
+  seg2View.setBigUint64(16, structPtr(0, 1, 0), true);
+  seg2View.setUint32(24, 99, true); // questionId
+  // flags: releaseResultCaps=true (bit0=0), requireEarlyCancellation=true (bit1=0)
+  seg2View.setUint32(28, 0, true);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1, seg2Buf]);
+  const decoded = decodeFinishFrame(frame);
+  assertEquals(decoded.questionId, 99);
+  assertEquals(decoded.releaseResultCaps, true);
+  assertEquals(decoded.requireEarlyCancellation, true);
+});
+
+Deno.test("rpc wire decodes a double-far pointer across segments", () => {
+  // Double-far pointer: segment 0 root -> landing pad in segment 1 ->
+  // actual data in segment 2.
+  //
+  // Segment 0: word 0 = double-far pointer (B=1) to segment 1, word 0
+  // Segment 1: word 0 = single-far pointer to segment 2, word 0 (the data location)
+  //            word 1 = tag word (struct pointer with offset=0, data=1, ptr=1)
+  // Segment 2: word 0 = Message data: tag = bootstrap = 8
+  //            word 1 = struct pointer (Bootstrap) -> word 2
+  //            word 2 = data (questionId = 77)
+  //            word 3 = padding (Bootstrap ptr slot)
+  const seg0 = segmentFromWords(
+    doubleFarPtr(0, 1),
+  );
+  const seg1 = segmentFromWords(
+    singleFarPtr(0, 2), // pad[0]: far ptr to segment 2, word 0
+    structPtr(0, 1, 1), // pad[1]: tag = struct(data=1, ptr=1), offset is ignored (treated as 0)
+  );
+
+  const seg2Buf = new Uint8Array(4 * 8);
+  const seg2View = new DataView(seg2Buf.buffer);
+  // word 0: Message data: tag = 8 (bootstrap)
+  seg2View.setUint16(0, 8, true);
+  // word 1: ptr[0] = struct pointer (Bootstrap) -> word 2, data=1, ptr=1
+  seg2View.setBigUint64(8, structPtr(0, 1, 1), true);
+  // word 2: questionId = 77
+  seg2View.setUint32(16, 77, true);
+  // word 3: Bootstrap ptr slot = null
+  seg2View.setBigUint64(24, 0n, true);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1, seg2Buf]);
+  const decoded = decodeBootstrapRequestFrame(frame);
+  assertEquals(decoded.questionId, 77);
+});
+
+Deno.test("rpc wire decodes return exception from two-segment frame", () => {
+  // Build a Return(exception) message split across two segments.
+  // Segment 0 has the root + far pointer to segment 1.
+  // Segment 1 has the Return struct and Exception with reason text.
+
+  // First build a single-segment version, then split it.
+  const singleFrame = encodeReturnExceptionFrame({
+    answerId: 55,
+    reason: "multi-seg error",
+  });
+
+  // Parse the single frame to get the segment data
+  const singleView = new DataView(
+    singleFrame.buffer,
+    singleFrame.byteOffset,
+    singleFrame.byteLength,
+  );
+  const segWords = singleView.getUint32(4, true);
+  const segData = singleFrame.subarray(8, 8 + segWords * 8);
+
+  // Create a two-segment version where segment 0 has just a far pointer
+  // and segment 1 has all the actual data.
+  const seg0 = segmentFromWords(
+    singleFarPtr(0, 1), // far ptr -> segment 1, word 0
+  );
+
+  // Segment 1 = the original segment data, but we need to adjust the root
+  // pointer. The original root pointer at word 0 is a struct pointer with
+  // offset to word 1. In segment 1, the data starts at word 0, so we
+  // keep the same layout.
+  const seg1 = new Uint8Array(segData);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "exception");
+  assertEquals(decoded.answerId, 55);
+  if (decoded.kind === "exception") {
+    assertEquals(decoded.reason, "multi-seg error");
+  }
+});
+
+Deno.test("rpc wire decodes return results from two-segment frame", () => {
+  // Similar approach: build single-segment Return(results), then wrap
+  // with a far pointer in segment 0.
+  const singleFrame = encodeReturnResultsFrame({
+    answerId: 88,
+    content: encodeSingleU32StructMessage(12345),
+    capTable: [{ tag: 1, id: 42 }],
+  });
+
+  const singleView = new DataView(
+    singleFrame.buffer,
+    singleFrame.byteOffset,
+    singleFrame.byteLength,
+  );
+  const segWords = singleView.getUint32(4, true);
+  const segData = singleFrame.subarray(8, 8 + segWords * 8);
+
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = new Uint8Array(segData);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 88);
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 12345);
+    assertEquals(decoded.capTable.length, 1);
+    assertEquals(decoded.capTable[0].tag, 1);
+    assertEquals(decoded.capTable[0].id, 42);
+  }
+});
+
+Deno.test("rpc wire decodes call from two-segment frame", () => {
+  const singleFrame = encodeCallRequestFrame({
+    questionId: 77,
+    interfaceId: 0xABCDn,
+    methodId: 5,
+    targetImportedCap: 3,
+    paramsContent: encodeSingleU32StructMessage(333),
+    paramsCapTable: [{ tag: 1, id: 10 }],
+  });
+
+  const singleView = new DataView(
+    singleFrame.buffer,
+    singleFrame.byteOffset,
+    singleFrame.byteLength,
+  );
+  const segWords = singleView.getUint32(4, true);
+  const segData = singleFrame.subarray(8, 8 + segWords * 8);
+
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = new Uint8Array(segData);
+
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  const decoded = decodeCallRequestFrame(frame);
+  assertEquals(decoded.questionId, 77);
+  assertEquals(decoded.interfaceId, 0xABCDn);
+  assertEquals(decoded.methodId, 5);
+  assertEquals(decoded.targetImportedCap, 3);
+  assertEquals(decodeSingleU32StructMessage(decoded.paramsContent), 333);
+  assertEquals(decoded.paramsCapTable.length, 1);
+  assertEquals(decoded.paramsCapTable[0].tag, 1);
+  assertEquals(decoded.paramsCapTable[0].id, 10);
+});
+
+Deno.test("rpc wire decodes message tag from multi-segment frame", () => {
+  const singleFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  const singleView = new DataView(
+    singleFrame.buffer,
+    singleFrame.byteOffset,
+    singleFrame.byteLength,
+  );
+  const segWords = singleView.getUint32(4, true);
+  const segData = singleFrame.subarray(8, 8 + segWords * 8);
+
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = new Uint8Array(segData);
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+
+  assertEquals(decodeRpcMessageTag(frame), 8); // bootstrap tag
+});
+
+Deno.test("rpc wire rejects far pointer to out-of-bounds segment", () => {
+  // Far pointer referencing segment 5 which doesn't exist
+  const seg0 = segmentFromWords(
+    singleFarPtr(0, 5),
+  );
+  const frame = buildMultiSegmentFrame([seg0]);
+  assertThrows(
+    () => decodeBootstrapRequestFrame(frame),
+    /references missing segment/i,
+  );
+});
+
+Deno.test("rpc wire rejects far pointer chain exceeding hop limit", () => {
+  // Create a cycle: segment 0 word 0 -> segment 1 word 0 -> segment 0 word 0
+  const seg0 = segmentFromWords(singleFarPtr(0, 1));
+  const seg1 = segmentFromWords(singleFarPtr(0, 0));
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  assertThrows(
+    () => decodeBootstrapRequestFrame(frame),
+    /far pointer chain exceeded maximum hop count/i,
+  );
+});
+
+Deno.test("rpc wire rejects double-far with double-far in landing pad[0]", () => {
+  // Segment 0: double-far to segment 1, word 0
+  // Segment 1: word 0 = double-far (invalid: pad[0] must be single-far)
+  //            word 1 = struct tag
+  const seg0 = segmentFromWords(doubleFarPtr(0, 1));
+  const seg1 = segmentFromWords(
+    doubleFarPtr(0, 0), // pad[0] is double-far (invalid)
+    structPtr(0, 1, 0), // pad[1] tag
+  );
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  assertThrows(
+    () => decodeBootstrapRequestFrame(frame),
+    /must be a single-far pointer/i,
+  );
+});
+
+Deno.test("rpc wire rejects double-far with non-far landing pad[0]", () => {
+  // Segment 0: double-far to segment 1, word 0
+  // Segment 1: word 0 = struct pointer (not a far pointer - invalid)
+  //            word 1 = struct tag
+  const seg0 = segmentFromWords(doubleFarPtr(0, 1));
+  const seg1 = segmentFromWords(
+    structPtr(0, 1, 0), // pad[0] is struct pointer (invalid)
+    structPtr(0, 1, 0), // pad[1] tag
+  );
+  const frame = buildMultiSegmentFrame([seg0, seg1]);
+  assertThrows(
+    () => decodeBootstrapRequestFrame(frame),
+    /must be far pointer/i,
+  );
+});
+
+Deno.test("rpc wire handles multi-segment frame with all data in segment 0", () => {
+  // Two segments but all data in segment 0 (segment 1 is empty padding).
+  // No far pointers needed.
+  const singleFrame = encodeBootstrapRequestFrame({ questionId: 123 });
+  const singleView = new DataView(
+    singleFrame.buffer,
+    singleFrame.byteOffset,
+    singleFrame.byteLength,
+  );
+  const segWords = singleView.getUint32(4, true);
+  const segData = singleFrame.subarray(8, 8 + segWords * 8);
+
+  // Build a two-segment frame where segment 0 has all the data
+  // and segment 1 is a single empty word.
+  const seg1 = segmentFromWords(0n);
+  const frame = buildMultiSegmentFrame([segData, seg1]);
+  const decoded = decodeBootstrapRequestFrame(frame);
+  assertEquals(decoded.questionId, 123);
+});
+
+Deno.test("rpc wire encoding still rejects far pointers in payload content input", () => {
+  // The encoding path (encodeCallRequestFrame with paramsContent) still uses
+  // segmentFromFrame which only accepts single-segment content and
+  // rebaseCopiedRootPointer which rejects far pointers.
+  const farRootPayload = new Uint8Array(16);
+  const farRootView = new DataView(
+    farRootPayload.buffer,
+    farRootPayload.byteOffset,
+    farRootPayload.byteLength,
+  );
+  farRootView.setUint32(0, 0, true);
+  farRootView.setUint32(4, 1, true);
+  farRootView.setBigUint64(8, 0x2n, true);
+
+  assertThrows(
+    () =>
+      encodeCallRequestFrame({
+        questionId: 50,
+        interfaceId: 0x1234n,
+        methodId: 0,
+        targetImportedCap: 0,
+        paramsContent: farRootPayload,
+      }),
+    /does not support far pointers yet/i,
+  );
 });

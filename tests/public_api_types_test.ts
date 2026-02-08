@@ -11,11 +11,14 @@ import type {
   CreateRpcSessionWithReconnectOptions,
   DenoOtelObservabilityOptions,
   ExponentialBackoffReconnectPolicyOptions,
+  FrameSizeLimitMiddlewareOptions,
   JsonSerdeCodec,
   JsonSerdeCodecLookupOptions,
   JsonSerdeCodecOptions,
   JsonSerdeExportBinding,
+  LoggingMiddlewareOptions,
   MessagePortTransportOptions,
+  MiddlewareResult,
   ReconnectCapabilityRemapContext,
   ReconnectingRpcClientTransportOptions,
   ReconnectPolicy,
@@ -58,6 +61,7 @@ import type {
   RpcSessionHarnessTransport,
   RpcSessionOptions,
   RpcTransport,
+  RpcTransportMiddleware,
   SessionRpcClientTransportOptions,
   TcpTransportOptions,
   WasmAbiCapabilities,
@@ -77,6 +81,10 @@ type PublicTypeExportSmoke = {
   capnpFrameFramerOptions: CapnpFrameFramerOptions;
   capnpFrameLimitsOptions: CapnpFrameLimitsOptions;
   capnpWasmExports: CapnpWasmExports;
+  frameSizeLimitMiddlewareOptions: FrameSizeLimitMiddlewareOptions;
+  loggingMiddlewareOptions: LoggingMiddlewareOptions;
+  middlewareResult: MiddlewareResult;
+  rpcTransportMiddleware: RpcTransportMiddleware;
   wasmAbiCapabilities: WasmAbiCapabilities;
   wasmHostCallRecord: WasmHostCallRecord;
   capabilityPointer: CapabilityPointer;

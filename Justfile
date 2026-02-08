@@ -42,6 +42,19 @@ bench-fast:
 bench-real:
     deno task bench:real
 
+ci-bench:
+    @echo "=========================================="
+    @echo "  Performance Benchmarks (non-blocking)"
+    @echo "=========================================="
+    deno task bench:fast 2>&1 || echo "WARNING: bench:fast exited with non-zero status (non-blocking)"
+    @echo "=========================================="
+    @echo "  Benchmark Regression Checks"
+    @echo "=========================================="
+    deno test --no-check bench/regression_test.ts 2>&1 || echo "WARNING: regression checks exited with non-zero status (non-blocking)"
+    @echo "=========================================="
+    @echo "  Benchmarks complete"
+    @echo "=========================================="
+
 verify:
     deno task verify
 

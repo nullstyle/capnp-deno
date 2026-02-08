@@ -99,6 +99,19 @@ export interface RpcServerBridgeOptions {
     call: RpcCallRequest,
   ) => void | Promise<void>;
   onFinish?: (finish: RpcFinishRequest) => void | Promise<void>;
+  /**
+   * Maximum number of entries allowed in the answer table.
+   * When the limit is reached, new calls are rejected with an exception.
+   * Defaults to 4096. Set to 0 or Infinity to disable.
+   */
+  maxAnswerTableSize?: number;
+  /**
+   * Timeout in milliseconds after which a completed answer table entry
+   * (one whose dispatch has resolved) is automatically evicted if the
+   * peer has not sent a Finish message. Defaults to Infinity (disabled).
+   * Set to a positive finite number to enable automatic eviction.
+   */
+  answerEvictionTimeoutMs?: number;
 }
 
 /**
@@ -154,6 +167,8 @@ interface AnswerTableEntry {
   readonly promise: Promise<RpcDispatchOutcome>;
   /** Resolved outcome, set once the promise settles */
   outcome?: RpcDispatchOutcome;
+  /** Timer handle for automatic eviction of completed but unfinished entries */
+  evictionTimer?: ReturnType<typeof setTimeout>;
 }
 
 function normalizeCapability(
@@ -252,11 +267,15 @@ export class RpcServerBridge {
   #onFinish?: RpcServerBridgeOptions["onFinish"];
   /** Answer table: maps question IDs to their dispatch promises/outcomes */
   #answerTable = new Map<number, AnswerTableEntry>();
+  #maxAnswerTableSize: number;
+  #answerEvictionTimeoutMs: number;
 
   constructor(options: RpcServerBridgeOptions = {}) {
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
     this.#onUnhandledError = options.onUnhandledError;
     this.#onFinish = options.onFinish;
+    this.#maxAnswerTableSize = options.maxAnswerTableSize ?? 4096;
+    this.#answerEvictionTimeoutMs = options.answerEvictionTimeoutMs ?? Infinity;
   }
 
   exportCapability(
@@ -354,6 +373,10 @@ export class RpcServerBridge {
     if (tag === RPC_MESSAGE_TAG_FINISH) {
       const finish = decodeFinishFrame(frame);
       // Clean up the answer table entry for this question.
+      const entry = this.#answerTable.get(finish.questionId);
+      if (entry?.evictionTimer !== undefined) {
+        clearTimeout(entry.evictionTimer);
+      }
       this.#answerTable.delete(finish.questionId);
       if (this.#onFinish) {
         await this.#onFinish(finish);
@@ -397,6 +420,19 @@ export class RpcServerBridge {
   }
 
   async #handleCall(call: RpcCallRequest): Promise<Uint8Array> {
+    // Enforce answer table size limit to prevent unbounded growth.
+    if (
+      this.#maxAnswerTableSize > 0 &&
+      this.#maxAnswerTableSize !== Infinity &&
+      this.#answerTable.size >= this.#maxAnswerTableSize
+    ) {
+      return encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason:
+          `answer table is full (${this.#maxAnswerTableSize} entries); cannot accept new questions`,
+      });
+    }
+
     // Register this question in the answer table before dispatching,
     // so that pipelined calls targeting this question can find it.
     let resolveEntry!: (outcome: RpcDispatchOutcome) => void;
@@ -413,6 +449,10 @@ export class RpcServerBridge {
     (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
     resolveEntry(outcome);
 
+    // Schedule automatic eviction of completed entries that are not
+    // finished by the peer within the configured timeout.
+    this.#scheduleEviction(call.questionId, entry);
+
     if (outcome.kind === "exception") {
       return encodeReturnExceptionFrame({
         answerId: call.questionId,
@@ -427,6 +467,38 @@ export class RpcServerBridge {
       releaseParamCaps: outcome.response.releaseParamCaps,
       noFinishNeeded: outcome.response.noFinishNeeded,
     });
+  }
+
+  /**
+   * Schedule automatic eviction of a completed answer table entry.
+   * If the peer does not send a Finish within the configured timeout,
+   * the entry is silently removed to prevent unbounded growth.
+   */
+  #scheduleEviction(questionId: number, entry: AnswerTableEntry): void {
+    if (
+      this.#answerEvictionTimeoutMs <= 0 ||
+      this.#answerEvictionTimeoutMs === Infinity
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      // Only evict if the entry is still present (not already finished).
+      if (this.#answerTable.get(questionId) === entry) {
+        this.#answerTable.delete(questionId);
+      }
+    }, this.#answerEvictionTimeoutMs);
+    // Unref the timer so it does not prevent the process from exiting
+    // and does not trigger resource-leak sanitizers in test runners.
+    if (typeof Deno !== "undefined" && typeof Deno.unrefTimer === "function") {
+      Deno.unrefTimer(timer);
+    } else if (
+      typeof timer === "object" && timer !== null && "unref" in timer &&
+      typeof (timer as { unref: unknown }).unref === "function"
+    ) {
+      (timer as { unref: () => void }).unref();
+    }
+    (entry as { evictionTimer?: ReturnType<typeof setTimeout> })
+      .evictionTimer = timer;
   }
 
   async #handleWasmHostCall(

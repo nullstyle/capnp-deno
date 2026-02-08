@@ -91,6 +91,7 @@ export class TcpTransport implements RpcTransport {
   #queuedOutboundBytes = 0;
   #inflightOutboundFrames = 0;
   #inflightOutboundBytes = 0;
+  #draining = false;
   #drainLoop: Promise<void> | null = null;
 
   constructor(conn: Deno.Conn, options: TcpTransportOptions = {}) {
@@ -325,13 +326,15 @@ export class TcpTransport implements RpcTransport {
   }
 
   #ensureDrainLoop(): void {
-    if (this.#drainLoop) return;
+    if (this.#draining) return;
+    this.#draining = true;
     this.#drainLoop = this.#drainOutbound()
       .catch((_error) => {
         // Individual send() callers receive write errors through their own
         // completion promises; suppress unhandled drain-loop rejections here.
       })
       .finally(() => {
+        this.#draining = false;
         this.#drainLoop = null;
         if (this.#outboundQueue.length > 0 && !this.#closed) {
           this.#ensureDrainLoop();

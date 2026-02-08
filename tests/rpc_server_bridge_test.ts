@@ -1205,3 +1205,209 @@ Deno.test("RpcServerBridge pipelining: chained pipelining through multiple answe
     assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 42);
   }
 });
+
+// --- Answer Table Bounds and Eviction Tests ---
+
+Deno.test("RpcServerBridge rejects new calls when answer table is full", async () => {
+  const bridge = new RpcServerBridge({
+    maxAnswerTableSize: 2,
+    answerEvictionTimeoutMs: 0, // disable eviction so entries stay
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{ tag: 1, id: 10 }],
+      }),
+  }, { capabilityIndex: 5 });
+
+  // Fill the answer table with 2 calls (no finish sent).
+  const r1 = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r1 !== null, "expected response for question 1");
+  assertEquals(decodeReturnFrame(r1).kind, "results");
+
+  const r2 = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r2 !== null, "expected response for question 2");
+  assertEquals(decodeReturnFrame(r2).kind, "results");
+
+  assertEquals(bridge.answerTableSize, 2);
+
+  // Third call should be rejected because the table is full.
+  const r3 = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 3,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r3 !== null, "expected rejection response for question 3");
+  const decoded3 = decodeReturnFrame(r3);
+  assertEquals(decoded3.kind, "exception");
+  assertEquals(decoded3.answerId, 3);
+  if (decoded3.kind === "exception") {
+    assert(
+      /answer table is full/i.test(decoded3.reason),
+      `unexpected exception reason: ${decoded3.reason}`,
+    );
+  }
+
+  // The answer table should still be at 2 (rejected call was NOT added).
+  assertEquals(bridge.answerTableSize, 2);
+
+  // Finishing one entry frees a slot, allowing the next call to succeed.
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
+  assertEquals(bridge.answerTableSize, 1);
+
+  const r4 = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 4,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r4 !== null, "expected response for question 4");
+  assertEquals(decodeReturnFrame(r4).kind, "results");
+  assertEquals(bridge.answerTableSize, 2);
+});
+
+Deno.test("RpcServerBridge answer table eviction removes completed entries after timeout", async () => {
+  const bridge = new RpcServerBridge({
+    maxAnswerTableSize: 100,
+    answerEvictionTimeoutMs: 50, // very short timeout for testing
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(42)),
+  }, { capabilityIndex: 5 });
+
+  // Send a call that completes but never gets a finish.
+  const r = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(r !== null, "expected response for question 1");
+  assertEquals(decodeReturnFrame(r).kind, "results");
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Wait for the eviction timer to fire.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // The entry should have been evicted.
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+Deno.test("RpcServerBridge answer table eviction is cancelled by a timely finish", async () => {
+  const bridge = new RpcServerBridge({
+    maxAnswerTableSize: 100,
+    answerEvictionTimeoutMs: 200, // longer timeout
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(42)),
+  }, { capabilityIndex: 5 });
+
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Finish before the eviction timer fires.
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
+  assertEquals(bridge.answerTableSize, 0);
+
+  // Wait past the eviction timeout to confirm no errors from the cleared timer.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+Deno.test("RpcServerBridge disabling answer table limits works", async () => {
+  // maxAnswerTableSize=0 should disable the limit
+  const bridge = new RpcServerBridge({
+    maxAnswerTableSize: 0,
+    answerEvictionTimeoutMs: 0,
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(1)),
+  }, { capabilityIndex: 5 });
+
+  // Should be able to add many entries without rejection.
+  for (let i = 1; i <= 10; i++) {
+    const r = await bridge.handleFrame(encodeCallRequestFrame({
+      questionId: i,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 5,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }));
+    assert(r !== null, `expected response for question ${i}`);
+    assertEquals(decodeReturnFrame(r).kind, "results");
+  }
+  assertEquals(bridge.answerTableSize, 10);
+});
+
+Deno.test("RpcServerBridge defaults apply reasonable answer table bounds", () => {
+  // The default bridge should have limits set but be usable without options.
+  const bridge = new RpcServerBridge();
+  // Just verify the bridge constructs without error and has expected initial state.
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+Deno.test("RpcServerBridge answer table full does not prevent finish or release", async () => {
+  const bridge = new RpcServerBridge({
+    maxAnswerTableSize: 1,
+    answerEvictionTimeoutMs: 0,
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => Promise.resolve(encodeSingleU32StructMessage(1)),
+  }, { capabilityIndex: 5, referenceCount: 2 });
+
+  // Fill the answer table.
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assertEquals(bridge.answerTableSize, 1);
+
+  // Release and finish should still work even when table is full.
+  const releaseResult = await bridge.handleFrame(
+    encodeReleaseFrame({ id: 5, referenceCount: 1 }),
+  );
+  assertEquals(releaseResult, null);
+  assertEquals(bridge.hasCapability(5), true);
+
+  const finishResult = await bridge.handleFrame(
+    encodeFinishFrame({ questionId: 1 }),
+  );
+  assertEquals(finishResult, null);
+  assertEquals(bridge.answerTableSize, 0);
+});
