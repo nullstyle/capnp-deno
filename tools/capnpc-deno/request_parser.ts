@@ -123,7 +123,7 @@ function parseFields(reader: StructReader): FieldModel[] {
 
 function parseInterfaceNode(reader: StructReader): InterfaceNodeModel {
   const list = reader.readStructList(3);
-  if (!list) return { methods: [] };
+  if (!list) return { methods: [], superclasses: parseSuperclasses(reader) };
 
   const methods: InterfaceNodeModel["methods"] = [];
   for (let i = 0; i < list.len(); i += 1) {
@@ -135,7 +135,17 @@ function parseInterfaceNode(reader: StructReader): InterfaceNodeModel {
       resultStructTypeId: item.readU64(16),
     });
   }
-  return { methods };
+  return { methods, superclasses: parseSuperclasses(reader) };
+}
+
+function parseSuperclasses(reader: StructReader): bigint[] {
+  const list = reader.readStructList(4);
+  if (!list) return [];
+  const superclasses: bigint[] = [];
+  for (let i = 0; i < list.len(); i += 1) {
+    superclasses.push(list.get(i).readU64(0));
+  }
+  return superclasses;
 }
 
 function parseField(reader: StructReader): FieldModel {

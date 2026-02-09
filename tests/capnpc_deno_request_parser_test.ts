@@ -556,6 +556,50 @@ Deno.test("capnpc-deno request parser treats missing nested/method/field/import 
   const coercedInterfaceNode = parsed.nodes[structToInterfaceIndex];
   assertEquals(coercedInterfaceNode.kind, "interface");
   assertEquals(coercedInterfaceNode.interfaceNode?.methods.length, 0);
+  assertEquals(coercedInterfaceNode.interfaceNode?.superclasses?.length, 0);
 
   assertEquals(parsed.requestedFiles[0].imports.length, 0);
+});
+
+Deno.test("capnpc-deno request parser reads interface superclasses", async () => {
+  const source = await loadFixtureMessage();
+  const baseline = parseCodeGeneratorRequest(source);
+  const personNodeIndex = baseline.nodes.findIndex((node) =>
+    node.displayName.endsWith(":Person")
+  );
+  assert(
+    personNodeIndex >= 0,
+    "expected Person node in fixture",
+  );
+
+  const mutated = await mutateFixture((segment) => {
+    const coercedInterfaceNode = locateNodeStruct(
+      segment,
+      personNodeIndex,
+    );
+    writeStructU16(segment, coercedInterfaceNode.startWord, 12, 3);
+
+    const methodsPointer = pointerWordIndex(coercedInterfaceNode, 3);
+    const methodsListWord = getWord(segment, methodsPointer);
+    setWord(segment, methodsPointer, 0n);
+
+    const superclassesPointer = pointerWordIndex(coercedInterfaceNode, 4);
+    const methodsOffset = signed30((methodsListWord >> 2n) & MASK_30);
+    const adjustedWord = (methodsListWord & ~(MASK_30 << 2n)) |
+      (encodeSigned30(methodsOffset - 1) << 2n);
+    setWord(segment, superclassesPointer, adjustedWord);
+  });
+
+  const parsed = parseCodeGeneratorRequest(mutated);
+  const coercedInterfaceNode = parsed.nodes[personNodeIndex];
+  assertEquals(coercedInterfaceNode.kind, "interface");
+  assertEquals(coercedInterfaceNode.interfaceNode?.methods.length, 0);
+  assert(
+    (coercedInterfaceNode.interfaceNode?.superclasses?.length ?? 0) > 0,
+    "expected parsed superclass ids",
+  );
+  assert(
+    typeof coercedInterfaceNode.interfaceNode?.superclasses?.[0] === "bigint",
+    "expected superclass id to be bigint",
+  );
 });

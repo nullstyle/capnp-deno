@@ -569,6 +569,59 @@ function makeMissingRpcStructRequest(): CodeGeneratorRequestModel {
   };
 }
 
+function makeInheritedRpcInterfaceRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x120n;
+  const parentInterfaceId = 0x121n;
+  const childInterfaceId = 0x122n;
+  const prefix = "schema/inheritance.capnp:";
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "schema/inheritance.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [
+          { name: "Parent", id: parentInterfaceId },
+          { name: "Child", id: childInterfaceId },
+        ],
+        kind: "file",
+      },
+      {
+        id: parentInterfaceId,
+        displayName: `${prefix}Parent`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [],
+          superclasses: [],
+        },
+      },
+      {
+        id: childInterfaceId,
+        displayName: `${prefix}Child`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [],
+          superclasses: [parentInterfaceId],
+        },
+      },
+    ],
+    requestedFiles: [
+      {
+        id: fileId,
+        filename: "schema/inheritance.capnp",
+        imports: [],
+      },
+    ],
+  };
+}
+
 function makeMultiFileRequest(): CodeGeneratorRequestModel {
   return {
     nodes: [
@@ -670,6 +723,13 @@ Deno.test("capnpc-deno emitter rejects rpc methods that reference unknown param/
   assertThrows(
     () => generateTypescriptFiles(makeMissingRpcStructRequest()),
     /references unknown param struct id/,
+  );
+});
+
+Deno.test("capnpc-deno emitter rejects interface inheritance until runtime support exists", () => {
+  assertThrows(
+    () => generateTypescriptFiles(makeInheritedRpcInterfaceRequest()),
+    /interface inheritance is not yet supported/i,
   );
 });
 

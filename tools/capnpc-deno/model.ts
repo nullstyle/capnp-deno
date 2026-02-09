@@ -59,6 +59,7 @@ export interface EnumerantModel {
 
 export interface InterfaceNodeModel {
   methods: InterfaceMethodModel[];
+  superclasses?: bigint[];
 }
 
 export interface InterfaceMethodModel {

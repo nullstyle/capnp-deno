@@ -34,6 +34,18 @@ export function emitRpcModule(
     return out.join("\n");
   }
 
+  // Interface inheritance is not yet supported by the TS emitter/runtime.
+  // Fail fast instead of silently omitting inherited methods.
+  for (const info of interfaces) {
+    const superclasses = info.node.interfaceNode?.superclasses ?? [];
+    if (superclasses.length > 0) {
+      const ids = superclasses.map((id) => formatBigint(id)).join(", ");
+      throw new Error(
+        `interface inheritance is not yet supported for ${info.typeName}; superclasses: [${ids}]`,
+      );
+    }
+  }
+
   const typeImports = new Set<string>([
     "CapabilityPointer",
     "EncodeWithCapsResult",
@@ -281,7 +293,9 @@ function emitInterfaceCode(
       `      const encoded = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params as Record<string, unknown>);`,
     );
     out.push("      let questionId: number | undefined;");
-    out.push("      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {");
+    out.push(
+      "      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {",
+    );
     out.push("        ...(options ?? {}),");
     out.push(
       `        interfaceId: options?.interfaceId ?? ${info.typeName}InterfaceId,`,
