@@ -1,7 +1,4 @@
-import {
-  TcpServerListener,
-  TcpTransport,
-} from "./tcp.ts";
+import { TcpServerListener, TcpTransport } from "./tcp.ts";
 import { assert, assertEquals, withTimeout } from "../../tests/test_utils.ts";
 
 Deno.test("TcpServerListener binds and exposes addr", () => {
@@ -71,7 +68,11 @@ Deno.test("TcpServerListener.accept terminates when listener is closed", async (
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
   listener.close();
 
-  const results = await withTimeout(acceptLoop, 5000, "accept loop after close");
+  const results = await withTimeout(
+    acceptLoop,
+    5000,
+    "accept loop after close",
+  );
   assertEquals(results.length, 0);
 });
 

@@ -1,10 +1,9 @@
 /**
- * Runtime preamble: the TypeScript runtime code inlined into every generated
- * _capnp.ts module.  Extracted from the monolithic emitter.ts for
- * maintainability.
+ * Shared runtime for generated Cap'n Proto _capnp.ts modules.
+ *
+ * @module
  */
 
-export const RUNTIME_PREAMBLE = `
 export interface StructCodec<T> {
   encode(value: T): Uint8Array;
   decode(bytes: Uint8Array): T;
@@ -18,7 +17,7 @@ export type AnyPointerValue =
   | { kind: "null" }
   | { kind: "interface"; capabilityIndex: number };
 
-type PrimitiveTypeKind =
+export type PrimitiveTypeKind =
   | "void"
   | "bool"
   | "int8"
@@ -32,43 +31,43 @@ type PrimitiveTypeKind =
   | "float32"
   | "float64";
 
-interface PrimitiveTypeDescriptor {
+export interface PrimitiveTypeDescriptor {
   kind: PrimitiveTypeKind;
 }
 
-interface EnumTypeDescriptor<T extends string = string> {
+export interface EnumTypeDescriptor<T extends string = string> {
   kind: "enum";
   byOrdinal: readonly T[];
   toOrdinal: Readonly<Record<T, number>>;
 }
 
-interface StructTypeDescriptor {
+export interface StructTypeDescriptor {
   kind: "struct";
   get: () => StructDescriptor<Record<string, unknown>>;
 }
 
-interface ListTypeDescriptor {
+export interface ListTypeDescriptor {
   kind: "list";
   element: TypeDescriptor;
 }
 
-interface TextTypeDescriptor {
+export interface TextTypeDescriptor {
   kind: "text";
 }
 
-interface DataTypeDescriptor {
+export interface DataTypeDescriptor {
   kind: "data";
 }
 
-interface InterfaceTypeDescriptor {
+export interface InterfaceTypeDescriptor {
   kind: "interface";
 }
 
-interface AnyPointerTypeDescriptor {
+export interface AnyPointerTypeDescriptor {
   kind: "anyPointer";
 }
 
-type TypeDescriptor =
+export type TypeDescriptor =
   | PrimitiveTypeDescriptor
   | EnumTypeDescriptor
   | StructTypeDescriptor
@@ -78,7 +77,7 @@ type TypeDescriptor =
   | InterfaceTypeDescriptor
   | AnyPointerTypeDescriptor;
 
-interface SlotFieldDescriptor<T extends Record<string, unknown>> {
+export interface SlotFieldDescriptor<T extends Record<string, unknown>> {
   kind: "slot";
   name: keyof T & string;
   offset: number;
@@ -86,25 +85,25 @@ interface SlotFieldDescriptor<T extends Record<string, unknown>> {
   discriminantValue?: number;
 }
 
-interface GroupFieldDescriptor<T extends Record<string, unknown>> {
+export interface GroupFieldDescriptor<T extends Record<string, unknown>> {
   kind: "group";
   name: keyof T & string;
   type: StructTypeDescriptor;
   discriminantValue?: number;
 }
 
-type FieldDescriptor<T extends Record<string, unknown>> =
+export type FieldDescriptor<T extends Record<string, unknown>> =
   | SlotFieldDescriptor<T>
   | GroupFieldDescriptor<T>;
 
-interface StructUnionDescriptor<T extends Record<string, unknown>> {
+export interface StructUnionDescriptor<T extends Record<string, unknown>> {
   discriminantOffset: number;
   defaultDiscriminant: number;
   byName: Readonly<Record<keyof T & string, number>>;
   byDiscriminant: Readonly<Record<number, keyof T & string>>;
 }
 
-interface StructDescriptor<T extends Record<string, unknown>> {
+export interface StructDescriptor<T extends Record<string, unknown>> {
   kind: "struct";
   name: string;
   dataWordCount: number;
@@ -114,46 +113,46 @@ interface StructDescriptor<T extends Record<string, unknown>> {
   union?: StructUnionDescriptor<T>;
 }
 
-const TYPE_VOID: PrimitiveTypeDescriptor = { kind: "void" };
-const TYPE_BOOL: PrimitiveTypeDescriptor = { kind: "bool" };
-const TYPE_INT8: PrimitiveTypeDescriptor = { kind: "int8" };
-const TYPE_INT16: PrimitiveTypeDescriptor = { kind: "int16" };
-const TYPE_INT32: PrimitiveTypeDescriptor = { kind: "int32" };
-const TYPE_INT64: PrimitiveTypeDescriptor = { kind: "int64" };
-const TYPE_UINT8: PrimitiveTypeDescriptor = { kind: "uint8" };
-const TYPE_UINT16: PrimitiveTypeDescriptor = { kind: "uint16" };
-const TYPE_UINT32: PrimitiveTypeDescriptor = { kind: "uint32" };
-const TYPE_UINT64: PrimitiveTypeDescriptor = { kind: "uint64" };
-const TYPE_FLOAT32: PrimitiveTypeDescriptor = { kind: "float32" };
-const TYPE_FLOAT64: PrimitiveTypeDescriptor = { kind: "float64" };
-const TYPE_TEXT: TextTypeDescriptor = { kind: "text" };
-const TYPE_DATA: DataTypeDescriptor = { kind: "data" };
-const TYPE_INTERFACE: InterfaceTypeDescriptor = { kind: "interface" };
-const TYPE_ANY_POINTER: AnyPointerTypeDescriptor = { kind: "anyPointer" };
+export const TYPE_VOID: PrimitiveTypeDescriptor = { kind: "void" };
+export const TYPE_BOOL: PrimitiveTypeDescriptor = { kind: "bool" };
+export const TYPE_INT8: PrimitiveTypeDescriptor = { kind: "int8" };
+export const TYPE_INT16: PrimitiveTypeDescriptor = { kind: "int16" };
+export const TYPE_INT32: PrimitiveTypeDescriptor = { kind: "int32" };
+export const TYPE_INT64: PrimitiveTypeDescriptor = { kind: "int64" };
+export const TYPE_UINT8: PrimitiveTypeDescriptor = { kind: "uint8" };
+export const TYPE_UINT16: PrimitiveTypeDescriptor = { kind: "uint16" };
+export const TYPE_UINT32: PrimitiveTypeDescriptor = { kind: "uint32" };
+export const TYPE_UINT64: PrimitiveTypeDescriptor = { kind: "uint64" };
+export const TYPE_FLOAT32: PrimitiveTypeDescriptor = { kind: "float32" };
+export const TYPE_FLOAT64: PrimitiveTypeDescriptor = { kind: "float64" };
+export const TYPE_TEXT: TextTypeDescriptor = { kind: "text" };
+export const TYPE_DATA: DataTypeDescriptor = { kind: "data" };
+export const TYPE_INTERFACE: InterfaceTypeDescriptor = { kind: "interface" };
+export const TYPE_ANY_POINTER: AnyPointerTypeDescriptor = { kind: "anyPointer" };
 
-const WORD_BYTES = 8;
-const MASK_30 = 0x3fff_ffffn;
-const MASK_29 = 0x1fff_ffffn;
-const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder();
+export const WORD_BYTES = 8;
+export const MASK_30 = 0x3fff_ffffn;
+export const MASK_29 = 0x1fff_ffffn;
+export const TEXT_ENCODER: TextEncoder = new TextEncoder();
+export const TEXT_DECODER: TextDecoder = new TextDecoder();
 
-function bytesToWords(bytes: number): number {
+export function bytesToWords(bytes: number): number {
   return Math.ceil(bytes / WORD_BYTES);
 }
 
-function signed30(raw: bigint): number {
+export function signed30(raw: bigint): number {
   const value = Number(raw & MASK_30);
   return (value & (1 << 29)) !== 0 ? value - (1 << 30) : value;
 }
 
-function encodeSigned30(value: number): bigint {
+export function encodeSigned30(value: number): bigint {
   if (!Number.isInteger(value) || value < -(1 << 29) || value > (1 << 29) - 1) {
     throw new Error("pointer offset is out of signed 30-bit range: " + value);
   }
   return BigInt(value < 0 ? value + (1 << 30) : value) & MASK_30;
 }
 
-function isDataType(type: TypeDescriptor): boolean {
+export function isDataType(type: TypeDescriptor): boolean {
   switch (type.kind) {
     case "void":
     case "bool":
@@ -174,11 +173,11 @@ function isDataType(type: TypeDescriptor): boolean {
   }
 }
 
-function isPointerType(type: TypeDescriptor): boolean {
+export function isPointerType(type: TypeDescriptor): boolean {
   return !isDataType(type);
 }
 
-function dataByteOffset(type: TypeDescriptor, offset: number): number {
+export function dataByteOffset(type: TypeDescriptor, offset: number): number {
   switch (type.kind) {
     case "int8":
     case "uint8":
@@ -200,7 +199,7 @@ function dataByteOffset(type: TypeDescriptor, offset: number): number {
   }
 }
 
-function listElementSize(type: TypeDescriptor): number {
+export function listElementSize(type: TypeDescriptor): number {
   switch (type.kind) {
     case "void":
       return 0;
@@ -232,20 +231,20 @@ function listElementSize(type: TypeDescriptor): number {
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
+export function asRecord(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object") return {};
   return value as Record<string, unknown>;
 }
 
-function asBoolean(value: unknown): boolean {
+export function asBoolean(value: unknown): boolean {
   return value === true;
 }
 
-function asNumber(value: unknown): number {
+export function asNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function asBigInt(value: unknown): bigint {
+export function asBigInt(value: unknown): bigint {
   if (typeof value === "bigint") return value;
   if (typeof value === "number" && Number.isFinite(value)) return BigInt(Math.trunc(value));
   if (typeof value === "string" && value.length > 0) {
@@ -258,19 +257,19 @@ function asBigInt(value: unknown): bigint {
   return 0n;
 }
 
-function asString(value: unknown): string {
+export function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function asUint8Array(value: unknown): Uint8Array {
+export function asUint8Array(value: unknown): Uint8Array {
   return value instanceof Uint8Array ? value : new Uint8Array(0);
 }
 
-function asArray(value: unknown): unknown[] {
+export function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function capabilityIndexFrom(value: unknown): number | null {
+export function capabilityIndexFrom(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
     return value;
@@ -285,7 +284,7 @@ function capabilityIndexFrom(value: unknown): number | null {
   throw new Error("invalid capability pointer value");
 }
 
-function asAnyPointerValue(value: unknown): AnyPointerValue {
+export function asAnyPointerValue(value: unknown): AnyPointerValue {
   if (value === null || value === undefined) {
     return { kind: "null" };
   }
@@ -303,7 +302,7 @@ function asAnyPointerValue(value: unknown): AnyPointerValue {
   return { kind: "interface", capabilityIndex: index };
 }
 
-function encodeCapabilityPointerWord(capabilityIndex: number): bigint {
+export function encodeCapabilityPointerWord(capabilityIndex: number): bigint {
   if (!Number.isInteger(capabilityIndex) || capabilityIndex < 0) {
     throw new Error("capabilityIndex must be a non-negative integer");
   }
@@ -313,14 +312,14 @@ function encodeCapabilityPointerWord(capabilityIndex: number): bigint {
   return 0x3n | (BigInt(capabilityIndex) << 32n);
 }
 
-function decodeCapabilityPointerWord(word: bigint): CapabilityPointer {
+export function decodeCapabilityPointerWord(word: bigint): CapabilityPointer {
   const kind = Number(word & 0x3n);
   if (kind !== 3) throw new Error("expected capability pointer kind=3");
   const capabilityIndex = Number((word >> 32n) & 0xffff_ffffn);
   return { capabilityIndex };
 }
 
-function defaultValueForType(type: TypeDescriptor): unknown {
+export function defaultValueForType(type: TypeDescriptor): unknown {
   switch (type.kind) {
     case "void":
       return undefined;
@@ -355,7 +354,7 @@ function defaultValueForType(type: TypeDescriptor): unknown {
   }
 }
 
-class MessageBuilder {
+export class MessageBuilder {
   private bytes: Uint8Array;
   private words: number;
 
@@ -528,14 +527,14 @@ class MessageBuilder {
   }
 }
 
-interface StructRef {
+export interface StructRef {
   segmentId: number;
   startWord: number;
   dataWordCount: number;
   pointerCount: number;
 }
 
-interface FlatListRef {
+export interface FlatListRef {
   kind: "flat";
   segmentId: number;
   startWord: number;
@@ -543,7 +542,7 @@ interface FlatListRef {
   elementCount: number;
 }
 
-interface InlineCompositeListRef {
+export interface InlineCompositeListRef {
   kind: "inlineComposite";
   segmentId: number;
   tagWord: number;
@@ -553,15 +552,15 @@ interface InlineCompositeListRef {
   wordsInElements: number;
 }
 
-type ListRef = FlatListRef | InlineCompositeListRef;
+export type ListRef = FlatListRef | InlineCompositeListRef;
 
-interface ResolvedPointer {
+export interface ResolvedPointer {
   segmentId: number;
   pointerWord: number;
   word: bigint;
 }
 
-class MessageReader {
+export class MessageReader {
   private readonly segments: Uint8Array[];
 
   constructor(bytes: Uint8Array) {
@@ -1043,23 +1042,23 @@ class MessageReader {
   }
 }
 
-function enumOrdinal(type: EnumTypeDescriptor, value: unknown): number {
+export function enumOrdinal(type: EnumTypeDescriptor, value: unknown): number {
   if (typeof value !== "string") return 0;
   const ordinal = (type.toOrdinal as Record<string, number>)[value];
   return typeof ordinal === "number" ? ordinal : 0;
 }
 
-function enumValue(type: EnumTypeDescriptor, ordinal: number): string {
+export function enumValue(type: EnumTypeDescriptor, ordinal: number): string {
   if (ordinal >= 0 && ordinal < type.byOrdinal.length) return type.byOrdinal[ordinal];
   return type.byOrdinal[0] ?? "";
 }
 
-function isPresentField(record: Record<string, unknown>, name: string): boolean {
+export function isPresentField(record: Record<string, unknown>, name: string): boolean {
   return Object.prototype.hasOwnProperty.call(record, name) &&
     record[name] !== undefined;
 }
 
-function resolveActiveDiscriminant<T extends Record<string, unknown>>(
+export function resolveActiveDiscriminant<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   record: Record<string, unknown>,
 ): number | undefined {
@@ -1079,7 +1078,7 @@ function resolveActiveDiscriminant<T extends Record<string, unknown>>(
   return union.defaultDiscriminant;
 }
 
-function encodeStructMessage<T extends Record<string, unknown>>(
+export function encodeStructMessage<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   value: T,
 ): Uint8Array {
@@ -1090,7 +1089,7 @@ function encodeStructMessage<T extends Record<string, unknown>>(
   return builder.toMessageBytes();
 }
 
-function decodeStructMessage<T extends Record<string, unknown>>(
+export function decodeStructMessage<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   bytes: Uint8Array,
 ): T {
@@ -1102,7 +1101,7 @@ function decodeStructMessage<T extends Record<string, unknown>>(
   return decodeStructAt(reader, descriptor, root);
 }
 
-function encodeStructAt<T extends Record<string, unknown>>(
+export function encodeStructAt<T extends Record<string, unknown>>(
   builder: MessageBuilder,
   descriptor: StructDescriptor<T>,
   structWord: number,
@@ -1149,7 +1148,7 @@ function encodeStructAt<T extends Record<string, unknown>>(
   }
 }
 
-function decodeStructAt<T extends Record<string, unknown>>(
+export function decodeStructAt<T extends Record<string, unknown>>(
   reader: MessageReader,
   descriptor: StructDescriptor<T>,
   structRef: StructRef,
@@ -1199,7 +1198,7 @@ function decodeStructAt<T extends Record<string, unknown>>(
   return out;
 }
 
-function encodeDataField(
+export function encodeDataField(
   builder: MessageBuilder,
   structWord: number,
   offset: number,
@@ -1254,7 +1253,7 @@ function encodeDataField(
   }
 }
 
-function decodeDataField(
+export function decodeDataField(
   reader: MessageReader,
   structRef: StructRef,
   offset: number,
@@ -1294,7 +1293,7 @@ function decodeDataField(
   }
 }
 
-function encodePointerField(
+export function encodePointerField(
   builder: MessageBuilder,
   pointerWord: number,
   type: TypeDescriptor,
@@ -1358,7 +1357,7 @@ function encodePointerField(
   }
 }
 
-function decodePointerField(
+export function decodePointerField(
   reader: MessageReader,
   segmentId: number,
   pointerWord: number,
@@ -1401,7 +1400,7 @@ function decodePointerField(
   }
 }
 
-function encodeListField(
+export function encodeListField(
   builder: MessageBuilder,
   pointerWord: number,
   elementType: TypeDescriptor,
@@ -1521,7 +1520,7 @@ function encodeListField(
   }
 }
 
-function decodeListField(
+export function decodeListField(
   reader: MessageReader,
   segmentId: number,
   pointerWord: number,
@@ -1745,7 +1744,7 @@ export interface PreambleCapDescriptor {
 }
 
 /** Tag value for a sender-hosted capability descriptor. */
-const CAP_DESCRIPTOR_TAG_SENDER_HOSTED = 1;
+export const CAP_DESCRIPTOR_TAG_SENDER_HOSTED = 1;
 
 /** Result of encoding a struct message with cap table information. */
 export interface EncodeWithCapsResult {
@@ -1757,7 +1756,7 @@ export interface EncodeWithCapsResult {
  * Collected capability entry returned by collectCapabilityPointersFromStruct.
  * fieldPath is a dot-separated path useful for debugging.
  */
-interface CollectedCapability {
+export interface CollectedCapability {
   fieldPath: string;
   capabilityIndex: number;
 }
@@ -1767,7 +1766,7 @@ interface CollectedCapability {
  * its descriptor.  Returns an array of { fieldPath, capabilityIndex }
  * entries in the order they appear in the struct fields.
  */
-function collectCapabilityPointersFromStruct<T extends Record<string, unknown>>(
+export function collectCapabilityPointersFromStruct<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   value: T,
   prefix: string,
@@ -1921,7 +1920,7 @@ export function encodeStructMessageWithCaps<T extends Record<string, unknown>>(
  * Create a shallow copy of a struct value with capability indices remapped
  * according to the provided mapping (original index -> cap table position).
  */
-function remapCapabilityIndices<T extends Record<string, unknown>>(
+export function remapCapabilityIndices<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   value: T,
   mapping: Map<number, number>,
@@ -2059,7 +2058,7 @@ export function decodeStructMessageWithCaps<T extends Record<string, unknown>>(
  * Walk a decoded struct and replace capability indices with their resolved
  * IDs from the cap table mapping (cap table index -> export/import ID).
  */
-function resolveDecodedCapabilities<T extends Record<string, unknown>>(
+export function resolveDecodedCapabilities<T extends Record<string, unknown>>(
   descriptor: StructDescriptor<T>,
   value: T,
   mapping: Map<number, number>,
@@ -2163,4 +2162,3 @@ function resolveDecodedCapabilities<T extends Record<string, unknown>>(
 
   return out as T;
 }
-`;

@@ -893,7 +893,7 @@ export class SessionRpcClientTransport {
         await this.#sendFinish(questionId, options.finish);
       }
 
-      let contentBytes = mwCtx
+      const contentBytes = mwCtx
         ? await this.#runOnResponse(message.contentBytes, mwCtx)
         : message.contentBytes;
 
@@ -1173,7 +1173,7 @@ export class SessionRpcClientTransport {
       throw err;
     }
 
-    let contentBytes = mwCtx
+    const contentBytes = mwCtx
       ? await this.#runOnResponse(decoded.contentBytes, mwCtx)
       : decoded.contentBytes;
 

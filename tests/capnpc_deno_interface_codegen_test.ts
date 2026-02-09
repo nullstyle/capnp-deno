@@ -14,10 +14,23 @@ function decodeBase64(base64: string): Uint8Array {
   return out;
 }
 
+const CODEGEN_RUNTIME_URL = new URL(
+  "../src/codegen_runtime.ts",
+  import.meta.url,
+).href;
+
+function patchRuntimeImport(source: string): string {
+  return source.replaceAll(
+    `"@nullstyle/capnp/codegen_runtime"`,
+    `"${CODEGEN_RUNTIME_URL}"`,
+  );
+}
+
 async function importGeneratedModule(
   source: string,
 ): Promise<Record<string, unknown>> {
-  const url = `data:application/typescript;base64,${btoa(source)}`;
+  const patched = patchRuntimeImport(source);
+  const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
 }
 
@@ -25,7 +38,8 @@ async function importRpcWithInlineCapnp(
   capnpSource: string,
   rpcSource: string,
 ): Promise<{ capnp: Record<string, unknown>; rpc: Record<string, unknown> }> {
-  const capnpUrl = `data:application/typescript;base64,${btoa(capnpSource)}`;
+  const patchedCapnp = patchRuntimeImport(capnpSource);
+  const capnpUrl = `data:application/typescript;base64,${btoa(patchedCapnp)}`;
   const rpcPatched = rpcSource.split("./interface_anypointer_codegen_capnp.ts")
     .join(capnpUrl);
   const rpcUrl = `data:application/typescript;base64,${btoa(rpcPatched)}`;
@@ -61,12 +75,8 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
 
   const source = capnp.contents;
   assert(
-    source.includes("export interface CapabilityPointer"),
-    "expected CapabilityPointer runtime type",
-  );
-  assert(
-    source.includes("export type AnyPointerValue"),
-    "expected AnyPointerValue runtime type",
+    source.includes('@nullstyle/capnp/codegen_runtime'),
+    "expected codegen_runtime re-export",
   );
   assert(
     source.includes("cap: CapabilityPointer | null;"),

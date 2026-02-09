@@ -2,7 +2,10 @@
   "name": "@nullstyle/capnp",
   "version": "0.0.0-dev",
   "license": "MIT",
-  "exports": "./mod.ts",
+  "exports": {
+    ".": "./mod.ts",
+    "./codegen_runtime": "./src/codegen_runtime.ts"
+  },
   "publish": {
     "include": ["mod.ts", "src/**/*.ts", "generated/*.wasm", "README.md"],
     "exclude": [
@@ -25,11 +28,11 @@
     "check": "deno check mod.ts src/*.ts src/transports/*.ts src/rpc_wire/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
-    "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64 tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
-    "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64 tests --ignore=tests/socket_integration_test.ts,tests/real_wasm_serde_test.ts,tests/real_wasm_rpc_flow_test.ts,tests/real_wasm_service_flow_test.ts",
+    "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
+    "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests --ignore=tests/socket_integration_test.ts,tests/real_wasm_serde_test.ts,tests/real_wasm_rpc_flow_test.ts,tests/real_wasm_service_flow_test.ts,tests/tcp_rpc_interop_test.ts",
     "test:coverage": "deno task test:unit --coverage=coverage/",
     "test:integration": "deno test tests/socket_integration_test.ts --allow-net=127.0.0.1",
-    "test:real": "deno test tests/real_wasm_serde_test.ts tests/real_wasm_rpc_flow_test.ts tests/real_wasm_service_flow_test.ts --allow-read",
+    "test:real": "deno test tests/real_wasm_serde_test.ts tests/real_wasm_rpc_flow_test.ts tests/real_wasm_service_flow_test.ts tests/tcp_rpc_interop_test.ts --allow-read --allow-net=127.0.0.1",
     "test": "deno task test:unit",
     "build:wasm": "bash scripts/build_wasm.sh",
     "smoke:real": "deno run --allow-read examples/smoke_real_wasm.ts",

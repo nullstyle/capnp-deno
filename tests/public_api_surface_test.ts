@@ -57,6 +57,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "createRpcIntrospectionMiddleware",
   "createRpcMetricsMiddleware",
   "createRpcSessionWithReconnect",
+  "createStreamSender",
   "decodeBootstrapRequestFrame",
   "decodeCallRequestFrame",
   "decodeFinishFrame",

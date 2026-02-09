@@ -244,16 +244,8 @@ Deno.test("capnpc-deno emits binary codec runtime and schema types", () => {
   const rpc = fileByPath(generated, "person_codegen_rpc.ts");
   const meta = fileByPath(generated, "person_codegen_meta.ts");
   assert(
-    capnp.contents.includes("export interface StructCodec<T>"),
-    "expected StructCodec interface in generated output",
-  );
-  assert(
-    capnp.contents.includes("function encodeStructMessage"),
-    "expected binary encode runtime in generated output",
-  );
-  assert(
-    capnp.contents.includes("function decodeStructMessage"),
-    "expected binary decode runtime in generated output",
+    capnp.contents.includes('@nullstyle/capnp/codegen_runtime'),
+    "expected codegen_runtime re-export in generated output",
   );
   assert(
     capnp.contents.includes(
@@ -271,10 +263,19 @@ Deno.test("capnpc-deno emits binary codec runtime and schema types", () => {
   );
 });
 
+const CODEGEN_RUNTIME_URL = new URL(
+  "../src/codegen_runtime.ts",
+  import.meta.url,
+).href;
+
 async function importGeneratedModule(
   source: string,
 ): Promise<Record<string, unknown>> {
-  const url = `data:application/typescript;base64,${btoa(source)}`;
+  const patched = source.replaceAll(
+    `"@nullstyle/capnp/codegen_runtime"`,
+    `"${CODEGEN_RUNTIME_URL}"`,
+  );
+  const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
 }
 

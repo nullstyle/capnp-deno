@@ -231,6 +231,15 @@ export {
   type CreateRpcSessionWithReconnectOptions,
 } from "./src/reconnect_wrappers.ts";
 
+// === Streaming ===
+
+export {
+  createStreamSender,
+  type StreamCallFn,
+  type StreamSender,
+  type StreamSenderOptions,
+} from "./src/streaming.ts";
+
 // === Observability ===
 
 export {

@@ -8,7 +8,7 @@ import {
   RpcServerOutboundClient,
 } from "../mod.ts";
 import type { RpcTransport } from "../src/transport.ts";
-import { assert, assertEquals, deferred } from "./test_utils.ts";
+import { assert, assertEquals } from "./test_utils.ts";
 
 // ---------------------------------------------------------------------------
 // Mock transport
@@ -23,11 +23,11 @@ class MockTransport implements RpcTransport {
     this.onFrame = onFrame;
   }
 
-  async send(frame: Uint8Array): Promise<void> {
+  send(frame: Uint8Array): void {
     this.sentFrames.push(frame);
   }
 
-  async close(): Promise<void> {
+  close(): void {
     this.closed = true;
   }
 
