@@ -1,6 +1,6 @@
-# capnp-zig Additions For capnp-deno (Post-6446917)
+# capnp-zig Additions For capnp-deno (Post-364909f)
 
-Updated: 2026-02-08 Evaluated submodule commit: `vendor/capnp-zig@6446917`
+Updated: 2026-02-09 Evaluated submodule commit: `vendor/capnp-zig@364909f`
 
 ## Status summary
 
