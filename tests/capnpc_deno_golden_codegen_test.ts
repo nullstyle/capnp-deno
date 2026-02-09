@@ -639,22 +639,66 @@ Deno.test("capnpc-deno multiple interfaces in one file are deterministic", async
     id: bigint,
     name: string,
     methodNames: string[],
-  ): CodeGeneratorRequestModel["nodes"][0] {
+    methodIdBase: bigint,
+  ): {
+    iface: CodeGeneratorRequestModel["nodes"][0];
+    methodStructs: CodeGeneratorRequestModel["nodes"];
+  } {
+    const methods = methodNames.map((mName, idx) => ({
+      name: mName,
+      codeOrder: idx,
+      paramStructTypeId: methodIdBase + BigInt(idx * 2),
+      resultStructTypeId: methodIdBase + BigInt(idx * 2 + 1),
+    }));
+    const methodStructs: CodeGeneratorRequestModel["nodes"] = [];
+    for (const method of methods) {
+      methodStructs.push({
+        id: method.paramStructTypeId,
+        displayName: `${prefix}${name}.${method.name}$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: id,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      });
+      methodStructs.push({
+        id: method.resultStructTypeId,
+        displayName: `${prefix}${name}.${method.name}$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: id,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      });
+    }
+
     return {
-      id,
-      displayName: `${prefix}${name}`,
-      displayNamePrefixLength: prefix.length,
-      scopeId: fileId,
-      nestedNodes: [],
-      kind: "interface",
-      interfaceNode: {
-        methods: methodNames.map((mName, idx) => ({
-          name: mName,
-          codeOrder: idx,
-          paramStructTypeId: 0xf00n + BigInt(idx * 2),
-          resultStructTypeId: 0xf01n + BigInt(idx * 2),
-        })),
+      iface: {
+        id,
+        displayName: `${prefix}${name}`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods,
+        },
       },
+      methodStructs,
     };
   }
 
@@ -671,14 +715,30 @@ Deno.test("capnpc-deno multiple interfaces in one file are deterministic", async
     kind: "file" as const,
   };
 
-  const ifaceA = makeInterfaceNode(ifaceIdA, "Alpha", ["run", "stop"]);
-  const ifaceB = makeInterfaceNode(ifaceIdB, "Middle", ["pause"]);
-  const ifaceC = makeInterfaceNode(ifaceIdC, "Zebra", ["execute"]);
+  const ifaceA = makeInterfaceNode(ifaceIdA, "Alpha", ["run", "stop"], 0xf00n);
+  const ifaceB = makeInterfaceNode(ifaceIdB, "Middle", ["pause"], 0xf20n);
+  const ifaceC = makeInterfaceNode(ifaceIdC, "Zebra", ["execute"], 0xf40n);
 
   // Forward node order
-  const nodesForward = [fileNode, ifaceA, ifaceB, ifaceC];
+  const nodesForward = [
+    fileNode,
+    ifaceA.iface,
+    ...ifaceA.methodStructs,
+    ifaceB.iface,
+    ...ifaceB.methodStructs,
+    ifaceC.iface,
+    ...ifaceC.methodStructs,
+  ];
   // Reversed node order
-  const nodesReversed = [fileNode, ifaceC, ifaceB, ifaceA];
+  const nodesReversed = [
+    fileNode,
+    ifaceC.iface,
+    ...[...ifaceC.methodStructs].reverse(),
+    ifaceB.iface,
+    ...[...ifaceB.methodStructs].reverse(),
+    ifaceA.iface,
+    ...[...ifaceA.methodStructs].reverse(),
+  ];
 
   const requestedFiles = [
     { id: fileId, filename: "schema/multi_iface.capnp", imports: [] },

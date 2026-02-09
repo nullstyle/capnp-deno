@@ -12,8 +12,9 @@ export interface RpcRuntimeModuleOptions {
   expectedVersion?: number;
 }
 
-const STATIC_RUNTIME_WASM_EXPORTS =
-  runtimeWasmExports as unknown as CapnpWasmExports;
+const STATIC_RUNTIME_WASM_EXPORTS = runtimeWasmExports as unknown as
+  & CapnpWasmExports
+  & Record<string, unknown>;
 
 /**
  * Create a fresh WASM peer using the runtime module defaults.

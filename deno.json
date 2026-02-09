@@ -1,15 +1,10 @@
 {
-  "name": "@capnp/deno",
+  "name": "@nullstyle/capnp",
   "version": "0.0.0-dev",
   "license": "MIT",
   "exports": "./mod.ts",
   "publish": {
-    "include": [
-      "mod.ts",
-      "src/**/*.ts",
-      "generated/*.wasm",
-      "README.md"
-    ],
+    "include": ["mod.ts", "src/**/*.ts", "generated/*.wasm", "README.md"],
     "exclude": [
       "tests/**",
       "bench/**",
@@ -27,7 +22,7 @@
   "tasks": {
     "fmt": "deno fmt mod.ts src tests bench examples docs scripts deno.json README.md AGENTS.md",
     "lint": "deno lint",
-    "check": "deno check mod.ts src/*.ts src/transports/*.ts src/rpc_wire/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts examples/mmo-party-chat/*.ts",
+    "check": "deno check mod.ts src/*.ts src/transports/*.ts src/rpc_wire/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
     "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64 tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",

@@ -23,7 +23,9 @@ export function emitRpcModule(
   out.push("");
 
   const localTypes = collectLocalTypes(fileNode, nodeById);
-  const structById = new Map(localTypes.structInfos.map((item) => [item.id, item] as const));
+  const structById = new Map(
+    localTypes.structInfos.map((item) => [item.id, item] as const),
+  );
   const interfaces = collectLocalInterfaces(fileNode, nodeById);
 
   if (interfaces.length === 0) {
@@ -38,7 +40,9 @@ export function emitRpcModule(
   for (const info of interfaces) {
     const methods = info.node.interfaceNode?.methods
       .slice()
-      .sort((a, b) => (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)) ??
+      .sort((a, b) =>
+        (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
+      ) ??
       [];
     for (const method of methods) {
       const params = structById.get(method.paramStructTypeId);
@@ -54,14 +58,22 @@ export function emitRpcModule(
     }
   }
 
-  const sortedTypeImports = [...typeImports].sort((left, right) => left.localeCompare(right));
-  const sortedValueImports = [...valueImports].sort((left, right) => left.localeCompare(right));
+  const sortedTypeImports = [...typeImports].sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const sortedValueImports = [...valueImports].sort((left, right) =>
+    left.localeCompare(right)
+  );
   out.push(
-    `import type { ${sortedTypeImports.join(", ")} } from ${JSON.stringify(`./${capnpModulePath}`)};`,
+    `import type { ${sortedTypeImports.join(", ")} } from ${
+      JSON.stringify(`./${capnpModulePath}`)
+    };`,
   );
   if (sortedValueImports.length > 0) {
     out.push(
-      `import { ${sortedValueImports.join(", ")} } from ${JSON.stringify(`./${capnpModulePath}`)};`,
+      `import { ${sortedValueImports.join(", ")} } from ${
+        JSON.stringify(`./${capnpModulePath}`)
+      };`,
     );
   }
   out.push("");
@@ -92,8 +104,12 @@ export function emitRpcModule(
   out.push("    params: Uint8Array,");
   out.push("    options?: RpcCallOptions,");
   out.push("  ): Promise<Uint8Array>;");
-  out.push("  finish?(questionId: number, options?: RpcFinishOptions): Promise<void> | void;");
-  out.push("  release?(capability: CapabilityPointer, referenceCount?: number): Promise<void> | void;");
+  out.push(
+    "  finish?(questionId: number, options?: RpcFinishOptions): Promise<void> | void;",
+  );
+  out.push(
+    "  release?(capability: CapabilityPointer, referenceCount?: number): Promise<void> | void;",
+  );
   out.push("}");
   out.push("");
   out.push("export interface RpcServerDispatch {");
@@ -103,6 +119,26 @@ export function emitRpcModule(
   out.push("    params: Uint8Array,");
   out.push("    ctx: RpcCallContext,");
   out.push("  ): Promise<Uint8Array>;");
+  out.push("}");
+  out.push("");
+  out.push(
+    "export interface RpcBootstrapClientTransport extends RpcClientTransport {",
+  );
+  out.push(
+    "  bootstrap(options?: RpcCallOptions): Promise<CapabilityPointer>;",
+  );
+  out.push("}");
+  out.push("");
+  out.push("export interface RpcExportCapabilityOptions {");
+  out.push("  capabilityIndex?: number;");
+  out.push("  referenceCount?: number;");
+  out.push("}");
+  out.push("");
+  out.push("export interface RpcServerRegistry {");
+  out.push("  exportCapability(");
+  out.push("    dispatch: RpcServerDispatch,");
+  out.push("    options?: RpcExportCapabilityOptions,");
+  out.push("  ): CapabilityPointer;");
   out.push("}");
   out.push("");
 
@@ -120,50 +156,87 @@ function emitInterfaceCode(
 ): void {
   const methods = info.node.interfaceNode?.methods
     .slice()
-    .sort((a, b) => (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)) ??
+    .sort((a, b) =>
+      (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
+    ) ??
     [];
-  const methodNameByOrdinal = new Map<number, string>();
+  const usedMethodNames = new Set<string>();
+  const resolvedMethods: Array<{
+    method: (typeof methods)[number];
+    methodName: string;
+    params: StructInfo;
+    results: StructInfo;
+  }> = [];
 
-  out.push(`export const ${info.typeName}InterfaceId = ${formatBigint(info.id)};`);
-  out.push("");
-  out.push(`export const ${info.typeName}MethodOrdinals = {`);
   for (const method of methods) {
     const baseName = toCamelCase(method.name);
     let methodName = baseName;
     let suffix = 2;
-    while ([...methodNameByOrdinal.values()].includes(methodName)) {
+    while (usedMethodNames.has(methodName)) {
       methodName = `${baseName}${suffix}`;
       suffix += 1;
     }
-    methodNameByOrdinal.set(method.codeOrder, methodName);
-    out.push(`  ${quoteIfNeeded(methodName)}: ${method.codeOrder},`);
+    usedMethodNames.add(methodName);
+
+    const params = structById.get(method.paramStructTypeId);
+    if (!params) {
+      throw new Error(
+        `interface ${info.typeName} method ${
+          JSON.stringify(method.name)
+        } references unknown param struct id ${
+          formatBigint(method.paramStructTypeId)
+        }`,
+      );
+    }
+    const results = structById.get(method.resultStructTypeId);
+    if (!results) {
+      throw new Error(
+        `interface ${info.typeName} method ${
+          JSON.stringify(method.name)
+        } references unknown result struct id ${
+          formatBigint(method.resultStructTypeId)
+        }`,
+      );
+    }
+
+    resolvedMethods.push({
+      method,
+      methodName,
+      params,
+      results,
+    });
+  }
+
+  out.push(
+    `export const ${info.typeName}InterfaceId = ${formatBigint(info.id)};`,
+  );
+  out.push("");
+  out.push(`export const ${info.typeName}MethodOrdinals = {`);
+  for (const resolved of resolvedMethods) {
+    out.push(
+      `  ${quoteIfNeeded(resolved.methodName)}: ${resolved.method.codeOrder},`,
+    );
   }
   out.push("} as const;");
   out.push("");
 
   out.push(`export interface ${info.typeName}Client {`);
-  for (const method of methods) {
-    const params = structById.get(method.paramStructTypeId);
-    const results = structById.get(method.resultStructTypeId);
-    const methodName = methodNameByOrdinal.get(method.codeOrder) ?? toCamelCase(method.name);
-    const paramsType = params?.typeName ?? "Record<string, unknown>";
-    const resultsType = results?.typeName ?? "unknown";
+  for (const resolved of resolvedMethods) {
     out.push(
-      `  ${quoteIfNeeded(methodName)}(params: ${paramsType}, options?: RpcCallOptions): Promise<${resultsType}>;`,
+      `  ${
+        quoteIfNeeded(resolved.methodName)
+      }(params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${resolved.results.typeName}>;`,
     );
   }
   out.push("}");
   out.push("");
 
   out.push(`export interface ${info.typeName}Server {`);
-  for (const method of methods) {
-    const params = structById.get(method.paramStructTypeId);
-    const results = structById.get(method.resultStructTypeId);
-    const methodName = methodNameByOrdinal.get(method.codeOrder) ?? toCamelCase(method.name);
-    const paramsType = params?.typeName ?? "Record<string, unknown>";
-    const resultsType = results?.typeName ?? "unknown";
+  for (const resolved of resolvedMethods) {
     out.push(
-      `  ${quoteIfNeeded(methodName)}(params: ${paramsType}, ctx: RpcCallContext): Promise<${resultsType}> | ${resultsType};`,
+      `  ${
+        quoteIfNeeded(resolved.methodName)
+      }(params: ${resolved.params.typeName}, ctx: RpcCallContext): Promise<${resolved.results.typeName}> | ${resolved.results.typeName};`,
     );
   }
   out.push("}");
@@ -173,23 +246,15 @@ function emitInterfaceCode(
     `export function create${info.typeName}Client(transport: RpcClientTransport, capability: CapabilityPointer): ${info.typeName}Client {`,
   );
   out.push("  return {");
-  for (const method of methods) {
-    const params = structById.get(method.paramStructTypeId);
-    const results = structById.get(method.resultStructTypeId);
-    const methodName = methodNameByOrdinal.get(method.codeOrder) ?? toCamelCase(method.name);
-    const paramsType = params?.typeName ?? "Record<string, unknown>";
-    const resultsType = results?.typeName ?? "unknown";
-    const paramsCodec = params?.codecConst;
-    const resultsCodec = results?.codecConst;
-
+  for (const resolved of resolvedMethods) {
     out.push(
-      `    ${quoteIfNeeded(methodName)}: async (params: ${paramsType}, options?: RpcCallOptions): Promise<${resultsType}> => {`,
+      `    ${
+        quoteIfNeeded(resolved.methodName)
+      }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${resolved.results.typeName}> => {`,
     );
-    if (paramsCodec) {
-      out.push(`      const payload = ${paramsCodec}.encode(params);`);
-    } else {
-      out.push("      const payload = new Uint8Array(0);");
-    }
+    out.push(
+      `      const payload = ${resolved.params.codecConst}.encode(params);`,
+    );
     out.push("      let questionId: number | undefined;");
     out.push("      const callOptions: RpcCallOptions = {");
     out.push("        ...(options ?? {}),");
@@ -199,22 +264,30 @@ function emitInterfaceCode(
     out.push("        },");
     out.push("      };");
     out.push(
-      `      const response = await transport.call(capability, ${info.typeName}MethodOrdinals[${JSON.stringify(methodName)}], payload, callOptions);`,
+      `      const response = await transport.call(capability, ${info.typeName}MethodOrdinals[${
+        JSON.stringify(resolved.methodName)
+      }], payload, callOptions);`,
     );
     out.push("      try {");
-    if (resultsCodec) {
-      out.push(`        return ${resultsCodec}.decode(response);`);
-    } else {
-      out.push(`        return response as unknown as ${resultsType};`);
-    }
+    out.push(`        return ${resolved.results.codecConst}.decode(response);`);
     out.push("      } finally {");
-    out.push("        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {");
+    out.push(
+      "        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
+    );
     out.push("          await transport.finish(questionId, options?.finish);");
     out.push("        }");
     out.push("      }");
     out.push("    },");
   }
   out.push("  };");
+  out.push("}");
+  out.push("");
+  out.push(`export async function bootstrap${info.typeName}Client(`);
+  out.push("  transport: RpcBootstrapClientTransport,");
+  out.push("  options?: RpcCallOptions,");
+  out.push(`): Promise<${info.typeName}Client> {`);
+  out.push("  const capability = await transport.bootstrap(options);");
+  out.push(`  return create${info.typeName}Client(transport, capability);`);
   out.push("}");
   out.push("");
 
@@ -227,27 +300,17 @@ function emitInterfaceCode(
     "    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<Uint8Array> => {",
   );
   out.push("      switch (methodId) {");
-  for (const method of methods) {
-    const params = structById.get(method.paramStructTypeId);
-    const results = structById.get(method.resultStructTypeId);
-    const methodName = methodNameByOrdinal.get(method.codeOrder) ?? toCamelCase(method.name);
-    const paramsCodec = params?.codecConst;
-    const resultsCodec = results?.codecConst;
-
-    out.push(`        case ${method.codeOrder}: {`);
-    if (paramsCodec) {
-      out.push(`          const decoded = ${paramsCodec}.decode(params);`);
-    } else {
-      out.push("          const decoded = {} as Record<string, unknown>;");
-    }
+  for (const resolved of resolvedMethods) {
+    out.push(`        case ${resolved.method.codeOrder}: {`);
     out.push(
-      `          const result = await server[${JSON.stringify(methodName)}](decoded, ctx);`,
+      `          const decoded = ${resolved.params.codecConst}.decode(params);`,
     );
-    if (resultsCodec) {
-      out.push(`          return ${resultsCodec}.encode(result);`);
-    } else {
-      out.push("          return new Uint8Array(0);");
-    }
+    out.push(
+      `          const result = await server[${
+        JSON.stringify(resolved.methodName)
+      }](decoded, ctx);`,
+    );
+    out.push(`          return ${resolved.results.codecConst}.encode(result);`);
     out.push("        }");
   }
   out.push("        default:");
@@ -255,6 +318,16 @@ function emitInterfaceCode(
   out.push("      }");
   out.push("    },");
   out.push("  };");
+  out.push("}");
+  out.push("");
+  out.push(`export function register${info.typeName}Server(`);
+  out.push("  registry: RpcServerRegistry,");
+  out.push(`  server: ${info.typeName}Server,`);
+  out.push("  options: RpcExportCapabilityOptions = {},");
+  out.push("): CapabilityPointer {");
+  out.push(
+    `  return registry.exportCapability(create${info.typeName}Server(server), options);`,
+  );
   out.push("}");
   out.push("");
 }

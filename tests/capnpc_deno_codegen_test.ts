@@ -374,7 +374,7 @@ Deno.test("capnpc-deno generated runtime decodes far pointer text fields", async
   assertEquals((decoded.tags as string[]).join(","), value.tags.join(","));
 });
 
-function makeRpcFallbackRequest(): CodeGeneratorRequestModel {
+function makeRpcMethodCollisionRequest(): CodeGeneratorRequestModel {
   const fileId = 0x100n;
   const interfaceId = 0x101n;
   const prefix = "schema/fallback.capnp:";
@@ -418,11 +418,150 @@ function makeRpcFallbackRequest(): CodeGeneratorRequestModel {
           ],
         },
       },
+      {
+        id: 0x200n,
+        displayName: `${prefix}Svc.DoThing$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: 0x201n,
+        displayName: `${prefix}Svc.DoThing$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: 0x202n,
+        displayName: `${prefix}Svc.DoThing2$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: 0x203n,
+        displayName: `${prefix}Svc.DoThing2$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: 0x204n,
+        displayName: `${prefix}Svc.123start$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: 0x205n,
+        displayName: `${prefix}Svc.123start$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
     ],
     requestedFiles: [
       {
         id: fileId,
         filename: "schema/fallback.capnp",
+        imports: [],
+      },
+    ],
+  };
+}
+
+function makeMissingRpcStructRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x110n;
+  const interfaceId = 0x111n;
+  const prefix = "schema/fallback_missing.capnp:";
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "schema/fallback_missing.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [{ name: "Svc", id: interfaceId }],
+        kind: "file",
+      },
+      {
+        id: interfaceId,
+        displayName: `${prefix}Svc`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [
+            {
+              name: "ping",
+              codeOrder: 0,
+              paramStructTypeId: 0x9990n,
+              resultStructTypeId: 0x9991n,
+            },
+          ],
+        },
+      },
+    ],
+    requestedFiles: [
+      {
+        id: fileId,
+        filename: "schema/fallback_missing.capnp",
         imports: [],
       },
     ],
@@ -504,8 +643,8 @@ function makeMissingGroupStructRequest(): CodeGeneratorRequestModel {
   };
 }
 
-Deno.test("capnpc-deno emitter handles rpc method collisions and unknown param/result structs", () => {
-  const generated = generateTypescriptFiles(makeRpcFallbackRequest());
+Deno.test("capnpc-deno emitter handles rpc method name collisions", () => {
+  const generated = generateTypescriptFiles(makeRpcMethodCollisionRequest());
   const rpc = fileByPath(generated, "fallback_rpc.ts");
 
   assert(
@@ -521,24 +660,15 @@ Deno.test("capnpc-deno emitter handles rpc method collisions and unknown param/r
     "expected quoted ordinal key for non-identifier method name",
   );
   assert(
-    rpc.contents.includes('"123start"(params: Record<string, unknown>'),
+    rpc.contents.includes('"123start"(params:'),
     "expected quoted client method signature for non-identifier method name",
   );
-  assert(
-    rpc.contents.includes("const payload = new Uint8Array(0);"),
-    "expected unknown param struct fallback payload",
-  );
-  assert(
-    rpc.contents.includes("return response as unknown as unknown;"),
-    "expected unknown result struct fallback decode",
-  );
-  assert(
-    rpc.contents.includes("const decoded = {} as Record<string, unknown>;"),
-    "expected unknown param struct fallback on server decode",
-  );
-  assert(
-    rpc.contents.includes("return new Uint8Array(0);"),
-    "expected unknown result struct fallback on server encode",
+});
+
+Deno.test("capnpc-deno emitter rejects rpc methods that reference unknown param/result structs", () => {
+  assertThrows(
+    () => generateTypescriptFiles(makeMissingRpcStructRequest()),
+    /references unknown param struct id/,
   );
 });
 

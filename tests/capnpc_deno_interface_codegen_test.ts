@@ -93,12 +93,28 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
     "expected generated rpc client constructor",
   );
   assert(
+    rpc.contents.includes("bootstrapPingerClient"),
+    "expected generated rpc bootstrap client helper",
+  );
+  assert(
     rpc.contents.includes("createPingerServer"),
     "expected generated rpc server dispatch constructor",
   );
   assert(
+    rpc.contents.includes("registerPingerServer"),
+    "expected generated rpc server registry helper",
+  );
+  assert(
     rpc.contents.includes("export interface RpcFinishOptions"),
     "expected generated rpc finish options",
+  );
+  assert(
+    rpc.contents.includes("export interface RpcBootstrapClientTransport"),
+    "expected generated rpc bootstrap transport contract",
+  );
+  assert(
+    rpc.contents.includes("export interface RpcServerRegistry"),
+    "expected generated rpc server registry contract",
   );
   assert(
     rpc.contents.includes("finish?(questionId: number"),
@@ -185,6 +201,14 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
   assert(resultsCodec !== undefined, "expected PingResultsCodec export");
 
   let called = 0;
+  const serverImpl = {
+    ping(params: unknown, ctx: unknown): Promise<unknown> | unknown {
+      called += 1;
+      assertEquals(typeof params, "object");
+      assertEquals(typeof ctx, "object");
+      return {};
+    },
+  };
   const dispatchFactory = rpc.createPingerServer as
     | ((server: {
       ping(params: unknown, ctx: unknown): Promise<unknown> | unknown;
@@ -198,14 +222,64 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
     })
     | undefined;
   assert(dispatchFactory !== undefined, "expected createPingerServer export");
-  const dispatch = dispatchFactory({
-    ping(params, ctx) {
-      called += 1;
-      assertEquals(typeof params, "object");
-      assertEquals(typeof ctx, "object");
-      return {};
+  const dispatch = dispatchFactory(serverImpl);
+
+  const registerServer = rpc.registerPingerServer as
+    | ((registry: {
+      exportCapability(
+        dispatch: {
+          interfaceId: bigint;
+          dispatch(
+            methodId: number,
+            params: Uint8Array,
+            ctx: unknown,
+          ): Promise<Uint8Array>;
+        },
+        options?: { capabilityIndex?: number; referenceCount?: number },
+      ): { capabilityIndex: number };
+    }, server: {
+      ping(params: unknown, ctx: unknown): Promise<unknown> | unknown;
+    }, options?: {
+      capabilityIndex?: number;
+      referenceCount?: number;
+    }) => { capabilityIndex: number })
+    | undefined;
+  assert(registerServer !== undefined, "expected registerPingerServer export");
+  let capturedDispatch:
+    | {
+      interfaceId: bigint;
+      dispatch(
+        methodId: number,
+        params: Uint8Array,
+        ctx: unknown,
+      ): Promise<Uint8Array>;
+    }
+    | null = null;
+  let capturedReferenceCount = -1;
+  const registered = registerServer(
+    {
+      exportCapability(nextDispatch, options) {
+        capturedDispatch = nextDispatch;
+        capturedReferenceCount = options?.referenceCount ?? -1;
+        return { capabilityIndex: options?.capabilityIndex ?? 0 };
+      },
     },
-  });
+    serverImpl,
+    { capabilityIndex: 11, referenceCount: 3 },
+  );
+  assertEquals(registered.capabilityIndex, 11);
+  if (capturedDispatch === null) {
+    throw new Error("expected server dispatch registration");
+  }
+  const registeredDispatch: {
+    interfaceId: bigint;
+    dispatch(
+      methodId: number,
+      params: Uint8Array,
+      ctx: unknown,
+    ): Promise<Uint8Array>;
+  } = capturedDispatch;
+  assertEquals(capturedReferenceCount, 3);
 
   const encoded = await dispatch.dispatch(
     0,
@@ -215,6 +289,18 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
   const decoded = resultsCodec.decode(encoded) as Record<string, unknown>;
   assertEquals(Object.keys(decoded).length, 0);
   assertEquals(called, 1);
+
+  const encodedViaRegistry = await registeredDispatch.dispatch(
+    0,
+    paramsCodec.encode({}),
+    { capability: { capabilityIndex: 11 }, methodId: 0 },
+  );
+  const decodedViaRegistry = resultsCodec.decode(encodedViaRegistry) as Record<
+    string,
+    unknown
+  >;
+  assertEquals(Object.keys(decodedViaRegistry).length, 0);
+  assertEquals(called, 2);
 
   let thrown: unknown;
   try {
@@ -250,8 +336,11 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
     rpcFile.contents,
   );
 
-  const createClient = rpc.createPingerClient as
+  const bootstrapClient = rpc.bootstrapPingerClient as
     | ((transport: {
+      bootstrap(options?: { timeoutMs?: number }): Promise<{
+        capabilityIndex: number;
+      }>;
       call(
         capability: unknown,
         methodId: number,
@@ -266,13 +355,16 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
         questionId: number,
         options?: { releaseResultCaps?: boolean },
       ): Promise<void> | void;
-    }, capability: { capabilityIndex: number }) => {
+    }, options?: { timeoutMs?: number }) => Promise<{
       ping(params: Record<string, unknown>, options?: {
         finish?: { releaseResultCaps?: boolean };
       }): Promise<Record<string, unknown>>;
-    })
+    }>)
     | undefined;
-  assert(createClient !== undefined, "expected createPingerClient export");
+  assert(
+    bootstrapClient !== undefined,
+    "expected bootstrapPingerClient export",
+  );
 
   const paramsCodec = capnp.PingParamsCodec as
     | { decode(bytes: Uint8Array): unknown }
@@ -284,9 +376,14 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
   assert(resultsCodec !== undefined, "expected PingResultsCodec export");
 
   let callCount = 0;
+  let bootstrapTimeoutMs = -1;
   let finishQuestionId = -1;
   let releaseResultCaps = false;
-  const client = createClient({
+  const client = await bootstrapClient({
+    bootstrap(options) {
+      bootstrapTimeoutMs = options?.timeoutMs ?? -1;
+      return Promise.resolve({ capabilityIndex: 9 });
+    },
     call(_capability, methodId, params, options) {
       callCount += 1;
       assertEquals(methodId, 0);
@@ -300,12 +397,13 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
       releaseResultCaps = options?.releaseResultCaps ?? false;
       return Promise.resolve();
     },
-  }, { capabilityIndex: 9 });
+  }, { timeoutMs: 250 });
 
   const result = await client.ping({}, {
     finish: { releaseResultCaps: true },
   });
   assertEquals(Object.keys(result).length, 0);
+  assertEquals(bootstrapTimeoutMs, 250);
   assertEquals(callCount, 1);
   assertEquals(finishQuestionId, 42);
   assertEquals(releaseResultCaps, true);
