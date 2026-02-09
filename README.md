@@ -285,6 +285,22 @@ deno task codegen generate --schema tests/fixtures/schemas/person_codegen.capnp 
 deno task codegen generate --request-bin path/to/request.bin --out generated
 ```
 
+Install as a `capnp compile` plugin (`capnpc-deno`):
+
+```sh
+deno task codegen:install
+# If needed, add your Deno bin dir to PATH (default: $HOME/.deno/bin)
+capnpc-deno --help
+capnp compile -I schema -odeno:generated schema/foo.capnp
+```
+
+Equivalent `just` helpers:
+
+```sh
+just install-codegen-plugin
+just codegen-plugin schema=schema/foo.capnp out=generated import_path=schema
+```
+
 Useful options:
 
 - `--layout schema|flat` controls output paths (`schema` preserves schema
@@ -298,7 +314,9 @@ Useful options:
   `deno task codegen generate schema/foo.capnp`.
 - plugin-style stdin mode is supported with positional out dir:
   `capnp compile -I schema -o- schema/foo.capnp | deno task codegen generated`.
-- direct plugin mode is supported via wrapper script:
+- direct `capnp` plugin mode (installed `capnpc-deno`) uses:
+  `capnp compile -I schema -odeno:generated schema/foo.capnp`.
+- local wrapper-script plugin mode is available without install:
   `capnp compile -I schema -o ./scripts/capnpc-deno:generated schema/foo.capnp`.
 
 Example `capnpc-deno.toml`:

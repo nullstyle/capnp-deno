@@ -28,6 +28,8 @@
     "check": "deno check mod.ts src/*.ts src/transports/*.ts src/rpc_wire/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
+    "codegen:install": "deno install --global --allow-read --allow-write --allow-run=capnp --name capnpc-deno --force tools/capnpc-deno/main.ts",
+    "codegen:uninstall": "deno uninstall --global capnpc-deno",
     "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
     "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests --ignore=tests/socket_integration_test.ts,tests/real_wasm_serde_test.ts,tests/real_wasm_rpc_flow_test.ts,tests/real_wasm_service_flow_test.ts,tests/tcp_rpc_interop_test.ts",
     "test:coverage": "deno task test:unit --coverage=coverage/",

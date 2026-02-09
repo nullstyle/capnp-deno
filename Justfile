@@ -92,5 +92,14 @@ codegen-src src out="generated" layout="schema":
 codegen-request request out="generated":
     deno task codegen generate --request-bin {{request}} --out {{out}}
 
+install-codegen-plugin:
+    deno task codegen:install
+
+uninstall-codegen-plugin:
+    deno task codegen:uninstall
+
 codegen-plugin schema out="generated" import_path=".":
+    capnp compile -I {{import_path}} -odeno:{{out}} {{schema}}
+
+codegen-plugin-local schema out="generated" import_path=".":
     capnp compile -I {{import_path}} -o ./scripts/capnpc-deno:{{out}} {{schema}}
