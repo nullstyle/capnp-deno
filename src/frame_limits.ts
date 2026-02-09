@@ -1,3 +1,9 @@
+/**
+ * Frame size and traversal limit validation for Cap'n Proto messages.
+ *
+ * @module
+ */
+
 import { ProtocolError } from "./errors.ts";
 
 const WORD_BYTES = 8;

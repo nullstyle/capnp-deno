@@ -1,8 +1,22 @@
+/**
+ * Cap'n Proto RPC client transport.
+ *
+ * Implements the client side of Cap'n Proto Level 2 RPC over a
+ * {@link RpcSession}, including bootstrap, call, finish, release,
+ * promise pipelining, and optional client middleware.
+ *
+ * @module
+ */
+
 import {
   normalizeSessionError,
   ProtocolError,
   SessionError,
 } from "./errors.ts";
+import {
+  emitObservabilityEvent,
+  type RpcObservability,
+} from "./observability.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
 import type { RpcRuntimeModuleOptions } from "./runtime_module.ts";
@@ -334,6 +348,11 @@ export interface SessionRpcClientTransportOptions {
    * earlier middleware transforms the response.
    */
   middleware?: RpcClientMiddleware[];
+  /**
+   * Optional observability hook for emitting diagnostic events from the
+   * client transport, such as frame decode failures in the response pump.
+   */
+  observability?: RpcObservability;
 }
 
 /**
@@ -680,6 +699,7 @@ export class SessionRpcClientTransport {
   #autoStart: boolean;
   #defaultTimeoutMs: number | undefined;
   #middleware: RpcClientMiddleware[];
+  #observability: RpcObservability | undefined;
   #opChain: Promise<void> = Promise.resolve();
   #expectedReturns: Set<number> = new Set();
   #pendingReturns: Map<number, PendingReturnWaiter[]> = new Map();
@@ -719,6 +739,7 @@ export class SessionRpcClientTransport {
     this.#autoStart = options.autoStart ?? true;
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
     this.#middleware = options.middleware ?? [];
+    this.#observability = options.observability;
   }
 
   /**
@@ -872,10 +893,9 @@ export class SessionRpcClientTransport {
         await this.#sendFinish(questionId, options.finish);
       }
 
-      let contentBytes = new Uint8Array(message.contentBytes);
-      if (mwCtx) {
-        contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
-      }
+      let contentBytes = mwCtx
+        ? await this.#runOnResponse(message.contentBytes, mwCtx)
+        : message.contentBytes;
 
       return {
         answerId: message.answerId,
@@ -1153,10 +1173,9 @@ export class SessionRpcClientTransport {
       throw err;
     }
 
-    let contentBytes = new Uint8Array(decoded.contentBytes);
-    if (mwCtx) {
-      contentBytes = await this.#runOnResponse(contentBytes, mwCtx);
-    }
+    let contentBytes = mwCtx
+      ? await this.#runOnResponse(decoded.contentBytes, mwCtx)
+      : decoded.contentBytes;
 
     return {
       answerId: decoded.answerId,
@@ -1395,7 +1414,14 @@ export class SessionRpcClientTransport {
       let decoded: RpcReturnMessage;
       try {
         decoded = decodeReturnFrame(outbound);
-      } catch {
+      } catch (decodeError) {
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.client.frame_decode_error",
+          error: decodeError,
+          attributes: {
+            "rpc.frame_bytes": outbound.byteLength,
+          },
+        });
         continue;
       }
 

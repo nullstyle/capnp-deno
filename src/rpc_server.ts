@@ -11,6 +11,10 @@
 import type { WasmHostCallRecord } from "./abi.ts";
 import { ProtocolError } from "./errors.ts";
 import {
+  emitObservabilityEvent,
+  type RpcObservability,
+} from "./observability.ts";
+import {
   decodeCallRequestFrame,
   decodeFinishFrame,
   decodeReleaseFrame,
@@ -265,6 +269,12 @@ export interface RpcServerBridgeOptions {
    * `onDispatch`, `onResponse`, and `onError`.
    */
   middleware?: RpcServerMiddleware[];
+  /**
+   * Optional observability hook for emitting diagnostic events from the
+   * server bridge, such as middleware errors that would otherwise be
+   * silently swallowed.
+   */
+  observability?: RpcObservability;
 }
 
 /**
@@ -459,6 +469,7 @@ export class RpcServerBridge {
   #answerEvictionTimeoutMs: number;
   #maxEvictionRetries: number;
   #middleware: readonly RpcServerMiddleware[];
+  #observability: RpcObservability | undefined;
 
   constructor(options: RpcServerBridgeOptions = {}) {
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
@@ -468,6 +479,7 @@ export class RpcServerBridge {
     this.#answerEvictionTimeoutMs = options.answerEvictionTimeoutMs ?? Infinity;
     this.#maxEvictionRetries = options.maxEvictionRetries ?? 10;
     this.#middleware = options.middleware ? [...options.middleware] : [];
+    this.#observability = options.observability;
   }
 
   exportCapability(
@@ -1046,9 +1058,19 @@ export class RpcServerBridge {
         if (mw.onError) {
           try {
             await mw.onError(error, mwCtx);
-          } catch {
-            // Errors from onError middleware are silently swallowed to
-            // avoid masking the original dispatch error.
+          } catch (mwError) {
+            // Errors from onError middleware are swallowed to avoid
+            // masking the original dispatch error, but reported via
+            // observability so they are not completely invisible.
+            emitObservabilityEvent(this.#observability, {
+              name: "rpc.server.middleware_error",
+              error: mwError,
+              attributes: {
+                "rpc.question_id": mwCtx.questionId,
+                "rpc.interface_id": mwCtx.interfaceId,
+                "rpc.method_id": mwCtx.methodId,
+              },
+            });
           }
         }
       }

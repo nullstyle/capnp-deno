@@ -323,7 +323,7 @@ function emitInterfaceCode(
     );
     out.push("      try {");
     out.push(
-      `        return ${resolved.results.codecConst}.decode(response);`,
+      `        return decodeStructMessageWithCaps(${resolved.results.descriptorConst}, response, []) as ${resolved.results.typeName};`,
     );
     out.push("      } finally {");
     out.push(

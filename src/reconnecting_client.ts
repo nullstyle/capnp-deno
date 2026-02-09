@@ -18,15 +18,13 @@ import {
   type ConnectWithReconnectOptions,
 } from "./reconnect.ts";
 import type { RpcClientCallOptions, RpcFinishOptions } from "./rpc_client.ts";
+import type { CapabilityPointer } from "./rpc_server.ts";
 
 /**
- * A lightweight reference to a Cap'n Proto capability by its index in the
- * session's capability table.
+ * Alias for {@link CapabilityPointer}, used throughout the reconnecting client
+ * transport API. Structurally identical to `CapabilityPointer`.
  */
-export interface RpcCapabilityPointer {
-  /** The zero-based index of the capability in the session's cap table. */
-  capabilityIndex: number;
-}
+export type RpcCapabilityPointer = CapabilityPointer;
 
 /**
  * Minimal interface for an RPC client transport, used by

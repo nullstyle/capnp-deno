@@ -8,9 +8,9 @@
  *
  * The WASM peer has no `originateCall` ABI, so outbound calls from the
  * server must bypass the peer entirely:
- * - {@link ServerCallInterceptTransport} intercepts Return frames for
+ * - {@link RpcServerCallInterceptTransport} intercepts Return frames for
  *   server-originated questions before they reach the WASM peer.
- * - {@link ServerOutboundClient} encodes Call frames and sends them
+ * - {@link RpcServerOutboundClient} encodes Call frames and sends them
  *   directly on the wire, waiting for intercepted Returns.
  *
  * @module
@@ -54,9 +54,9 @@ interface PendingQuestion {
  * This transport sits between the real network transport and the
  * session's transport layer. When a Return frame arrives whose answerId
  * matches a registered server question, the frame is routed to the
- * {@link ServerOutboundClient} instead of being forwarded to the session.
+ * {@link RpcServerOutboundClient} instead of being forwarded to the session.
  */
-export class ServerCallInterceptTransport implements RpcTransport {
+export class RpcServerCallInterceptTransport implements RpcTransport {
   readonly #inner: RpcTransport;
   readonly #pendingQuestions = new Map<number, PendingQuestion>();
   #closed = false;
@@ -148,7 +148,7 @@ export class ServerCallInterceptTransport implements RpcTransport {
  * Client for making outbound RPC calls from the server side.
  *
  * Bypasses the WASM peer entirely: Call frames are encoded and sent
- * directly on the wire via the {@link ServerCallInterceptTransport},
+ * directly on the wire via the {@link RpcServerCallInterceptTransport},
  * and Return frames are intercepted before reaching the peer.
  *
  * The `call` and `callRaw` method signatures are compatible with
@@ -171,12 +171,12 @@ export class ServerCallInterceptTransport implements RpcTransport {
  * }
  * ```
  */
-export class ServerOutboundClient {
-  readonly #transport: ServerCallInterceptTransport;
+export class RpcServerOutboundClient {
+  readonly #transport: RpcServerCallInterceptTransport;
   #nextQuestionId: number;
 
   constructor(
-    transport: ServerCallInterceptTransport,
+    transport: RpcServerCallInterceptTransport,
     startQuestionId = DEFAULT_SERVER_QUESTION_START,
   ) {
     this.#transport = transport;
@@ -251,7 +251,7 @@ export class ServerOutboundClient {
 
     return {
       answerId: message.answerId,
-      contentBytes: new Uint8Array(message.contentBytes),
+      contentBytes: message.contentBytes,
       capTable: message.capTable.map((entry) => ({
         tag: entry.tag,
         id: entry.id,

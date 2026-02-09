@@ -1,3 +1,13 @@
+/**
+ * RPC connection pool.
+ *
+ * Manages a pool of {@link RpcClientTransportLike} connections with
+ * configurable min/max limits, idle eviction, health checks, and
+ * pending-acquire timeouts.
+ *
+ * @module
+ */
+
 import { SessionError } from "./errors.ts";
 import type { RpcClientTransportLike } from "./reconnecting_client.ts";
 import {

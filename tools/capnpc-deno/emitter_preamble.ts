@@ -1830,6 +1830,20 @@ function collectCapabilityPointersFromStruct<T extends Record<string, unknown>>(
       continue;
     }
 
+    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+      const items = asArray(fieldValue);
+      for (let i = 0; i < items.length; i += 1) {
+        const pointer = asAnyPointerValue(items[i]);
+        if (pointer.kind === "interface") {
+          result.push({
+            fieldPath: fieldPath + "[" + i + "]",
+            capabilityIndex: pointer.capabilityIndex,
+          });
+        }
+      }
+      continue;
+    }
+
     if (field.type.kind === "list" && field.type.element.kind === "struct") {
       const items = asArray(fieldValue);
       const elemDescriptor = field.type.element.get();
@@ -1974,6 +1988,21 @@ function remapCapabilityIndices<T extends Record<string, unknown>>(
       continue;
     }
 
+    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+      const items = asArray(fieldValue);
+      out[field.name] = items.map((item) => {
+        const pointer = asAnyPointerValue(item);
+        if (pointer.kind === "interface") {
+          const mapped = mapping.get(pointer.capabilityIndex);
+          if (mapped !== undefined) {
+            return { kind: "interface", capabilityIndex: mapped };
+          }
+        }
+        return item;
+      });
+      continue;
+    }
+
     if (field.type.kind === "list" && field.type.element.kind === "struct") {
       const items = asArray(fieldValue);
       const elemDescriptor = field.type.element.get();
@@ -2090,6 +2119,22 @@ function resolveDecodedCapabilities<T extends Record<string, unknown>>(
         const resolved = mapping.get(cap.capabilityIndex);
         if (resolved !== undefined) {
           return { capabilityIndex: resolved };
+        }
+        return item;
+      });
+      continue;
+    }
+
+    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+      const items = asArray(fieldValue);
+      out[field.name] = items.map((item) => {
+        if (item === null || item === undefined) return item;
+        const pointer = asAnyPointerValue(item);
+        if (pointer.kind === "interface") {
+          const resolved = mapping.get(pointer.capabilityIndex);
+          if (resolved !== undefined) {
+            return { kind: "interface", capabilityIndex: resolved };
+          }
         }
         return item;
       });

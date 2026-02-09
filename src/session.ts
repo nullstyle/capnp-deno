@@ -1,3 +1,12 @@
+/**
+ * Cap'n Proto RPC session management.
+ *
+ * Binds a WASM peer to a transport, managing the inbound/outbound frame
+ * lifecycle and coordinating session start/close semantics.
+ *
+ * @module
+ */
+
 import { normalizeSessionError, SessionError } from "./errors.ts";
 import {
   emitObservabilityEvent,

@@ -1,4 +1,13 @@
 /**
+ * Observability primitives for the capnp-deno runtime.
+ *
+ * Provides the {@link RpcObservability} hook interface, event types, and
+ * the {@link emitObservabilityEvent} helper used throughout the library.
+ *
+ * @module
+ */
+
+/**
  * A single attribute value in an observability event.
  * Supports string, number, boolean, and bigint for Cap'n Proto interface IDs.
  */

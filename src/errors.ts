@@ -1,4 +1,15 @@
 /**
+ * Error hierarchy for capnp-deno.
+ *
+ * Defines a discriminated union of error kinds ({@link CapnpError},
+ * {@link ProtocolError}, {@link TransportError}, {@link SessionError},
+ * {@link AbiError}, {@link InstantiationError}) with a `kind` field for
+ * pattern matching and normalization utilities.
+ *
+ * @module
+ */
+
+/**
  * Options for constructing a {@link CapnpError} or any of its subclasses.
  */
 export interface CapnpErrorOptions {

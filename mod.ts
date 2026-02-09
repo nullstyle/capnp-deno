@@ -133,7 +133,8 @@ export {
 } from "./src/rpc_server.ts";
 
 export {
-  ServerOutboundClient,
+  RpcServerCallInterceptTransport,
+  RpcServerOutboundClient,
 } from "./src/server_outbound.ts";
 
 export {

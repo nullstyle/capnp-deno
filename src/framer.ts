@@ -1,3 +1,12 @@
+/**
+ * Cap'n Proto message framing.
+ *
+ * Implements the segment-table framing protocol for reading and writing
+ * multi-segment Cap'n Proto messages over byte streams.
+ *
+ * @module
+ */
+
 import { ProtocolError } from "./errors.ts";
 import {
   type CapnpFrameLimitsOptions,

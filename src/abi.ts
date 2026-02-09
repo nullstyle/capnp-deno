@@ -1,3 +1,12 @@
+/**
+ * WASM ABI layer for Cap'n Proto.
+ *
+ * Provides the low-level interface to the capnp WASM module, including
+ * peer management, host-call records, and memory read/write helpers.
+ *
+ * @module
+ */
+
 import { AbiError } from "./errors.ts";
 
 // Cached TextEncoder and TextDecoder instances for efficient string conversion.

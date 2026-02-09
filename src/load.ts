@@ -1,3 +1,9 @@
+/**
+ * WASM module instantiation and peer loading.
+ *
+ * @module
+ */
+
 import { getCapnpWasmExports, type WasmAbiOptions } from "./abi.ts";
 import { InstantiationError } from "./errors.ts";
 import { WasmPeer } from "./wasm_peer.ts";

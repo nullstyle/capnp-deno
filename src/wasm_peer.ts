@@ -1,3 +1,9 @@
+/**
+ * WASM peer instance wrapper.
+ *
+ * @module
+ */
+
 import {
   type CapnpWasmExports,
   DEFAULT_MAX_DRAIN_FRAMES,

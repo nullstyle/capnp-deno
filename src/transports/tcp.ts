@@ -1,3 +1,9 @@
+/**
+ * TCP transport for Cap'n Proto RPC.
+ *
+ * @module
+ */
+
 import { normalizeTransportError, TransportError } from "../errors.ts";
 import { CapnpFrameFramer, type CapnpFrameFramerOptions } from "../framer.ts";
 import {

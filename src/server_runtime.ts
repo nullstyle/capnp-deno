@@ -5,8 +5,8 @@ import {
   type RpcRuntimeModuleOptions,
 } from "./runtime_module.ts";
 import {
-  ServerCallInterceptTransport,
-  ServerOutboundClient,
+  RpcServerCallInterceptTransport,
+  RpcServerOutboundClient,
 } from "./server_outbound.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
@@ -189,7 +189,7 @@ export class RpcServerRuntime {
    * `SessionRpcClientTransport`, so generated client stubs can use
    * either transport interchangeably.
    */
-  readonly outboundClient: ServerOutboundClient;
+  readonly outboundClient: RpcServerOutboundClient;
 
   #wasmHost: RpcServerWasmHost | null;
   #hostCallPumpEnabled: boolean;
@@ -212,8 +212,8 @@ export class RpcServerRuntime {
     // Wrap the real transport with an interceptor that captures Return
     // frames for server-originated outbound calls before they reach
     // the WASM peer (which has no knowledge of these calls).
-    const interceptor = new ServerCallInterceptTransport(transport);
-    this.outboundClient = new ServerOutboundClient(interceptor);
+    const interceptor = new RpcServerCallInterceptTransport(transport);
+    this.outboundClient = new RpcServerOutboundClient(interceptor);
 
     this.#wasmHost = options.wasmHost ??
       (peer.abi.capabilities.hasHostCallBridge

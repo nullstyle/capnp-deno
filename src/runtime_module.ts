@@ -1,3 +1,9 @@
+/**
+ * Runtime module configuration for WASM peer creation.
+ *
+ * @module
+ */
+
 import type { CapnpWasmExports } from "./abi.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
 import { WasmPeer as WasmPeerClass } from "./wasm_peer.ts";

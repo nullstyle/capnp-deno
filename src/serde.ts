@@ -1,3 +1,9 @@
+/**
+ * Serialization and deserialization via the WASM ABI.
+ *
+ * @module
+ */
+
 import {
   type CapnpWasmExports,
   getCapnpWasmExports,

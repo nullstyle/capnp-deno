@@ -1,3 +1,13 @@
+/**
+ * Circuit breaker for RPC connections.
+ *
+ * Implements the three-state circuit breaker pattern (closed, open,
+ * half-open) to protect against cascading failures in transport
+ * connections.
+ *
+ * @module
+ */
+
 import { TransportError } from "./errors.ts";
 import { assertPositiveFinite, assertPositiveInteger } from "./validation.ts";
 

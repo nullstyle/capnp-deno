@@ -1,4 +1,10 @@
 /**
+ * Core transport interface for Cap'n Proto RPC.
+ *
+ * @module
+ */
+
+/**
  * Interface that all Cap'n Proto RPC transports must implement.
  *
  * A transport is responsible for delivering serialized Cap'n Proto frames

@@ -1,3 +1,9 @@
+/**
+ * WebSocket transport for Cap'n Proto RPC.
+ *
+ * @module
+ */
+
 import { normalizeTransportError, TransportError } from "../errors.ts";
 import {
   type CapnpFrameLimitsOptions,

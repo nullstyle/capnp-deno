@@ -1,3 +1,13 @@
+/**
+ * Transport-level RPC middleware.
+ *
+ * Provides frame-level interception for logging, metrics, and message
+ * rewriting via the {@link RpcTransportMiddleware} interface and the
+ * {@link MiddlewareTransport} wrapper.
+ *
+ * @module
+ */
+
 import { TransportError } from "./errors.ts";
 import type { RpcTransport } from "./transport.ts";
 import {
