@@ -22,8 +22,10 @@ import {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   RPC_MESSAGE_TAG_BOOTSTRAP,
   RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_DISEMBARGO,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RESOLVE,
   RPC_MESSAGE_TAG_RETURN,
 } from "./types.ts";
 import {
@@ -57,12 +59,19 @@ export type RpcMessageTagRelease = "release";
  * exhaustive type-narrowing in switch statements and pattern matching.
  * The `data` field contains the fully decoded message payload.
  */
+/** String tag for an opaque Resolve message (forwarded without full decode). */
+export type RpcMessageTagResolve = "resolve";
+/** String tag for an opaque Disembargo message (forwarded without full decode). */
+export type RpcMessageTagDisembargo = "disembargo";
+
 export type RpcMessage =
   | { tag: RpcMessageTagBootstrap; data: RpcBootstrapRequest }
   | { tag: RpcMessageTagCall; data: RpcCallRequest }
   | { tag: RpcMessageTagReturn; data: RpcReturnMessage }
   | { tag: RpcMessageTagFinish; data: RpcFinishRequest }
-  | { tag: RpcMessageTagRelease; data: RpcReleaseRequest };
+  | { tag: RpcMessageTagRelease; data: RpcReleaseRequest }
+  | { tag: RpcMessageTagResolve; data: Uint8Array }
+  | { tag: RpcMessageTagDisembargo; data: Uint8Array };
 
 /**
  * Handler interface for exhaustive RPC message dispatch.
@@ -82,6 +91,10 @@ export interface RpcMessageHandlers<T> {
   finish(data: RpcFinishRequest): T;
   /** Called when the message is a Release message. */
   release(data: RpcReleaseRequest): T;
+  /** Called when the message is a Resolve message (opaque frame). */
+  resolve?(data: Uint8Array): T;
+  /** Called when the message is a Disembargo message (opaque frame). */
+  disembargo?(data: Uint8Array): T;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +125,10 @@ export function decodeRpcMessage(frame: Uint8Array): RpcMessage {
       return { tag: "finish", data: decodeFinishFrame(frame) };
     case RPC_MESSAGE_TAG_RELEASE:
       return { tag: "release", data: decodeReleaseFrame(frame) };
+    case RPC_MESSAGE_TAG_RESOLVE:
+      return { tag: "resolve", data: frame };
+    case RPC_MESSAGE_TAG_DISEMBARGO:
+      return { tag: "disembargo", data: frame };
     default:
       throw new ProtocolError(`unknown rpc message tag: ${numericTag}`);
   }
@@ -146,6 +163,12 @@ export function dispatchRpcMessage<T>(
       return handlers.finish(message.data);
     case "release":
       return handlers.release(message.data);
+    case "resolve":
+      if (handlers.resolve) return handlers.resolve(message.data);
+      return undefined as T;
+    case "disembargo":
+      if (handlers.disembargo) return handlers.disembargo(message.data);
+      return undefined as T;
     default: {
       const _exhaustive: never = message;
       throw new ProtocolError(

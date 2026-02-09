@@ -40,8 +40,10 @@ export {
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_MESSAGE_TAG_BOOTSTRAP,
   RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_DISEMBARGO,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RESOLVE,
   RPC_MESSAGE_TAG_RETURN,
   RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   RPC_PROMISED_ANSWER_OP_TAG_NOOP,
@@ -55,8 +57,10 @@ export {
   type RpcMessageHandlers,
   type RpcMessageTagBootstrap,
   type RpcMessageTagCall,
+  type RpcMessageTagDisembargo,
   type RpcMessageTagFinish,
   type RpcMessageTagRelease,
+  type RpcMessageTagResolve,
   type RpcMessageTagReturn,
   type RpcPromisedAnswerOp,
   type RpcPromisedAnswerTarget,
@@ -99,6 +103,7 @@ export {
 export {
   type ClientMiddlewareContext,
   InMemoryRpcHarnessTransport,
+  NetworkRpcHarnessTransport,
   type RpcClientCallOptions,
   type RpcClientCallResult,
   type RpcClientMiddleware,
@@ -126,6 +131,10 @@ export {
   type ServerMiddlewareDispatchResult,
   type ServerMiddlewareFrameResult,
 } from "./src/rpc_server.ts";
+
+export {
+  ServerOutboundClient,
+} from "./src/server_outbound.ts";
 
 export {
   RpcServerRuntime,
@@ -161,6 +170,8 @@ export {
 // === Transports (TCP, WebSocket, MessagePort) ===
 
 export {
+  TcpServerListener,
+  type TcpServerListenerOptions,
   TcpTransport,
   type TcpTransportOptions,
 } from "./src/transports/tcp.ts";

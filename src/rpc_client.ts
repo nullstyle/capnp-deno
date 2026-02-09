@@ -188,6 +188,15 @@ export interface RpcClientCallOptions {
    */
   finish?: RpcFinishOptions;
   /**
+   * Override the interface ID for this specific call. When not specified,
+   * the transport's default `interfaceId` (set at construction time) is used.
+   *
+   * This is needed when making calls on different interfaces through the
+   * same transport, e.g., calling `Arena.getChain()` and then
+   * `ChainLink.next()` on the same connection.
+   */
+  interfaceId?: bigint;
+  /**
    * Capability descriptors to include in the params cap table, allowing
    * capabilities to be passed as call parameters.
    */
@@ -298,7 +307,11 @@ export interface RpcSessionHarnessTransport extends RpcTransport {
  * Configuration options for creating a {@link SessionRpcClientTransport}.
  */
 export interface SessionRpcClientTransportOptions {
-  /** The Cap'n Proto interface ID for all calls made through this transport. */
+  /**
+   * The default Cap'n Proto interface ID for calls made through this
+   * transport. Can be overridden per-call via
+   * {@link RpcClientCallOptions.interfaceId}.
+   */
   interfaceId: bigint | number;
   /** The starting question ID. Defaults to 1. */
   nextQuestionId?: number;
@@ -466,6 +479,162 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   }
 
   #removeOutboundFrameWaiter(waiter: PendingOutboundFrameWaiter): void {
+    const index = this.#waiters.indexOf(waiter);
+    if (index >= 0) {
+      this.#waiters.splice(index, 1);
+    }
+  }
+}
+
+/**
+ * An {@link RpcSessionHarnessTransport} adapter that bridges a real
+ * {@link RpcTransport} (TCP, WebSocket, etc.) to the harness interface
+ * required by {@link SessionRpcClientTransport}.
+ *
+ * Use this when connecting to a remote Cap'n Proto RPC server over the
+ * network. The adapter:
+ * - Delivers frames received from the network to both the session (for
+ *   WASM peer protocol processing) and the client (via {@link nextOutboundFrame}).
+ * - Routes session outbound frames (from the WASM peer) to the network.
+ * - Routes client-injected frames (via {@link emitInbound}) through the session.
+ *
+ * @example
+ * ```ts
+ * const tcp = await TcpTransport.connect("localhost", 4000);
+ * const adapter = new NetworkRpcHarnessTransport(tcp);
+ * const client = await SessionRpcClientTransport.create(adapter, {
+ *   interfaceId: ArenaInterfaceId,
+ *   startSession: true,
+ * });
+ * const cap = await client.bootstrap();
+ * ```
+ */
+export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
+  /** The underlying real transport. */
+  readonly transport: RpcTransport;
+
+  #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
+  #closed = false;
+  #inboundQueue: Uint8Array[] = [];
+  #waiters: PendingOutboundFrameWaiter[] = [];
+
+  constructor(transport: RpcTransport) {
+    this.transport = transport;
+  }
+
+  start(
+    onFrame: (frame: Uint8Array) => void | Promise<void>,
+  ): void | Promise<void> {
+    if (this.#closed) throw new SessionError("transport is closed");
+    this.#onFrame = onFrame;
+
+    // Start the real transport. Received frames are:
+    // 1. Queued for nextOutboundFrame (so the client can read server responses)
+    // 2. Delivered to onFrame (so the session/WASM peer processes them)
+    return this.transport.start(async (frame) => {
+      const copy = new Uint8Array(frame);
+      this.#deliverOrQueue(copy);
+      if (this.#onFrame) {
+        await this.#onFrame(copy);
+      }
+    });
+  }
+
+  async send(frame: Uint8Array): Promise<void> {
+    // Session outbound (WASM peer output) goes to the real transport.
+    if (this.#closed) throw new SessionError("transport is closed");
+    await this.transport.send(frame);
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#onFrame = null;
+    const error = new SessionError("transport is closed");
+    for (const waiter of this.#waiters.splice(0)) {
+      if (!waiter.settled) {
+        waiter.settled = true;
+        waiter.reject(error);
+      }
+    }
+    await this.transport.close();
+  }
+
+  async emitInbound(frame: Uint8Array): Promise<void> {
+    if (this.#closed) throw new SessionError("transport is closed");
+    if (!this.#onFrame) throw new SessionError("transport is not started");
+    // Deliver to session so the WASM peer processes it and produces
+    // outbound wire frames (which go to the network via send()).
+    await this.#onFrame(frame);
+  }
+
+  async nextOutboundFrame(
+    options: RpcClientCallOptions = {},
+  ): Promise<Uint8Array> {
+    if (this.#inboundQueue.length > 0) {
+      return this.#inboundQueue.shift()!;
+    }
+    if (this.#closed) {
+      throw new SessionError("transport is closed");
+    }
+
+    return await new Promise<Uint8Array>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const waiter: PendingOutboundFrameWaiter = {
+        settled: false,
+        resolve: (frame: Uint8Array): void => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          this.#removeWaiter(waiter);
+          cleanup();
+          resolve(frame);
+        },
+        reject: (error: unknown): void => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          this.#removeWaiter(waiter);
+          cleanup();
+          reject(error);
+        },
+      };
+      const onAbort = (): void => {
+        waiter.reject(new SessionError("rpc wait aborted"));
+      };
+      const cleanup = (): void => {
+        if (timeout !== undefined) clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
+
+      if (options.signal?.aborted) {
+        waiter.reject(new SessionError("rpc wait aborted"));
+        return;
+      }
+      if (options.timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          waiter.reject(
+            new SessionError(`rpc wait timed out after ${options.timeoutMs}ms`),
+          );
+        }, options.timeoutMs);
+      }
+      if (options.signal) {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      this.#waiters.push(waiter);
+    });
+  }
+
+  #deliverOrQueue(frame: Uint8Array): void {
+    const waiter = this.#waiters.shift();
+    if (waiter && !waiter.settled) {
+      waiter.settled = true;
+      waiter.resolve(frame);
+    } else {
+      this.#inboundQueue.push(frame);
+    }
+  }
+
+  #removeWaiter(waiter: PendingOutboundFrameWaiter): void {
     const index = this.#waiters.indexOf(waiter);
     if (index >= 0) {
       this.#waiters.splice(index, 1);
@@ -657,8 +826,15 @@ export class SessionRpcClientTransport {
         importedCap: capability.capabilityIndex,
       };
 
+      const resolvedInterfaceId = options.interfaceId ?? this.#interfaceId;
+
       const mwCtx = this.#middleware.length > 0
-        ? this.#buildMiddlewareContext(questionId, methodId, target)
+        ? this.#buildMiddlewareContext(
+          questionId,
+          resolvedInterfaceId,
+          methodId,
+          target,
+        )
         : undefined;
 
       if (mwCtx) {
@@ -667,7 +843,7 @@ export class SessionRpcClientTransport {
 
       const frame = encodeCallRequestFrame({
         questionId,
-        interfaceId: this.#interfaceId,
+        interfaceId: resolvedInterfaceId,
         methodId: methodId,
         target,
         paramsContent: params,
@@ -759,8 +935,15 @@ export class SessionRpcClientTransport {
         importedCap: capability.capabilityIndex,
       };
 
+      const resolvedInterfaceId = options.interfaceId ?? this.#interfaceId;
+
       const mwCtx = this.#middleware.length > 0
-        ? this.#buildMiddlewareContext(questionId, methodId, target)
+        ? this.#buildMiddlewareContext(
+          questionId,
+          resolvedInterfaceId,
+          methodId,
+          target,
+        )
         : undefined;
 
       if (mwCtx) {
@@ -769,7 +952,7 @@ export class SessionRpcClientTransport {
 
       const frame = encodeCallRequestFrame({
         questionId,
-        interfaceId: this.#interfaceId,
+        interfaceId: resolvedInterfaceId,
         methodId: methodId,
         target,
         paramsContent: params,
@@ -843,6 +1026,7 @@ export class SessionRpcClientTransport {
 
   #buildMiddlewareContext(
     questionId: number,
+    interfaceId: bigint,
     methodId: number,
     target: RpcCallTarget,
   ): ClientMiddlewareContext {
@@ -851,7 +1035,7 @@ export class SessionRpcClientTransport {
       : target.promisedAnswer.questionId;
     return {
       questionId,
-      interfaceId: this.#interfaceId,
+      interfaceId,
       methodId,
       capabilityIndex,
       state: new Map(),

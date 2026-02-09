@@ -23,10 +23,14 @@ export const RPC_MESSAGE_TAG_CALL = 2;
 export const RPC_MESSAGE_TAG_RETURN = 3;
 /** Tag value for a Cap'n Proto RPC Finish message. */
 export const RPC_MESSAGE_TAG_FINISH = 4;
+/** Tag value for a Cap'n Proto RPC Resolve message (Level 1). */
+export const RPC_MESSAGE_TAG_RESOLVE = 5;
 /** Tag value for a Cap'n Proto RPC Release message. */
 export const RPC_MESSAGE_TAG_RELEASE = 6;
 /** Tag value for a Cap'n Proto RPC Bootstrap message. */
 export const RPC_MESSAGE_TAG_BOOTSTRAP = 8;
+/** Tag value for a Cap'n Proto RPC Disembargo message (Level 1). */
+export const RPC_MESSAGE_TAG_DISEMBARGO = 13;
 
 /** Call target tag: the target is an imported capability. */
 export const RPC_CALL_TARGET_TAG_IMPORTED_CAP = 0;

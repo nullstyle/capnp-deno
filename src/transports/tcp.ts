@@ -6,6 +6,134 @@ import {
 } from "../observability.ts";
 import type { RpcTransport } from "../transport.ts";
 
+/**
+ * Configuration options for {@link TcpServerListener}.
+ */
+export interface TcpServerListenerOptions {
+  /** The TCP port to listen on. */
+  port: number;
+  /** The hostname/address to bind to. Defaults to "0.0.0.0". */
+  hostname?: string;
+  /**
+   * Transport options applied to each accepted connection. Options like
+   * `connectTimeoutMs` are ignored since the connection is already established.
+   */
+  transportOptions?: TcpTransportOptions;
+  /** Observability provider for emitting listener events. */
+  observability?: RpcObservability;
+}
+
+/**
+ * A TCP server listener that accepts inbound connections and wraps each one
+ * in a {@link TcpTransport}.
+ *
+ * This class binds a TCP socket using `Deno.listen()` and yields a new
+ * `TcpTransport` for each accepted connection. Each transport can then be
+ * handed to an `RpcServerRuntime` for per-connection RPC handling.
+ *
+ * @example
+ * ```ts
+ * const listener = new TcpServerListener({ port: 4000 });
+ * for await (const transport of listener.accept()) {
+ *   // hand transport to an RpcServerRuntime
+ *   runtime.addSession(transport);
+ * }
+ * ```
+ */
+export class TcpServerListener {
+  /** The underlying Deno TCP listener. */
+  readonly listener: Deno.Listener;
+  /** The options this listener was configured with. */
+  readonly options: TcpServerListenerOptions;
+
+  #closed = false;
+
+  constructor(options: TcpServerListenerOptions) {
+    if (!("listen" in Deno) || typeof Deno.listen !== "function") {
+      throw new TransportError(
+        "Deno.listen is unavailable; run with a runtime that supports TCP listen",
+      );
+    }
+    this.options = options;
+    this.listener = Deno.listen({
+      port: options.port,
+      hostname: options.hostname ?? "0.0.0.0",
+      transport: "tcp",
+    });
+    emitObservabilityEvent(options.observability, {
+      name: "rpc.transport.tcp.listen",
+      attributes: {
+        "rpc.outcome": "ok",
+        "rpc.listen.port": options.port,
+        "rpc.listen.hostname": options.hostname ?? "0.0.0.0",
+      },
+    });
+  }
+
+  /**
+   * Returns the local address the listener is bound to.
+   */
+  get addr(): Deno.Addr {
+    return this.listener.addr;
+  }
+
+  /**
+   * Returns an async iterable that yields a new {@link TcpTransport} for each
+   * accepted TCP connection. The iterable terminates when the listener is
+   * closed.
+   *
+   * @yields A `TcpTransport` wrapping the accepted connection.
+   */
+  async *accept(): AsyncIterable<TcpTransport> {
+    while (!this.#closed) {
+      let conn: Deno.Conn;
+      try {
+        conn = await this.listener.accept();
+      } catch (error) {
+        if (this.#closed) {
+          // Listener was closed while waiting for a connection; exit cleanly.
+          return;
+        }
+        throw normalizeTransportError(error, "tcp accept failed");
+      }
+
+      const transport = new TcpTransport(
+        conn,
+        this.options.transportOptions,
+      );
+
+      emitObservabilityEvent(this.options.observability, {
+        name: "rpc.transport.tcp.accept",
+        attributes: {
+          "rpc.outcome": "ok",
+        },
+      });
+
+      yield transport;
+    }
+  }
+
+  /**
+   * Stops the listener and prevents any further connections from being
+   * accepted. Calling close on an already-closed listener is a no-op.
+   */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    try {
+      this.listener.close();
+    } catch {
+      // no-op -- listener may already be closed.
+    }
+    emitObservabilityEvent(this.options.observability, {
+      name: "rpc.transport.tcp.listen_close",
+      attributes: {
+        "rpc.outcome": "ok",
+      },
+    });
+  }
+}
+
 interface PendingOutboundFrame {
   frame: Uint8Array;
   resolve: () => void;

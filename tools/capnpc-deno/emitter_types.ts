@@ -87,7 +87,7 @@ export function emitStructDescriptor(
   const unionFieldNames = new Set(unionFields.map((field) => toCamelCase(field.name)));
   const defaultUnionField = unionFields[0];
 
-  out.push(`const ${structInfo.descriptorConst}: StructDescriptor<${structInfo.typeName}> = {`);
+  out.push(`${structInfo.exported ? "export " : ""}const ${structInfo.descriptorConst}: StructDescriptor<${structInfo.typeName}> = {`);
   out.push('  kind: "struct",');
   out.push(`  name: ${JSON.stringify(structInfo.typeName)},`);
   out.push(`  dataWordCount: ${structNode.dataWordCount},`);

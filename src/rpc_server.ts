@@ -21,8 +21,11 @@ import {
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_DISEMBARGO,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RESOLVE,
+  RPC_MESSAGE_TAG_RETURN,
   RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   type RpcCallRequest,
   type RpcCallTarget,
@@ -589,6 +592,16 @@ export class RpcServerBridge {
       if (this.#onFinish) {
         await this.#onFinish(finish);
       }
+      return null;
+    }
+
+    // Return, Resolve, and Disembargo are handled by the WASM peer directly;
+    // the bridge just passes them through without error.
+    if (
+      tag === RPC_MESSAGE_TAG_RETURN ||
+      tag === RPC_MESSAGE_TAG_RESOLVE ||
+      tag === RPC_MESSAGE_TAG_DISEMBARGO
+    ) {
       return null;
     }
 

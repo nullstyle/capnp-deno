@@ -4,6 +4,10 @@ import {
   createRuntimePeer,
   type RpcRuntimeModuleOptions,
 } from "./runtime_module.ts";
+import {
+  ServerCallInterceptTransport,
+  ServerOutboundClient,
+} from "./server_outbound.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "./transport.ts";
 import type { WasmPeer } from "./wasm_peer.ts";
@@ -174,6 +178,18 @@ export class RpcServerRuntime {
   readonly bridge: RpcServerBridge;
   /** The WASM peer used for frame processing. */
   readonly peer: WasmPeer;
+  /**
+   * Client for making outbound RPC calls on imported capabilities.
+   *
+   * Use this to call methods on capabilities received as parameters
+   * from the remote peer (e.g., calling `Collaborator.offer()` on a
+   * capability passed in a `collaborate` call).
+   *
+   * The `call` and `callRaw` signatures are compatible with
+   * `SessionRpcClientTransport`, so generated client stubs can use
+   * either transport interchangeably.
+   */
+  readonly outboundClient: ServerOutboundClient;
 
   #wasmHost: RpcServerWasmHost | null;
   #hostCallPumpEnabled: boolean;
@@ -192,6 +208,13 @@ export class RpcServerRuntime {
   ) {
     this.peer = peer;
     this.bridge = bridge;
+
+    // Wrap the real transport with an interceptor that captures Return
+    // frames for server-originated outbound calls before they reach
+    // the WASM peer (which has no knowledge of these calls).
+    const interceptor = new ServerCallInterceptTransport(transport);
+    this.outboundClient = new ServerOutboundClient(interceptor);
+
     this.#wasmHost = options.wasmHost ??
       (peer.abi.capabilities.hasHostCallBridge
         ? {
@@ -258,7 +281,7 @@ export class RpcServerRuntime {
     }
 
     const hooked = new PostInboundHookTransport(
-      transport,
+      interceptor,
       (_frame) => this.#afterInboundFrame(),
     );
     this.session = new RpcSession(peer, hooked, options.session ?? {});

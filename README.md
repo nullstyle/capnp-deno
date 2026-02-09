@@ -1,6 +1,6 @@
 # capnp-deno (scaffold)
 
-**WARNING: This repo is extensively vibe-cided; it's just for me. look at the
+**WARNING: This repo is extensively vibe-coded; it's just for me. look at the
 README below anyways, I wouldn't want to use this in the current state**
 
 `capnp-deno` is a Deno-side runtime scaffold for driving Cap'n Proto RPC. For

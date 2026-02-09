@@ -34,8 +34,15 @@ export function emitRpcModule(
     return out.join("\n");
   }
 
-  const typeImports = new Set<string>(["CapabilityPointer"]);
-  const valueImports = new Set<string>();
+  const typeImports = new Set<string>([
+    "CapabilityPointer",
+    "EncodeWithCapsResult",
+    "PreambleCapDescriptor",
+  ]);
+  const valueImports = new Set<string>([
+    "encodeStructMessageWithCaps",
+    "decodeStructMessageWithCaps",
+  ]);
 
   for (const info of interfaces) {
     const methods = info.node.interfaceNode?.methods
@@ -50,10 +57,12 @@ export function emitRpcModule(
       if (params) {
         typeImports.add(params.typeName);
         valueImports.add(params.codecConst);
+        valueImports.add(params.descriptorConst);
       }
       if (results) {
         typeImports.add(results.typeName);
         valueImports.add(results.codecConst);
+        valueImports.add(results.descriptorConst);
       }
     }
   }
@@ -80,6 +89,7 @@ export function emitRpcModule(
   out.push("export interface RpcCallOptions {");
   out.push("  signal?: AbortSignal;");
   out.push("  timeoutMs?: number;");
+  out.push("  interfaceId?: bigint;");
   out.push("  onQuestionId?: (questionId: number) => void;");
   out.push("  autoFinish?: boolean;");
   out.push("  finish?: RpcFinishOptions;");
@@ -104,6 +114,14 @@ export function emitRpcModule(
   out.push("    params: Uint8Array,");
   out.push("    options?: RpcCallOptions,");
   out.push("  ): Promise<Uint8Array>;");
+  out.push("  callRaw?(");
+  out.push("    capability: CapabilityPointer,");
+  out.push("    methodId: number,");
+  out.push("    params: Uint8Array,");
+  out.push("    options?: RpcCallOptions,");
+  out.push(
+    "  ): Promise<{ contentBytes: Uint8Array; capTable: PreambleCapDescriptor[] }>;",
+  );
   out.push(
     "  finish?(questionId: number, options?: RpcFinishOptions): Promise<void> | void;",
   );
@@ -112,13 +130,19 @@ export function emitRpcModule(
   );
   out.push("}");
   out.push("");
+  out.push(
+    "export type RpcServerDispatchResult = Uint8Array | { content: Uint8Array; capTable?: PreambleCapDescriptor[] };",
+  );
+  out.push("");
   out.push("export interface RpcServerDispatch {");
   out.push("  readonly interfaceId: bigint;");
   out.push("  dispatch(");
   out.push("    methodId: number,");
   out.push("    params: Uint8Array,");
   out.push("    ctx: RpcCallContext,");
-  out.push("  ): Promise<Uint8Array>;");
+  out.push(
+    "  ): Promise<RpcServerDispatchResult> | RpcServerDispatchResult;",
+  );
   out.push("}");
   out.push("");
   out.push(
@@ -252,24 +276,55 @@ function emitInterfaceCode(
         quoteIfNeeded(resolved.methodName)
       }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${resolved.results.typeName}> => {`,
     );
+    // Encode params with cap table support (handles capability parameters)
     out.push(
-      `      const payload = ${resolved.params.codecConst}.encode(params);`,
+      `      const encoded = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params as Record<string, unknown>);`,
     );
     out.push("      let questionId: number | undefined;");
-    out.push("      const callOptions: RpcCallOptions = {");
+    out.push("      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {");
     out.push("        ...(options ?? {}),");
+    out.push(
+      `        interfaceId: options?.interfaceId ?? ${info.typeName}InterfaceId,`,
+    );
     out.push("        onQuestionId: (value: number): void => {");
     out.push("          questionId = value;");
     out.push("          options?.onQuestionId?.(value);");
     out.push("        },");
+    out.push(
+      "        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),",
+    );
     out.push("      };");
+    // Use callRaw when available (provides cap table in response)
+    out.push("      if (transport.callRaw) {");
+    out.push(
+      `        const raw = await transport.callRaw(capability, ${info.typeName}MethodOrdinals[${
+        JSON.stringify(resolved.methodName)
+      }], encoded.content, callOptions);`,
+    );
+    out.push("        try {");
+    out.push(
+      `          return decodeStructMessageWithCaps(${resolved.results.descriptorConst}, raw.contentBytes, raw.capTable) as ${resolved.results.typeName};`,
+    );
+    out.push("        } finally {");
+    out.push(
+      "          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
+    );
+    out.push(
+      "            await transport.finish(questionId, options?.finish);",
+    );
+    out.push("          }");
+    out.push("        }");
+    out.push("      }");
+    // Fallback to call() for transports without callRaw
     out.push(
       `      const response = await transport.call(capability, ${info.typeName}MethodOrdinals[${
         JSON.stringify(resolved.methodName)
-      }], payload, callOptions);`,
+      }], encoded.content, callOptions);`,
     );
     out.push("      try {");
-    out.push(`        return ${resolved.results.codecConst}.decode(response);`);
+    out.push(
+      `        return ${resolved.results.codecConst}.decode(response);`,
+    );
     out.push("      } finally {");
     out.push(
       "        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
@@ -297,7 +352,7 @@ function emitInterfaceCode(
   out.push("  return {");
   out.push(`    interfaceId: ${info.typeName}InterfaceId,`);
   out.push(
-    "    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<Uint8Array> => {",
+    "    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {",
   );
   out.push("      switch (methodId) {");
   for (const resolved of resolvedMethods) {
@@ -310,7 +365,17 @@ function emitInterfaceCode(
         JSON.stringify(resolved.methodName)
       }](decoded, ctx);`,
     );
-    out.push(`          return ${resolved.results.codecConst}.encode(result);`);
+    out.push(
+      `          const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result as Record<string, unknown>);`,
+    );
+    out.push(
+      "          if (encoded.capTable.length > 0) {",
+    );
+    out.push(
+      "            return { content: encoded.content, capTable: encoded.capTable };",
+    );
+    out.push("          }");
+    out.push("          return encoded.content;");
     out.push("        }");
   }
   out.push("        default:");

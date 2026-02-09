@@ -9,13 +9,13 @@ const REQUEST_FIXTURE =
 
 const EXPECTED_HASH_BY_PATH: Record<string, string> = {
   "person_codegen_capnp.ts":
-    "696a1254bdb6fa14cb05854611bc7620755a84709c17f0446c24e4ecf306796b",
+    "b5ea838a14e654537c0d758193f93da96578850fffe7d6ce893cdb6863fb86f4",
   "person_codegen_meta.ts":
     "ff17ccca414fa180ebdb6ac9c2b9fdeb2a7a11ba57f0755acad3d376f0bc73a8",
   "person_codegen_rpc.ts":
     "e8e7d6befebbe78acfed0da1f96e0693b8fd22fcc563aa0d2658231d83f8ebd0",
   "union_group_codegen_capnp.ts":
-    "3962cda908853b45e1fc413897f0cc63404a5f42cf8affdd2c174d339bafdae3",
+    "8b40c698945352859367c190e6db7493f5e5d006a10cd2882663ee54d8fb5dec",
   "union_group_codegen_meta.ts":
     "55f346ad1d1dd9c4c7bffe0ac1f9d4180d2df09a101d294dbfba2d30ae8eb9fb",
   "union_group_codegen_rpc.ts":
