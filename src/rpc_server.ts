@@ -219,6 +219,13 @@ export interface RpcServerDispatch {
   /** The Cap'n Proto interface ID this dispatch handles. */
   readonly interfaceId: bigint;
   /**
+   * Optional list of interface IDs accepted by this dispatch. When provided,
+   * incoming calls are accepted if their `interfaceId` matches any entry.
+   * Useful for generated interface-inheritance stubs where one capability can
+   * be called through parent interface IDs.
+   */
+  readonly interfaceIds?: readonly bigint[];
+  /**
    * Handles an incoming RPC call.
    *
    * @param methodId - The method number within the interface.
@@ -988,11 +995,18 @@ export class RpcServerBridge {
       };
     }
 
-    if (registered.dispatch.interfaceId !== call.interfaceId) {
+    const acceptedInterfaceIds = registered.dispatch.interfaceIds;
+    const interfaceAccepted = acceptedInterfaceIds
+      ? acceptedInterfaceIds.includes(call.interfaceId)
+      : (registered.dispatch.interfaceId === call.interfaceId);
+    if (!interfaceAccepted) {
+      const expected = acceptedInterfaceIds?.length
+        ? acceptedInterfaceIds.map((id) => id.toString()).join(",")
+        : registered.dispatch.interfaceId.toString();
       return {
         kind: "exception",
         reason:
-          `interface mismatch for capability ${capabilityIndex}: expected ${registered.dispatch.interfaceId.toString()} got ${call.interfaceId.toString()}`,
+          `interface mismatch for capability ${capabilityIndex}: expected ${expected} got ${call.interfaceId.toString()}`,
       };
     }
 

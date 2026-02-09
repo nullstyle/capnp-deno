@@ -614,6 +614,52 @@ Deno.test("server core: call to released capability returns exception", async ()
 // Interface mismatch
 // ---------------------------------------------------------------------------
 
+Deno.test("server core: dispatch accepts configured interfaceIds aliases", async () => {
+  const bridge = new RpcServerBridge();
+  let seenInterfaceId = 0n;
+
+  bridge.exportCapability({
+    interfaceId: 0xAAAAn,
+    interfaceIds: [0xAAAAn, 0xBBBBn],
+    dispatch: (_methodId, _params, ctx) => {
+      seenInterfaceId = ctx.interfaceId;
+      return encodeSingleU32StructMessage(7);
+    },
+  }, { capabilityIndex: 1 });
+
+  const accepted = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0xBBBBn,
+    methodId: 0,
+    targetImportedCap: 1,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(accepted !== null, "expected response frame for accepted alias");
+  const acceptedDecoded = decodeReturnFrame(accepted);
+  assertEquals(acceptedDecoded.kind, "results");
+  if (acceptedDecoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(acceptedDecoded.contentBytes), 7);
+  }
+  assertEquals(seenInterfaceId, 0xBBBBn);
+
+  const rejected = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0xCCCCn,
+    methodId: 0,
+    targetImportedCap: 1,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(rejected !== null, "expected exception frame for rejected alias");
+  const rejectedDecoded = decodeReturnFrame(rejected);
+  assertEquals(rejectedDecoded.kind, "exception");
+  if (rejectedDecoded.kind === "exception") {
+    assert(
+      /interface mismatch/i.test(rejectedDecoded.reason),
+      `expected interface mismatch reason, got: ${rejectedDecoded.reason}`,
+    );
+  }
+});
+
 Deno.test("server core: interface mismatch returns exception", async () => {
   const bridge = new RpcServerBridge();
   bridge.exportCapability({

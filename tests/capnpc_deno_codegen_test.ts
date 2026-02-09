@@ -573,6 +573,10 @@ function makeInheritedRpcInterfaceRequest(): CodeGeneratorRequestModel {
   const fileId = 0x120n;
   const parentInterfaceId = 0x121n;
   const childInterfaceId = 0x122n;
+  const parentParamsId = 0x123n;
+  const parentResultsId = 0x124n;
+  const childParamsId = 0x125n;
+  const childResultsId = 0x126n;
   const prefix = "schema/inheritance.capnp:";
   return {
     nodes: [
@@ -595,7 +599,14 @@ function makeInheritedRpcInterfaceRequest(): CodeGeneratorRequestModel {
         nestedNodes: [],
         kind: "interface",
         interfaceNode: {
-          methods: [],
+          methods: [
+            {
+              name: "base",
+              codeOrder: 0,
+              paramStructTypeId: parentParamsId,
+              resultStructTypeId: parentResultsId,
+            },
+          ],
           superclasses: [],
         },
       },
@@ -607,8 +618,79 @@ function makeInheritedRpcInterfaceRequest(): CodeGeneratorRequestModel {
         nestedNodes: [],
         kind: "interface",
         interfaceNode: {
-          methods: [],
+          methods: [
+            {
+              name: "child",
+              codeOrder: 0,
+              paramStructTypeId: childParamsId,
+              resultStructTypeId: childResultsId,
+            },
+          ],
           superclasses: [parentInterfaceId],
+        },
+      },
+      {
+        id: parentParamsId,
+        displayName: `${prefix}Parent.base$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: parentInterfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: parentResultsId,
+        displayName: `${prefix}Parent.base$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: parentInterfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: childParamsId,
+        displayName: `${prefix}Child.child$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: childInterfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: childResultsId,
+        displayName: `${prefix}Child.child$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: childInterfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
         },
       },
     ],
@@ -726,10 +808,30 @@ Deno.test("capnpc-deno emitter rejects rpc methods that reference unknown param/
   );
 });
 
-Deno.test("capnpc-deno emitter rejects interface inheritance until runtime support exists", () => {
-  assertThrows(
-    () => generateTypescriptFiles(makeInheritedRpcInterfaceRequest()),
-    /interface inheritance is not yet supported/i,
+Deno.test("capnpc-deno emitter supports interface inheritance for rpc stubs", () => {
+  const generated = generateTypescriptFiles(makeInheritedRpcInterfaceRequest());
+  const rpc = fileByPath(generated, "inheritance_rpc.ts");
+
+  assert(
+    rpc.contents.includes("interfaceIds: [0x122n, 0x121n] as const"),
+    "expected server dispatch to accept child and parent interface ids",
+  );
+  assert(
+    rpc.contents.includes("interfaceId: options?.interfaceId ?? 0x122n"),
+    "expected child methods to default to child interface id",
+  );
+  assert(
+    rpc.contents.includes("interfaceId: options?.interfaceId ?? 0x121n"),
+    "expected inherited methods to default to parent interface id",
+  );
+  assert(
+    rpc.contents.includes("case 0x122n: {") &&
+      rpc.contents.includes("case 0x121n: {"),
+    "expected dispatch branching by interface id",
+  );
+  assert(
+    rpc.contents.includes("base(params: ParentBaseParams"),
+    "expected child client/server surfaces to include inherited method",
   );
 });
 

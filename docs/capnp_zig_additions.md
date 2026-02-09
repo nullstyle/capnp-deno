@@ -46,9 +46,14 @@ Optional future ergonomics (non-blocking):
 2. A canonical machine-readable ABI manifest (symbol + feature-bit map) would
    reduce host/runtime drift risk across language bindings.
 
-## capnpc-deno follow-up gap
+## capnpc-deno follow-up closure
 
-capnp-zig now supports interface inheritance in its native codegen, but
-`capnpc-deno` does not yet support inheritance semantics in generated RPC TS
-stubs. To avoid silent partial output, the TS emitter now fails fast when a
-schema interface declares superclasses.
+`capnpc-deno` now generates inheritance-aware RPC TypeScript stubs:
+
+1. Child client stubs include inherited methods.
+2. Inherited methods default to the ancestor `interfaceId`.
+3. Generated server stubs dispatch by `(interfaceId, methodId)` and publish the
+   accepted interface ID set (`interfaceIds`) for bridge-side validation.
+
+This removes the previous fail-fast behavior for `extends` schemas and aligns TS
+emission semantics with upstream capnp-zig inheritance behavior.

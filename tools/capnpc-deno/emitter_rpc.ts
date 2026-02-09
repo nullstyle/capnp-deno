@@ -2,7 +2,7 @@
  * Interface/RPC client and server emission functions.
  */
 
-import type { NodeModel } from "./model.ts";
+import type { InterfaceMethodModel, NodeModel } from "./model.ts";
 import type { InterfaceInfo, StructInfo } from "./emitter_helpers.ts";
 import {
   collectLocalInterfaces,
@@ -11,6 +11,20 @@ import {
   quoteIfNeeded,
   toCamelCase,
 } from "./emitter_helpers.ts";
+
+interface ResolvedMethodInfo {
+  readonly method: InterfaceMethodModel;
+  readonly methodName: string;
+  readonly params: StructInfo;
+  readonly results: StructInfo;
+  readonly sourceInterfaceId: bigint;
+}
+
+interface ResolvedInterfaceInfo {
+  readonly info: InterfaceInfo;
+  readonly methods: ResolvedMethodInfo[];
+  readonly acceptedInterfaceIds: bigint[];
+}
 
 export function emitRpcModule(
   fileNode: NodeModel,
@@ -34,17 +48,9 @@ export function emitRpcModule(
     return out.join("\n");
   }
 
-  // Interface inheritance is not yet supported by the TS emitter/runtime.
-  // Fail fast instead of silently omitting inherited methods.
-  for (const info of interfaces) {
-    const superclasses = info.node.interfaceNode?.superclasses ?? [];
-    if (superclasses.length > 0) {
-      const ids = superclasses.map((id) => formatBigint(id)).join(", ");
-      throw new Error(
-        `interface inheritance is not yet supported for ${info.typeName}; superclasses: [${ids}]`,
-      );
-    }
-  }
+  const resolvedInterfaces = interfaces.map((info) =>
+    resolveInterfaceInfo(info, nodeById, structById)
+  );
 
   const typeImports = new Set<string>([
     "CapabilityPointer",
@@ -56,26 +62,14 @@ export function emitRpcModule(
     "decodeStructMessageWithCaps",
   ]);
 
-  for (const info of interfaces) {
-    const methods = info.node.interfaceNode?.methods
-      .slice()
-      .sort((a, b) =>
-        (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
-      ) ??
-      [];
-    for (const method of methods) {
-      const params = structById.get(method.paramStructTypeId);
-      const results = structById.get(method.resultStructTypeId);
-      if (params) {
-        typeImports.add(params.typeName);
-        valueImports.add(params.codecConst);
-        valueImports.add(params.descriptorConst);
-      }
-      if (results) {
-        typeImports.add(results.typeName);
-        valueImports.add(results.codecConst);
-        valueImports.add(results.descriptorConst);
-      }
+  for (const resolvedInfo of resolvedInterfaces) {
+    for (const method of resolvedInfo.methods) {
+      typeImports.add(method.params.typeName);
+      valueImports.add(method.params.codecConst);
+      valueImports.add(method.params.descriptorConst);
+      typeImports.add(method.results.typeName);
+      valueImports.add(method.results.codecConst);
+      valueImports.add(method.results.descriptorConst);
     }
   }
 
@@ -148,6 +142,7 @@ export function emitRpcModule(
   out.push("");
   out.push("export interface RpcServerDispatch {");
   out.push("  readonly interfaceId: bigint;");
+  out.push("  readonly interfaceIds?: readonly bigint[];");
   out.push("  dispatch(");
   out.push("    methodId: number,");
   out.push("    params: Uint8Array,");
@@ -178,8 +173,8 @@ export function emitRpcModule(
   out.push("}");
   out.push("");
 
-  for (const info of interfaces) {
-    emitInterfaceCode(out, info, structById);
+  for (const resolvedInfo of resolvedInterfaces) {
+    emitInterfaceCode(out, resolvedInfo);
   }
 
   return out.join("\n");
@@ -187,61 +182,10 @@ export function emitRpcModule(
 
 function emitInterfaceCode(
   out: string[],
-  info: InterfaceInfo,
-  structById: Map<bigint, StructInfo>,
+  resolvedInfo: ResolvedInterfaceInfo,
 ): void {
-  const methods = info.node.interfaceNode?.methods
-    .slice()
-    .sort((a, b) =>
-      (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
-    ) ??
-    [];
-  const usedMethodNames = new Set<string>();
-  const resolvedMethods: Array<{
-    method: (typeof methods)[number];
-    methodName: string;
-    params: StructInfo;
-    results: StructInfo;
-  }> = [];
-
-  for (const method of methods) {
-    const baseName = toCamelCase(method.name);
-    let methodName = baseName;
-    let suffix = 2;
-    while (usedMethodNames.has(methodName)) {
-      methodName = `${baseName}${suffix}`;
-      suffix += 1;
-    }
-    usedMethodNames.add(methodName);
-
-    const params = structById.get(method.paramStructTypeId);
-    if (!params) {
-      throw new Error(
-        `interface ${info.typeName} method ${
-          JSON.stringify(method.name)
-        } references unknown param struct id ${
-          formatBigint(method.paramStructTypeId)
-        }`,
-      );
-    }
-    const results = structById.get(method.resultStructTypeId);
-    if (!results) {
-      throw new Error(
-        `interface ${info.typeName} method ${
-          JSON.stringify(method.name)
-        } references unknown result struct id ${
-          formatBigint(method.resultStructTypeId)
-        }`,
-      );
-    }
-
-    resolvedMethods.push({
-      method,
-      methodName,
-      params,
-      results,
-    });
-  }
+  const info = resolvedInfo.info;
+  const resolvedMethods = resolvedInfo.methods;
 
   out.push(
     `export const ${info.typeName}InterfaceId = ${formatBigint(info.id)};`,
@@ -298,7 +242,9 @@ function emitInterfaceCode(
     );
     out.push("        ...(options ?? {}),");
     out.push(
-      `        interfaceId: options?.interfaceId ?? ${info.typeName}InterfaceId,`,
+      `        interfaceId: options?.interfaceId ?? ${
+        formatBigint(resolved.sourceInterfaceId)
+      },`,
     );
     out.push("        onQuestionId: (value: number): void => {");
     out.push("          questionId = value;");
@@ -363,38 +309,56 @@ function emitInterfaceCode(
   out.push(
     `export function create${info.typeName}Server(server: ${info.typeName}Server): RpcServerDispatch {`,
   );
+
+  const methodsByInterfaceId = new Map<bigint, ResolvedMethodInfo[]>();
+  for (const method of resolvedMethods) {
+    const list = methodsByInterfaceId.get(method.sourceInterfaceId) ?? [];
+    list.push(method);
+    methodsByInterfaceId.set(method.sourceInterfaceId, list);
+  }
+
   out.push("  return {");
   out.push(`    interfaceId: ${info.typeName}InterfaceId,`);
+  if (resolvedInfo.acceptedInterfaceIds.length > 1) {
+    out.push(
+      `    interfaceIds: [${
+        resolvedInfo.acceptedInterfaceIds.map((id) => formatBigint(id)).join(
+          ", ",
+        )
+      }] as const,`,
+    );
+  }
   out.push(
     "    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {",
   );
-  out.push("      switch (methodId) {");
-  for (const resolved of resolvedMethods) {
-    out.push(`        case ${resolved.method.codeOrder}: {`);
+
+  if (resolvedInfo.acceptedInterfaceIds.length > 1) {
     out.push(
-      `          const decoded = ${resolved.params.codecConst}.decode(params);`,
+      `      const resolvedInterfaceId = ctx.interfaceId ?? ${info.typeName}InterfaceId;`,
     );
+    out.push("      switch (resolvedInterfaceId) {");
+    for (const interfaceId of resolvedInfo.acceptedInterfaceIds) {
+      out.push(`        case ${formatBigint(interfaceId)}: {`);
+      emitServerMethodSwitch(
+        out,
+        methodsByInterfaceId.get(interfaceId) ?? [],
+        "          ",
+      );
+      out.push("        }");
+    }
+    out.push("        default:");
     out.push(
-      `          const result = await server[${
-        JSON.stringify(resolved.methodName)
-      }](decoded, ctx);`,
+      '          throw new Error("unknown interface id: " + String(resolvedInterfaceId));',
     );
-    out.push(
-      `          const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result as Record<string, unknown>);`,
+    out.push("      }");
+  } else {
+    emitServerMethodSwitch(
+      out,
+      methodsByInterfaceId.get(info.id) ?? [],
+      "      ",
     );
-    out.push(
-      "          if (encoded.capTable.length > 0) {",
-    );
-    out.push(
-      "            return { content: encoded.content, capTable: encoded.capTable };",
-    );
-    out.push("          }");
-    out.push("          return encoded.content;");
-    out.push("        }");
   }
-  out.push("        default:");
-  out.push('          throw new Error("unknown method ordinal: " + methodId);');
-  out.push("      }");
+
   out.push("    },");
   out.push("  };");
   out.push("}");
@@ -409,4 +373,167 @@ function emitInterfaceCode(
   );
   out.push("}");
   out.push("");
+}
+
+function sortedInterfaceMethods(node: NodeModel): InterfaceMethodModel[] {
+  return node.interfaceNode?.methods
+    .slice()
+    .sort((a, b) =>
+      (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
+    ) ??
+    [];
+}
+
+function collectAncestorInterfaceIds(
+  info: InterfaceInfo,
+  nodeById: Map<bigint, NodeModel>,
+): bigint[] {
+  const ancestors: bigint[] = [];
+  const seen = new Set<bigint>([info.id]);
+  const visiting = new Set<bigint>();
+
+  const walk = (interfaceId: bigint): void => {
+    if (visiting.has(interfaceId)) {
+      throw new Error(
+        `cyclic interface inheritance detected at ${formatBigint(interfaceId)}`,
+      );
+    }
+
+    visiting.add(interfaceId);
+    const node = nodeById.get(interfaceId);
+    if (!node || node.kind !== "interface" || !node.interfaceNode) {
+      visiting.delete(interfaceId);
+      throw new Error(
+        `interface ${info.typeName} references unknown superclass id ${
+          formatBigint(interfaceId)
+        }`,
+      );
+    }
+
+    const superclasses = node.interfaceNode.superclasses ?? [];
+    for (const parentId of superclasses) {
+      if (seen.has(parentId)) continue;
+      seen.add(parentId);
+      walk(parentId);
+      ancestors.push(parentId);
+    }
+
+    visiting.delete(interfaceId);
+  };
+
+  walk(info.id);
+  return ancestors;
+}
+
+function resolveInterfaceInfo(
+  info: InterfaceInfo,
+  nodeById: Map<bigint, NodeModel>,
+  structById: Map<bigint, StructInfo>,
+): ResolvedInterfaceInfo {
+  const usedMethodNames = new Set<string>();
+  const methods: ResolvedMethodInfo[] = [];
+  const acceptedInterfaceIds = [
+    info.id,
+    ...collectAncestorInterfaceIds(info, nodeById),
+  ];
+
+  const addMethod = (
+    method: InterfaceMethodModel,
+    sourceInterfaceId: bigint,
+  ): void => {
+    const baseName = toCamelCase(method.name);
+    let methodName = baseName;
+    let suffix = 2;
+    while (usedMethodNames.has(methodName)) {
+      methodName = `${baseName}${suffix}`;
+      suffix += 1;
+    }
+    usedMethodNames.add(methodName);
+
+    const params = structById.get(method.paramStructTypeId);
+    if (!params) {
+      throw new Error(
+        `interface ${info.typeName} method ${
+          JSON.stringify(method.name)
+        } references unknown param struct id ${
+          formatBigint(method.paramStructTypeId)
+        } (source interface ${formatBigint(sourceInterfaceId)})`,
+      );
+    }
+    const results = structById.get(method.resultStructTypeId);
+    if (!results) {
+      throw new Error(
+        `interface ${info.typeName} method ${
+          JSON.stringify(method.name)
+        } references unknown result struct id ${
+          formatBigint(method.resultStructTypeId)
+        } (source interface ${formatBigint(sourceInterfaceId)})`,
+      );
+    }
+
+    methods.push({
+      method,
+      methodName,
+      params,
+      results,
+      sourceInterfaceId,
+    });
+  };
+
+  for (const method of sortedInterfaceMethods(info.node)) {
+    addMethod(method, info.id);
+  }
+
+  for (const ancestorId of acceptedInterfaceIds.slice(1)) {
+    const ancestorNode = nodeById.get(ancestorId);
+    if (
+      !ancestorNode || ancestorNode.kind !== "interface" ||
+      !ancestorNode.interfaceNode
+    ) {
+      throw new Error(
+        `interface ${info.typeName} references unknown superclass id ${
+          formatBigint(ancestorId)
+        }`,
+      );
+    }
+    for (const method of sortedInterfaceMethods(ancestorNode)) {
+      addMethod(method, ancestorId);
+    }
+  }
+
+  return { info, methods, acceptedInterfaceIds };
+}
+
+function emitServerMethodSwitch(
+  out: string[],
+  methods: ResolvedMethodInfo[],
+  indent: string,
+): void {
+  out.push(`${indent}switch (methodId) {`);
+  for (const resolved of methods) {
+    out.push(`${indent}  case ${resolved.method.codeOrder}: {`);
+    out.push(
+      `${indent}    const decoded = ${resolved.params.codecConst}.decode(params);`,
+    );
+    out.push(
+      `${indent}    const result = await server[${
+        JSON.stringify(resolved.methodName)
+      }](decoded, ctx);`,
+    );
+    out.push(
+      `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result as Record<string, unknown>);`,
+    );
+    out.push(`${indent}    if (encoded.capTable.length > 0) {`);
+    out.push(
+      `${indent}      return { content: encoded.content, capTable: encoded.capTable };`,
+    );
+    out.push(`${indent}    }`);
+    out.push(`${indent}    return encoded.content;`);
+    out.push(`${indent}  }`);
+  }
+  out.push(`${indent}  default:`);
+  out.push(
+    `${indent}    throw new Error("unknown method ordinal: " + methodId);`,
+  );
+  out.push(`${indent}}`);
 }
