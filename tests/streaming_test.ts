@@ -1,7 +1,4 @@
-import {
-  createStreamSender,
-  type StreamCallFn,
-} from "../src/streaming.ts";
+import { createStreamSender, type StreamCallFn } from "../src/streaming.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 function makeCallFn(
@@ -73,7 +70,10 @@ Deno.test("StreamSender enforces maxInFlight window", async () => {
 
   assertEquals(sender.totalSent, 12);
   assertEquals(sender.totalReceived, 12);
-  assert(maxConcurrent <= 3, `max concurrent was ${maxConcurrent}, expected <= 3`);
+  assert(
+    maxConcurrent <= 3,
+    `max concurrent was ${maxConcurrent}, expected <= 3`,
+  );
 });
 
 Deno.test("StreamSender propagates errors on flush when no onError", async () => {
@@ -132,7 +132,9 @@ Deno.test("StreamSender calls onError for failed calls", async () => {
 Deno.test("StreamSender rejects invalid maxInFlight", () => {
   let thrown = false;
   try {
-    createStreamSender(() => Promise.resolve(new Uint8Array()), { maxInFlight: 0 });
+    createStreamSender(() => Promise.resolve(new Uint8Array()), {
+      maxInFlight: 0,
+    });
   } catch (error) {
     thrown = true;
     assert(error instanceof Error);
@@ -141,7 +143,11 @@ Deno.test("StreamSender rejects invalid maxInFlight", () => {
   assert(thrown);
 });
 
-Deno.test({ name: "StreamSender respects abort signal", sanitizeOps: false, sanitizeResources: false }, async () => {
+Deno.test({
+  name: "StreamSender respects abort signal",
+  sanitizeOps: false,
+  sanitizeResources: false,
+}, async () => {
   const ac = new AbortController();
   const { callFn } = makeCallFn([new Uint8Array([1])], { delayMs: 100 });
 

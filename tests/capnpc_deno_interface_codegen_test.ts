@@ -75,7 +75,7 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
 
   const source = capnp.contents;
   assert(
-    source.includes('@nullstyle/capnp/codegen_runtime'),
+    source.includes("@nullstyle/capnp/codegen_runtime"),
     "expected codegen_runtime re-export",
   );
   assert(

@@ -128,7 +128,9 @@ export const TYPE_FLOAT64: PrimitiveTypeDescriptor = { kind: "float64" };
 export const TYPE_TEXT: TextTypeDescriptor = { kind: "text" };
 export const TYPE_DATA: DataTypeDescriptor = { kind: "data" };
 export const TYPE_INTERFACE: InterfaceTypeDescriptor = { kind: "interface" };
-export const TYPE_ANY_POINTER: AnyPointerTypeDescriptor = { kind: "anyPointer" };
+export const TYPE_ANY_POINTER: AnyPointerTypeDescriptor = {
+  kind: "anyPointer",
+};
 
 export const WORD_BYTES = 8;
 export const MASK_30 = 0x3fff_ffffn;
@@ -246,7 +248,9 @@ export function asNumber(value: unknown): number {
 
 export function asBigInt(value: unknown): bigint {
   if (typeof value === "bigint") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return BigInt(Math.trunc(value));
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return BigInt(Math.trunc(value));
+  }
   if (typeof value === "string" && value.length > 0) {
     try {
       return BigInt(value);
@@ -373,7 +377,11 @@ export class MessageBuilder {
     return start;
   }
 
-  pointerWordIndex(structWord: number, dataWordCount: number, pointerOffset: number): number {
+  pointerWordIndex(
+    structWord: number,
+    dataWordCount: number,
+    pointerOffset: number,
+  ): number {
     return structWord + dataWordCount + pointerOffset;
   }
 
@@ -436,7 +444,10 @@ export class MessageBuilder {
     this.requireByteRange(byteOffset, 1, "setBool");
     const bit = 1 << bitOffset;
     const current = this.view().getUint8(byteOffset);
-    this.view().setUint8(byteOffset, value ? (current | bit) : (current & ~bit));
+    this.view().setUint8(
+      byteOffset,
+      value ? (current | bit) : (current & ~bit),
+    );
   }
 
   setStructPointer(
@@ -506,22 +517,36 @@ export class MessageBuilder {
   }
 
   private view(): DataView {
-    return new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.byteLength);
+    return new DataView(
+      this.bytes.buffer,
+      this.bytes.byteOffset,
+      this.bytes.byteLength,
+    );
   }
 
-  private requireWordRange(wordIndex: number, count: number, context: string): void {
+  private requireWordRange(
+    wordIndex: number,
+    count: number,
+    context: string,
+  ): void {
     if (wordIndex < 0 || count < 0 || wordIndex + count > this.words) {
       throw new Error(
-        context + " out of range: word=" + wordIndex + " count=" + count + " words=" + this.words,
+        context + " out of range: word=" + wordIndex + " count=" + count +
+          " words=" + this.words,
       );
     }
   }
 
-  private requireByteRange(byteOffset: number, length: number, context: string): void {
+  private requireByteRange(
+    byteOffset: number,
+    length: number,
+    context: string,
+  ): void {
     const max = this.words * WORD_BYTES;
     if (byteOffset < 0 || length < 0 || byteOffset + length > max) {
       throw new Error(
-        context + " out of range: offset=" + byteOffset + " len=" + length + " max=" + max,
+        context + " out of range: offset=" + byteOffset + " len=" + length +
+          " max=" + max,
       );
     }
   }
@@ -638,7 +663,12 @@ export class MessageReader {
     const count = Number((word >> 35n) & 0x1fff_ffffn);
     const targetWord = resolved.pointerWord + 1 + offsetWords;
     if (elementSize === 7) {
-      this.requireWordRange(resolved.segmentId, targetWord, 1, "inline composite tag");
+      this.requireWordRange(
+        resolved.segmentId,
+        targetWord,
+        1,
+        "inline composite tag",
+      );
       const tag = this.readWord(resolved.segmentId, targetWord);
       const tagKind = Number(tag & 0x3n);
       if (tagKind !== 0) {
@@ -669,7 +699,12 @@ export class MessageReader {
     }
 
     const words = this.flatListWords(elementSize, count);
-    this.requireWordRange(resolved.segmentId, targetWord, words, "list payload");
+    this.requireWordRange(
+      resolved.segmentId,
+      targetWord,
+      words,
+      "list payload",
+    );
     return {
       kind: "flat",
       segmentId: resolved.segmentId,
@@ -811,15 +846,25 @@ export class MessageReader {
     if (list.kind !== "flat" || list.elementSize !== 2) {
       throw new Error("expected byte list pointer for data");
     }
-    return this.readBytes(list.segmentId, list.startWord * WORD_BYTES, list.elementCount);
+    return this.readBytes(
+      list.segmentId,
+      list.startWord * WORD_BYTES,
+      list.elementCount,
+    );
   }
 
   readWord(segmentId: number, wordIndex: number): bigint {
     this.requireWordRange(segmentId, wordIndex, 1, "readWord");
-    return this.segmentView(segmentId).getBigUint64(wordIndex * WORD_BYTES, true);
+    return this.segmentView(segmentId).getBigUint64(
+      wordIndex * WORD_BYTES,
+      true,
+    );
   }
 
-  private resolvePointer(segmentId: number, pointerWord: number): ResolvedPointer {
+  private resolvePointer(
+    segmentId: number,
+    pointerWord: number,
+  ): ResolvedPointer {
     let currentSegmentId = segmentId;
     let currentPointerWord = pointerWord;
     let word = this.readWord(currentSegmentId, currentPointerWord);
@@ -845,11 +890,18 @@ export class MessageReader {
         continue;
       }
 
-      this.requireWordRange(landingSegmentId, landingPadWord, 2, "double-far landing pad");
+      this.requireWordRange(
+        landingSegmentId,
+        landingPadWord,
+        2,
+        "double-far landing pad",
+      );
       const pad0 = this.readWord(landingSegmentId, landingPadWord);
       const pad0Kind = Number(pad0 & 0x3n);
       if (pad0Kind !== 2) {
-        throw new Error("double-far landing pad[0] must be far pointer, got kind " + pad0Kind);
+        throw new Error(
+          "double-far landing pad[0] must be far pointer, got kind " + pad0Kind,
+        );
       }
       const pad0IsDoubleFar = ((pad0 >> 2n) & 0x1n) === 1n;
       if (pad0IsDoubleFar) {
@@ -970,7 +1022,8 @@ export class MessageReader {
     const segment = this.segment(segmentId);
     if (byteOffset < 0 || len < 0 || byteOffset + len > segment.byteLength) {
       throw new Error(
-        "readBytes out of range: segment=" + segmentId + " offset=" + byteOffset + " len=" + len,
+        "readBytes out of range: segment=" + segmentId + " offset=" +
+          byteOffset + " len=" + len,
       );
     }
     return segment.subarray(byteOffset, byteOffset + len);
@@ -985,7 +1038,8 @@ export class MessageReader {
     const segmentWords = this.segment(segmentId).byteLength / WORD_BYTES;
     if (wordIndex < 0 || count < 0 || wordIndex + count > segmentWords) {
       throw new Error(
-        context + " out of range: segment=" + segmentId + " word=" + wordIndex + " count=" +
+        context + " out of range: segment=" + segmentId + " word=" + wordIndex +
+          " count=" +
           count + " words=" + segmentWords,
       );
     }
@@ -1001,11 +1055,15 @@ export class MessageReader {
     const segment = this.segment(segmentId);
     if (byteOffset < 0 || len < 0 || byteOffset + len > segment.byteLength) {
       throw new Error(
-        context + " segment range error: segment=" + segmentId + " offset=" + byteOffset +
+        context + " segment range error: segment=" + segmentId + " offset=" +
+          byteOffset +
           " len=" + len + " segmentBytes=" + segment.byteLength,
       );
     }
-    if (byteOffset + len > (Math.floor(byteOffset / WORD_BYTES) * WORD_BYTES + maxLen)) {
+    if (
+      byteOffset + len >
+        (Math.floor(byteOffset / WORD_BYTES) * WORD_BYTES + maxLen)
+    ) {
       throw new Error(context + " struct/list bounds exceeded");
     }
   }
@@ -1049,11 +1107,16 @@ export function enumOrdinal(type: EnumTypeDescriptor, value: unknown): number {
 }
 
 export function enumValue(type: EnumTypeDescriptor, ordinal: number): string {
-  if (ordinal >= 0 && ordinal < type.byOrdinal.length) return type.byOrdinal[ordinal];
+  if (ordinal >= 0 && ordinal < type.byOrdinal.length) {
+    return type.byOrdinal[ordinal];
+  }
   return type.byOrdinal[0] ?? "";
 }
 
-export function isPresentField(record: Record<string, unknown>, name: string): boolean {
+export function isPresentField(
+  record: Record<string, unknown>,
+  name: string,
+): boolean {
   return Object.prototype.hasOwnProperty.call(record, name) &&
     record[name] !== undefined;
 }
@@ -1083,8 +1146,15 @@ export function encodeStructMessage<T extends Record<string, unknown>>(
   value: T,
 ): Uint8Array {
   const builder = new MessageBuilder();
-  const structWord = builder.allocWords(descriptor.dataWordCount + descriptor.pointerCount);
-  builder.setStructPointer(0, structWord, descriptor.dataWordCount, descriptor.pointerCount);
+  const structWord = builder.allocWords(
+    descriptor.dataWordCount + descriptor.pointerCount,
+  );
+  builder.setStructPointer(
+    0,
+    structWord,
+    descriptor.dataWordCount,
+    descriptor.pointerCount,
+  );
   encodeStructAt(builder, descriptor, structWord, value);
   return builder.toMessageBytes();
 }
@@ -1136,7 +1206,13 @@ export function encodeStructAt<T extends Record<string, unknown>>(
     }
 
     if (isDataType(field.type)) {
-      encodeDataField(builder, structWord, field.offset, field.type, fieldValue);
+      encodeDataField(
+        builder,
+        structWord,
+        field.offset,
+        field.type,
+        fieldValue,
+      );
       continue;
     }
     const pointerWord = builder.pointerWordIndex(
@@ -1184,7 +1260,12 @@ export function decodeStructAt<T extends Record<string, unknown>>(
     }
 
     if (isDataType(field.type)) {
-      record[field.name] = decodeDataField(reader, structRef, field.offset, field.type);
+      record[field.name] = decodeDataField(
+        reader,
+        structRef,
+        field.offset,
+        field.type,
+      );
       continue;
     }
     const pointerWord = reader.pointerWordIndex(structRef, field.offset);
@@ -1225,7 +1306,10 @@ export function encodeDataField(
       builder.writeInt32(base + dataByteOffset(type, offset), asNumber(value));
       return;
     case "int64":
-      builder.writeBigInt64(base + dataByteOffset(type, offset), asBigInt(value));
+      builder.writeBigInt64(
+        base + dataByteOffset(type, offset),
+        asBigInt(value),
+      );
       return;
     case "uint8":
       builder.writeUint8(base + dataByteOffset(type, offset), asNumber(value));
@@ -1237,16 +1321,28 @@ export function encodeDataField(
       builder.writeUint32(base + dataByteOffset(type, offset), asNumber(value));
       return;
     case "uint64":
-      builder.writeBigUint64(base + dataByteOffset(type, offset), asBigInt(value));
+      builder.writeBigUint64(
+        base + dataByteOffset(type, offset),
+        asBigInt(value),
+      );
       return;
     case "float32":
-      builder.writeFloat32(base + dataByteOffset(type, offset), asNumber(value));
+      builder.writeFloat32(
+        base + dataByteOffset(type, offset),
+        asNumber(value),
+      );
       return;
     case "float64":
-      builder.writeFloat64(base + dataByteOffset(type, offset), asNumber(value));
+      builder.writeFloat64(
+        base + dataByteOffset(type, offset),
+        asNumber(value),
+      );
       return;
     case "enum":
-      builder.writeUint16(base + dataByteOffset(type, offset), enumOrdinal(type, value));
+      builder.writeUint16(
+        base + dataByteOffset(type, offset),
+        enumOrdinal(type, value),
+      );
       return;
     default:
       throw new Error("unexpected pointer type in data field: " + type.kind);
@@ -1271,7 +1367,10 @@ export function decodeDataField(
     case "int32":
       return reader.readInt32InStruct(structRef, dataByteOffset(type, offset));
     case "int64":
-      return reader.readBigInt64InStruct(structRef, dataByteOffset(type, offset));
+      return reader.readBigInt64InStruct(
+        structRef,
+        dataByteOffset(type, offset),
+      );
     case "uint8":
       return reader.readUint8InStruct(structRef, dataByteOffset(type, offset));
     case "uint16":
@@ -1279,13 +1378,25 @@ export function decodeDataField(
     case "uint32":
       return reader.readUint32InStruct(structRef, dataByteOffset(type, offset));
     case "uint64":
-      return reader.readBigUint64InStruct(structRef, dataByteOffset(type, offset));
+      return reader.readBigUint64InStruct(
+        structRef,
+        dataByteOffset(type, offset),
+      );
     case "float32":
-      return reader.readFloat32InStruct(structRef, dataByteOffset(type, offset));
+      return reader.readFloat32InStruct(
+        structRef,
+        dataByteOffset(type, offset),
+      );
     case "float64":
-      return reader.readFloat64InStruct(structRef, dataByteOffset(type, offset));
+      return reader.readFloat64InStruct(
+        structRef,
+        dataByteOffset(type, offset),
+      );
     case "enum": {
-      const ordinal = reader.readUint16InStruct(structRef, dataByteOffset(type, offset));
+      const ordinal = reader.readUint16InStruct(
+        structRef,
+        dataByteOffset(type, offset),
+      );
       return enumValue(type, ordinal);
     }
     default:
@@ -1313,7 +1424,9 @@ export function encodePointerField(
       return;
     case "struct": {
       const descriptor = type.get();
-      const structWord = builder.allocWords(descriptor.dataWordCount + descriptor.pointerCount);
+      const structWord = builder.allocWords(
+        descriptor.dataWordCount + descriptor.pointerCount,
+      );
       builder.setStructPointer(
         pointerWord,
         structWord,
@@ -1337,7 +1450,10 @@ export function encodePointerField(
         builder.writeWord(pointerWord, 0n);
         return;
       }
-      builder.writeWord(pointerWord, encodeCapabilityPointerWord(capabilityIndex));
+      builder.writeWord(
+        pointerWord,
+        encodeCapabilityPointerWord(capabilityIndex),
+      );
       return;
     }
     case "anyPointer": {
@@ -1367,7 +1483,8 @@ export function decodePointerField(
     case "text":
       return reader.readTextPointer(segmentId, pointerWord) ?? "";
     case "data":
-      return reader.readDataPointer(segmentId, pointerWord) ?? new Uint8Array(0);
+      return reader.readDataPointer(segmentId, pointerWord) ??
+        new Uint8Array(0);
     case "struct": {
       const ref = reader.readStructPointer(segmentId, pointerWord);
       if (!ref) return type.get().createDefault();
@@ -1516,7 +1633,9 @@ export function encodeListField(
       return;
     }
     default:
-      throw new Error("unsupported list element size for encode: " + elementSize);
+      throw new Error(
+        "unsupported list element size for encode: " + elementSize,
+      );
   }
 }
 
@@ -1557,7 +1676,14 @@ export function decodeListField(
     }
     const values: unknown[] = [];
     for (let i = 0; i < list.elementCount; i += 1) {
-      values.push(decodePointerField(reader, list.segmentId, list.startWord + i, elementType));
+      values.push(
+        decodePointerField(
+          reader,
+          list.segmentId,
+          list.startWord + i,
+          elementType,
+        ),
+      );
     }
     return values;
   }
@@ -1726,7 +1852,9 @@ export function decodeListField(
       return out;
     }
     default:
-      throw new Error("unsupported list element size for decode: " + expectedSize);
+      throw new Error(
+        "unsupported list element size for decode: " + expectedSize,
+      );
   }
 }
 
@@ -1766,7 +1894,9 @@ export interface CollectedCapability {
  * its descriptor.  Returns an array of { fieldPath, capabilityIndex }
  * entries in the order they appear in the struct fields.
  */
-export function collectCapabilityPointersFromStruct<T extends Record<string, unknown>>(
+export function collectCapabilityPointersFromStruct<
+  T extends Record<string, unknown>,
+>(
   descriptor: StructDescriptor<T>,
   value: T,
   prefix: string,
@@ -1829,7 +1959,9 @@ export function collectCapabilityPointersFromStruct<T extends Record<string, unk
       continue;
     }
 
-    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+    if (
+      field.type.kind === "list" && field.type.element.kind === "anyPointer"
+    ) {
       const items = asArray(fieldValue);
       for (let i = 0; i < items.length; i += 1) {
         const pointer = asAnyPointerValue(items[i]);
@@ -1987,7 +2119,9 @@ export function remapCapabilityIndices<T extends Record<string, unknown>>(
       continue;
     }
 
-    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+    if (
+      field.type.kind === "list" && field.type.element.kind === "anyPointer"
+    ) {
       const items = asArray(fieldValue);
       out[field.name] = items.map((item) => {
         const pointer = asAnyPointerValue(item);
@@ -2124,7 +2258,9 @@ export function resolveDecodedCapabilities<T extends Record<string, unknown>>(
       continue;
     }
 
-    if (field.type.kind === "list" && field.type.element.kind === "anyPointer") {
+    if (
+      field.type.kind === "list" && field.type.element.kind === "anyPointer"
+    ) {
       const items = asArray(fieldValue);
       out[field.name] = items.map((item) => {
         if (item === null || item === undefined) return item;

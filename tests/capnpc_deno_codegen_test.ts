@@ -244,7 +244,7 @@ Deno.test("capnpc-deno emits binary codec runtime and schema types", () => {
   const rpc = fileByPath(generated, "person_codegen_rpc.ts");
   const meta = fileByPath(generated, "person_codegen_meta.ts");
   assert(
-    capnp.contents.includes('@nullstyle/capnp/codegen_runtime'),
+    capnp.contents.includes("@nullstyle/capnp/codegen_runtime"),
     "expected codegen_runtime re-export in generated output",
   );
   assert(

@@ -1,7 +1,7 @@
 # Deno/TypeScript Cap'n Proto: Arena Gap Analysis
 
-Date: 2026-02-09 (updated) Original: 2026-02-08 at commit `bb7a94f`
-Current: commit `e988228` (feat: close arena gaps GAP-01 through GAP-11)
+Date: 2026-02-09 (updated) Original: 2026-02-08 at commit `bb7a94f` Current:
+commit `e988228` (feat: close arena gaps GAP-01 through GAP-11)
 
 ## 1. Executive Summary
 
@@ -37,11 +37,12 @@ implementation:
   pool, circuit breaker.
 - **Capability plumbing**: Generated server stubs return capabilities via cap
   tables. Generated client stubs resolve capabilities from response cap tables.
-  Generated client stubs encode capability parameters into `paramsCapTable`.
-  Cap table side-channel functions (`encodeStructMessageWithCaps`,
+  Generated client stubs encode capability parameters into `paramsCapTable`. Cap
+  table side-channel functions (`encodeStructMessageWithCaps`,
   `decodeStructMessageWithCaps`) handle capability collection, remapping, and
   resolution.
-- **Test coverage**: 844+ unit tests passing, plus integration and real WASM tests.
+- **Test coverage**: 844+ unit tests passing, plus integration and real WASM
+  tests.
 
 ### What does not work / is missing
 
@@ -49,8 +50,8 @@ All 12 identified gaps have been closed.
 
 ### Overall readiness
 
-The library is **fully ready** for a complete Arena benchmark contestant. All
-12 gaps are closed. All 7 scenarios (`ping`, `echo`, `transfer`, `getChain`,
+The library is **fully ready** for a complete Arena benchmark contestant. All 12
+gaps are closed. All 7 scenarios (`ping`, `echo`, `transfer`, `getChain`,
 `getFanout`, `collaborate`, `stream`) are implementable with the current API
 surface. The `stream` scenario is supported via the `StreamSender` abstraction
 for flow-controlled streaming over regular RPC calls. 844+ tests passing.
@@ -151,8 +152,8 @@ streaming uses regular Call/Return messages; the sender limits concurrency.
 **Status**: CLOSED (commit `e988228`)
 
 **Resolution**: `TcpServerListener` class added to `src/transports/tcp.ts`.
-Calls `Deno.listen()`, accepts connections via async `accept()` generator,
-wraps each `Deno.Conn` in a `TcpTransport`. Includes observability events
+Calls `Deno.listen()`, accepts connections via async `accept()` generator, wraps
+each `Deno.Conn` in a `TcpTransport`. Includes observability events
 (`rpc.transport.tcp.listen`, `rpc.transport.tcp.accept`,
 `rpc.transport.tcp.listen_close`). Exported in public API. 7 test cases in
 `src/transports/tcp_server_test.ts`.
@@ -174,10 +175,10 @@ implements the `RpcSessionHarnessTransport` interface (`emitInbound`,
 
 **Status**: CLOSED (commit `e988228`)
 
-**Resolution**: Generated server dispatch now uses `encodeStructMessageWithCaps()`
-to encode results. When the encoded result has a non-empty cap table, the
-dispatch returns `{ content, capTable }` instead of raw `Uint8Array`.
-Implementation in `tools/capnpc-deno/emitter_rpc.ts`.
+**Resolution**: Generated server dispatch now uses
+`encodeStructMessageWithCaps()` to encode results. When the encoded result has a
+non-empty cap table, the dispatch returns `{ content, capTable }` instead of raw
+`Uint8Array`. Implementation in `tools/capnpc-deno/emitter_rpc.ts`.
 
 ---
 
@@ -188,8 +189,8 @@ Implementation in `tools/capnpc-deno/emitter_rpc.ts`.
 **Resolution**: Generated client stubs preferentially use `callRaw()` to access
 response cap tables, then decode with `decodeStructMessageWithCaps()` which
 resolves capability indices through the cap table. Falls back to decoding with
-empty cap table for transports without `callRaw()`.
-Implementation in `tools/capnpc-deno/emitter_rpc.ts`.
+empty cap table for transports without `callRaw()`. Implementation in
+`tools/capnpc-deno/emitter_rpc.ts`.
 
 ---
 
@@ -199,6 +200,7 @@ Implementation in `tools/capnpc-deno/emitter_rpc.ts`.
 
 **Resolution**: Side-channel functions added to the runtime preamble in
 `tools/capnpc-deno/emitter_preamble.ts`:
+
 - `encodeStructMessageWithCaps()` -- collects capability pointers, builds cap
   table, remaps indices, returns `{ content, capTable }`.
 - `decodeStructMessageWithCaps()` -- decodes struct, resolves capability indices
@@ -219,6 +221,7 @@ The core `StructCodec` interface is unchanged for backward compatibility.
 **Status**: CLOSED (commit `e988228`)
 
 **Resolution**: New `src/server_outbound.ts` module provides:
+
 - `RpcServerCallInterceptTransport` -- wraps the real transport and intercepts
   Return frames for server-originated outbound calls.
 - `RpcServerOutboundClient` -- client API for server-side outbound calls with
@@ -295,37 +298,38 @@ client stubs pass the correct `interfaceId` for each interface.
 
 **Resolution**: Runtime preamble extracted from `emitter_preamble.ts` (deleted)
 to `src/codegen_runtime.ts`, exported as `@nullstyle/capnp/codegen_runtime`.
-Generated `_capnp.ts` files now `export * from "@nullstyle/capnp/codegen_runtime"`
-and import needed bindings locally. No more code duplication across generated
-files. All 837+ existing tests updated and passing.
+Generated `_capnp.ts` files now
+`export * from "@nullstyle/capnp/codegen_runtime"` and import needed bindings
+locally. No more code duplication across generated files. All 837+ existing
+tests updated and passing.
 
 ## 4. Status Summary
 
 ### All Gaps Closed (12 of 12)
 
-| Gap    | Description                          | Closed In    |
-| ------ | ------------------------------------ | ------------ |
-| GAP-01 | TCP Server Listener                  | `e988228`    |
-| GAP-02 | Client Transport for Real Connections | `e988228`   |
-| GAP-03 | Server Stubs Return Capabilities     | `e988228`    |
-| GAP-04 | Client Stubs Resolve Capabilities    | `e988228`    |
-| GAP-05 | StructCodec Cap Table Channel        | `e988228`    |
-| GAP-06 | Server Outbound Calls                | `e988228`    |
-| GAP-07 | Cap'n Proto Streaming                | pending      |
-| GAP-08 | Client Capability Parameters         | `e988228`    |
-| GAP-09 | Resolve/Disembargo Messages          | `e988228`    |
-| GAP-10 | Cross-Language Interop Tests         | pending      |
-| GAP-11 | Per-Call interfaceId                 | `e988228`    |
-| GAP-12 | Preamble Code Duplication            | pending      |
+| Gap    | Description                           | Closed In |
+| ------ | ------------------------------------- | --------- |
+| GAP-01 | TCP Server Listener                   | `e988228` |
+| GAP-02 | Client Transport for Real Connections | `e988228` |
+| GAP-03 | Server Stubs Return Capabilities      | `e988228` |
+| GAP-04 | Client Stubs Resolve Capabilities     | `e988228` |
+| GAP-05 | StructCodec Cap Table Channel         | `e988228` |
+| GAP-06 | Server Outbound Calls                 | `e988228` |
+| GAP-07 | Cap'n Proto Streaming                 | pending   |
+| GAP-08 | Client Capability Parameters          | `e988228` |
+| GAP-09 | Resolve/Disembargo Messages           | `e988228` |
+| GAP-10 | Cross-Language Interop Tests          | pending   |
+| GAP-11 | Per-Call interfaceId                  | `e988228` |
+| GAP-12 | Preamble Code Duplication             | pending   |
 
 ### Arena Scenario Readiness
 
-| Scenario    | Ready? | Notes |
-| ----------- | ------ | ----- |
-| ping        | Yes    | All infrastructure in place |
-| echo        | Yes    | All infrastructure in place |
-| transfer    | Yes    | All infrastructure in place |
-| getChain    | Yes    | Cap table plumbing complete |
-| getFanout   | Yes    | List(Interface) cap table handling complete |
+| Scenario    | Ready? | Notes                                               |
+| ----------- | ------ | --------------------------------------------------- |
+| ping        | Yes    | All infrastructure in place                         |
+| echo        | Yes    | All infrastructure in place                         |
+| transfer    | Yes    | All infrastructure in place                         |
+| getChain    | Yes    | Cap table plumbing complete                         |
+| getFanout   | Yes    | List(Interface) cap table handling complete         |
 | collaborate | Yes    | Server outbound calls + cap param encoding complete |
-| stream      | Yes    | StreamSender provides flow-controlled streaming |
+| stream      | Yes    | StreamSender provides flow-controlled streaming     |

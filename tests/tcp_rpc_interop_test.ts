@@ -164,7 +164,10 @@ Deno.test("TCP RPC interop: bootstrap + call + response over real TCP", async ()
 
     const bootstrapResponse = decodeReturnFrame(await collector.nextFrame());
     assertEquals(bootstrapResponse.answerId, bootstrapQuestionId);
-    assert(bootstrapResponse.kind === "results", "expected results, not exception");
+    assert(
+      bootstrapResponse.kind === "results",
+      "expected results, not exception",
+    );
     assert(
       bootstrapResponse.capTable.length > 0,
       "expected capability in bootstrap response cap table",
