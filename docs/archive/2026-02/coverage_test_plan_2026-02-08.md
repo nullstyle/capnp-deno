@@ -21,7 +21,7 @@ _Source:
 - `tools/capnpc-deno/request_parser.ts` (`86.6%` / `92.9%`)
 - `src/reconnect.ts` (`88.9%` / `90.3%`)
 - `src/transports/websocket.ts` (`89.6%` / `95.1%`)
-- `src/rpc_wire.ts` (`89.7%` / `94.4%`)
+- `src/encoding/rpc_wire.ts` (`89.7%` / `94.4%`)
 - `src/server_runtime.ts` (`89.7%` / `90.3%`)
 - `src/reconnecting_client.ts` (`90.6%` / `97.0%`)
 - `src/transports/tcp.ts` (`90.8%` / `94.5%`)
@@ -44,8 +44,9 @@ _Source:
 
 ## Phase 13 Outcome
 
-- `src/rpc_wire.ts` gained decode tag-mismatch coverage, return-pointer null
-  guard coverage, and bootstrap capability extraction failure-path coverage.
+- `src/encoding/rpc_wire.ts` gained decode tag-mismatch coverage, return-pointer
+  null guard coverage, and bootstrap capability extraction failure-path
+  coverage.
 - `tools/capnpc-deno/request_parser.ts` gained parseType matrix coverage for
   scalar/reference variants and null-list fallback coverage for nested nodes,
   fields, enum/interface methods, and imports.
@@ -88,10 +89,10 @@ _Source:
   bootstrap exception propagation tests.
 - `src/wasm_peer.ts` advanced from `100.0% / 76.3%` to `100.0% / 100.0%` by
   covering `fromInstance`, `popOutgoingFrame`, and `drainOutgoingFrames`.
-- `src/rpc_wire.ts` advanced from `80.8% / 91.7%` to `89.4% / 94.4%` by adding
-  null-root decoder matrix tests, payload null-pointer decode paths, non-NUL
-  text decode coverage, finish flag variant checks, receiver-hosted bootstrap
-  capability extraction, and non-struct root-pointer rejection.
+- `src/encoding/rpc_wire.ts` advanced from `80.8% / 91.7%` to `89.4% / 94.4%` by
+  adding null-root decoder matrix tests, payload null-pointer decode paths,
+  non-NUL text decode coverage, finish flag variant checks, receiver-hosted
+  bootstrap capability extraction, and non-struct root-pointer rejection.
 - Remaining `rpc_wire.ts` misses are largely internal guard branches that are
   difficult to reach through public APIs without white-box hooks.
 
@@ -101,7 +102,7 @@ _Source:
   the global baseline to `91.7%` branch / `95.5%` line.
 - Confirmed prior targeted gains hold in the full-suite run: `src/rpc_client.ts`
   at `98.4% / 99.6%`, `src/wasm_peer.ts` at `100.0% / 100.0%`, and
-  `src/rpc_wire.ts` improved to `89.7% / 94.4%`.
+  `src/encoding/rpc_wire.ts` improved to `89.7% / 94.4%`.
 - Re-ranked the next targets by branch coverage impact and implementation
   feasibility (codegen internals first, then reconnect/runtime tails).
 
@@ -123,8 +124,9 @@ _Source:
 ### Phase 21: Optional White-Box Guards
 
 - If needed, add white-box-only tests (or explicit test hooks) for internal
-  guard branches in `src/rpc_wire.ts` and `tools/capnpc-deno/plugin_response.ts`
-  that are not reachable from public APIs.
+  guard branches in `src/encoding/rpc_wire.ts` and
+  `tools/capnpc-deno/plugin_response.ts` that are not reachable from public
+  APIs.
 
 ## Definition of Done (This Pass)
 

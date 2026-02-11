@@ -8,19 +8,15 @@ const REQUEST_FIXTURE =
   "tests/fixtures/codegen_requests/multi_schema_request.b64";
 
 const EXPECTED_HASH_BY_PATH: Record<string, string> = {
-  "person_codegen_capnp.ts":
-    "fb20efaabc722e86dc9cda71502147c8ee051104e0d48bb223604aafd2479311",
   "person_codegen_meta.ts":
     "ff17ccca414fa180ebdb6ac9c2b9fdeb2a7a11ba57f0755acad3d376f0bc73a8",
-  "person_codegen_rpc.ts":
-    "e8e7d6befebbe78acfed0da1f96e0693b8fd22fcc563aa0d2658231d83f8ebd0",
-  "union_group_codegen_capnp.ts":
-    "0b906d76e6c16a7adda5e4b6dd93ebe53da11664edc34d963d8a70bf87b9db3a",
+  "person_codegen_types.ts":
+    "915512e5d6bbd91d712a192f20cd7d8a07afd8002b0e28bdb2434f2d50c6ad54",
   "union_group_codegen_meta.ts":
     "55f346ad1d1dd9c4c7bffe0ac1f9d4180d2df09a101d294dbfba2d30ae8eb9fb",
-  "union_group_codegen_rpc.ts":
-    "e8e7d6befebbe78acfed0da1f96e0693b8fd22fcc563aa0d2658231d83f8ebd0",
-  "mod.ts": "224a195f1dba7189df0b7d2c6c1f14a47d93595240c92005b23feb6b4de5efa2",
+  "union_group_codegen_types.ts":
+    "86289d62192844588c69a7db1c5354b2688c49e568cad11a101a12c1d160bfb4",
+  "mod.ts": "180ad7d85aecca1b9e3f7a4ac4e86ec6ae5d8694031cfc4d75196bb2663c8f01",
 };
 
 async function decodeFixture(path: string): Promise<Uint8Array> {
@@ -48,7 +44,7 @@ Deno.test("capnpc-deno multi-schema output contract is deterministic", async () 
     await decodeFixture(REQUEST_FIXTURE),
   );
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 6);
+  assertEquals(generated.length, 4);
 
   const finalized = finalizeGeneratedFiles(generated, {
     layout: "schema",
@@ -63,7 +59,7 @@ Deno.test("capnpc-deno multi-schema output contract is deterministic", async () 
 
   assertEquals(
     finalized.map((file) => file.path).join(","),
-    "person_codegen_capnp.ts,person_codegen_meta.ts,person_codegen_rpc.ts,union_group_codegen_capnp.ts,union_group_codegen_meta.ts,union_group_codegen_rpc.ts,mod.ts",
+    "person_codegen_meta.ts,person_codegen_types.ts,union_group_codegen_meta.ts,union_group_codegen_types.ts,mod.ts",
   );
   assertEquals(
     finalizedReversed.map((file) => file.path).join(","),
@@ -342,12 +338,12 @@ Deno.test("capnpc-deno interface method ordering is deterministic", async () => 
     assertEquals(hashForward, hashShuffled);
   }
 
-  // Verify method ordinals appear in ascending codeOrder in the rpc output
-  const rpcFile = genForward.find((file) => file.path.endsWith("_rpc.ts"));
-  assert(rpcFile !== undefined, "expected rpc file in generated output");
-  const alphaIdx = rpcFile.contents.indexOf("alpha: 0,");
-  const betaIdx = rpcFile.contents.indexOf("beta: 1,");
-  const gammaIdx = rpcFile.contents.indexOf("gamma: 2,");
+  // Verify method ordinals appear in ascending codeOrder in the types output.
+  const typesFile = genForward.find((file) => file.path.endsWith("_types.ts"));
+  assert(typesFile !== undefined, "expected types file in generated output");
+  const alphaIdx = typesFile.contents.indexOf("alpha: 0,");
+  const betaIdx = typesFile.contents.indexOf("beta: 1,");
+  const gammaIdx = typesFile.contents.indexOf("gamma: 2,");
   assert(alphaIdx >= 0, "expected alpha method ordinal");
   assert(betaIdx >= 0, "expected beta method ordinal");
   assert(gammaIdx >= 0, "expected gamma method ordinal");
@@ -762,12 +758,12 @@ Deno.test("capnpc-deno multiple interfaces in one file are deterministic", async
     );
   }
 
-  // Verify interfaces appear in displayName-sorted order in the rpc file
-  const rpcFile = genForward.find((file) => file.path.endsWith("_rpc.ts"));
-  assert(rpcFile !== undefined, "expected rpc file");
-  const alphaIdx = rpcFile.contents.indexOf("AlphaInterfaceId");
-  const middleIdx = rpcFile.contents.indexOf("MiddleInterfaceId");
-  const zebraIdx = rpcFile.contents.indexOf("ZebraInterfaceId");
+  // Verify interfaces appear in displayName-sorted order in the types file.
+  const typesFile = genForward.find((file) => file.path.endsWith("_types.ts"));
+  assert(typesFile !== undefined, "expected types file");
+  const alphaIdx = typesFile.contents.indexOf("AlphaInterfaceId");
+  const middleIdx = typesFile.contents.indexOf("MiddleInterfaceId");
+  const zebraIdx = typesFile.contents.indexOf("ZebraInterfaceId");
   assert(alphaIdx >= 0, "expected Alpha interface id constant");
   assert(middleIdx >= 0, "expected Middle interface id constant");
   assert(zebraIdx >= 0, "expected Zebra interface id constant");

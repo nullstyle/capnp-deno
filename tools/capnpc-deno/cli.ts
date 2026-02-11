@@ -741,7 +741,7 @@ function deriveSchemaRelativePath(
 
 function toModulePathFromSchema(
   schemaRelativePath: string,
-  suffix: "capnp" | "rpc" | "meta",
+  suffix: "capnp" | "rpc" | "types" | "meta",
 ): string {
   const normalized = normalizePath(schemaRelativePath);
   const withoutExt = normalized.endsWith(".capnp")
@@ -750,11 +750,13 @@ function toModulePathFromSchema(
   return `${withoutExt || "schema"}_${suffix}.ts`;
 }
 
-function detectGeneratedSuffix(path: string): "capnp" | "rpc" | "meta" {
+function detectGeneratedSuffix(
+  path: string,
+): "capnp" | "rpc" | "types" | "meta" {
   const base = basenamePath(normalizePath(path));
-  const match = base.match(/_(capnp|rpc|meta)\.ts$/);
+  const match = base.match(/_(capnp|rpc|types|meta)\.ts$/);
   if (!match) return "capnp";
-  return match[1] as "capnp" | "rpc" | "meta";
+  return match[1] as "capnp" | "rpc" | "types" | "meta";
 }
 
 function ensureSafeOutputPath(value: string): string {

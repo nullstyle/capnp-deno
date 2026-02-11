@@ -109,6 +109,40 @@ Deno.test("rpc wire transports non-empty call payload content", () => {
   assertEquals(decoded.paramsCapTable[1].id, 9);
 });
 
+Deno.test("rpc wire encodes call params cap-table inline list count as payload words", () => {
+  const params = encodeSingleU32StructMessage(99);
+  const encoded = encodeCallRequestFrame({
+    questionId: 12,
+    interfaceId: 0x1234n,
+    methodId: 6,
+    targetImportedCap: 2,
+    paramsContent: params,
+    paramsCapTable: [
+      { tag: 1, id: 7 },
+      { tag: 3, id: 9 },
+    ],
+  });
+
+  const view = new DataView(
+    encoded.buffer,
+    encoded.byteOffset,
+    encoded.byteLength,
+  );
+  // Payload struct pointer section: pointer[1] is params cap-table.
+  const capTablePointer = view.getBigUint64(8 + (12 * 8), true);
+  const kind = Number(capTablePointer & 0x3n);
+  const elementSize = Number((capTablePointer >> 32n) & 0x7n);
+  const inlineWordCount = Number((capTablePointer >> 35n) & 0x1fff_ffffn);
+
+  assertEquals(kind, 1, "expected list pointer");
+  assertEquals(elementSize, 7, "expected inline composite list");
+  assertEquals(
+    inlineWordCount,
+    4,
+    "expected 2 entries x 2 words payload count",
+  );
+});
+
 Deno.test("rpc wire encodes and decodes promisedAnswer call targets", () => {
   const params = encodeSingleU32StructMessage(55);
   const encoded = encodeCallRequestFrame({

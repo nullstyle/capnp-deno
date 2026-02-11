@@ -537,7 +537,7 @@ Deno.test("RpcServerBridge rejects malicious release frame with excessive refere
   assertEquals(bridge.hasCapability(10), false);
 });
 
-Deno.test("RpcServerBridge rejects unsupported inbound message tags", async () => {
+Deno.test("RpcServerBridge bootstrap without callback throws clear error", async () => {
   const bridge = new RpcServerBridge();
   const bootstrap = encodeBootstrapRequestFrame({ questionId: 1 });
 
@@ -550,8 +550,8 @@ Deno.test("RpcServerBridge rejects unsupported inbound message tags", async () =
 
   assert(
     thrown instanceof Error &&
-      /unsupported rpc message tag/i.test(thrown.message),
-    `expected unsupported-tag error, got: ${String(thrown)}`,
+      /bootstrap not configured/i.test(thrown.message),
+    `expected bootstrap-not-configured error, got: ${String(thrown)}`,
   );
 });
 

@@ -1,4 +1,4 @@
-import { createStreamSender, type StreamCallFn } from "../src/streaming.ts";
+import { createStreamSender, type StreamCallFn } from "../src/rpc/streaming.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 function makeCallFn(

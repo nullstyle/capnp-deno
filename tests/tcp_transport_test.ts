@@ -443,6 +443,51 @@ Deno.test("TcpTransport normalizes non-timeout read failures", async () => {
   }
 });
 
+Deno.test("TcpTransport treats connection-reset read failures as remote close", async () => {
+  let onErrorCalls = 0;
+  const fake = createFakeConn({
+    read() {
+      throw new Error("Connection reset by peer (os error 54)");
+    },
+  });
+  const transport = new TcpTransport(fake.conn, {
+    onError: () => {
+      onErrorCalls += 1;
+    },
+  });
+
+  transport.start((_frame) => {});
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assertEquals(onErrorCalls, 0);
+  await transport.close();
+});
+
+Deno.test("TcpTransport invokes onClose exactly once on remote disconnect", async () => {
+  let onCloseCalls = 0;
+  let onErrorCalls = 0;
+  const fake = createFakeConn({
+    read() {
+      return null;
+    },
+  });
+  const transport = new TcpTransport(fake.conn, {
+    onClose: () => {
+      onCloseCalls += 1;
+    },
+    onError: () => {
+      onErrorCalls += 1;
+    },
+  });
+
+  transport.start((_frame) => {});
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  assertEquals(onCloseCalls, 1);
+  assertEquals(onErrorCalls, 0);
+
+  await transport.close();
+  assertEquals(onCloseCalls, 1);
+});
+
 Deno.test("TcpTransport enforces maxOutboundFrameBytes", async () => {
   const fake = createFakeConn();
   const transport = new TcpTransport(fake.conn, {

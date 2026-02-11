@@ -14,16 +14,25 @@ function decodeBase64(base64: string): Uint8Array {
   return out;
 }
 
-const CODEGEN_RUNTIME_URL = new URL(
-  "../src/codegen_runtime.ts",
+const ENCODING_RUNTIME_URL = new URL(
+  "../encoding.ts",
+  import.meta.url,
+).href;
+const RPC_RUNTIME_URL = new URL(
+  "../rpc.ts",
   import.meta.url,
 ).href;
 
 function patchRuntimeImport(source: string): string {
-  return source.replaceAll(
-    `"@nullstyle/capnp/codegen_runtime"`,
-    `"${CODEGEN_RUNTIME_URL}"`,
-  );
+  return source
+    .replaceAll(
+      `"@nullstyle/capnp/encoding"`,
+      `"${ENCODING_RUNTIME_URL}"`,
+    )
+    .replaceAll(
+      `"@nullstyle/capnp/rpc"`,
+      `"${RPC_RUNTIME_URL}"`,
+    );
 }
 
 async function importGeneratedModule(
@@ -32,19 +41,6 @@ async function importGeneratedModule(
   const patched = patchRuntimeImport(source);
   const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
-}
-
-async function importRpcWithInlineCapnp(
-  capnpSource: string,
-  rpcSource: string,
-): Promise<{ capnp: Record<string, unknown>; rpc: Record<string, unknown> }> {
-  const patchedCapnp = patchRuntimeImport(capnpSource);
-  const capnpUrl = `data:application/typescript;base64,${btoa(patchedCapnp)}`;
-  const rpcPatched = rpcSource.split("./interface_anypointer_codegen_capnp.ts")
-    .join(capnpUrl);
-  const rpcUrl = `data:application/typescript;base64,${btoa(rpcPatched)}`;
-  const [capnp, rpc] = await Promise.all([import(capnpUrl), import(rpcUrl)]);
-  return { capnp, rpc };
 }
 
 function fileByPath(
@@ -68,16 +64,19 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   assertEquals(pingerNode.interfaceNode.methods[0].codeOrder, 0);
 
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
-  const capnp = fileByPath(generated, "interface_anypointer_codegen_capnp.ts");
-  const rpc = fileByPath(generated, "interface_anypointer_codegen_rpc.ts");
+  assertEquals(generated.length, 2);
+  const types = fileByPath(generated, "interface_anypointer_codegen_types.ts");
   const meta = fileByPath(generated, "interface_anypointer_codegen_meta.ts");
 
-  const source = capnp.contents;
   assert(
-    source.includes("@nullstyle/capnp/codegen_runtime"),
-    "expected codegen_runtime re-export",
+    types.contents.includes('from "@nullstyle/capnp/encoding";'),
+    "expected split encoding runtime import",
   );
+  assert(
+    types.contents.includes('from "@nullstyle/capnp/rpc";'),
+    "expected split rpc runtime import",
+  );
+  const source = types.contents;
   assert(
     source.includes("cap: CapabilityPointer | null;"),
     "expected interface pointer field type",
@@ -95,44 +94,72 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
     "expected results codec export for rpc generation",
   );
   assert(
-    rpc.contents.includes("export interface PingerClient"),
-    "expected Pinger client interface in rpc module",
+    source.includes("export interface PingerClient"),
+    "expected Pinger client interface in generated output",
   );
   assert(
-    rpc.contents.includes("createPingerClient"),
+    source.includes("createPingerClient"),
     "expected generated rpc client constructor",
   );
   assert(
-    rpc.contents.includes("bootstrapPingerClient"),
+    source.includes("bootstrapPingerClient"),
     "expected generated rpc bootstrap client helper",
   );
   assert(
-    rpc.contents.includes("createPingerServer"),
+    source.includes("createPingerServer"),
     "expected generated rpc server dispatch constructor",
   );
   assert(
-    rpc.contents.includes("registerPingerServer"),
+    source.includes("registerPingerServer"),
     "expected generated rpc server registry helper",
   );
   assert(
-    rpc.contents.includes("export interface RpcFinishOptions"),
-    "expected generated rpc finish options",
+    !source.includes("export interface RpcCallOptions"),
+    "expected generated rpc call options to come from shared runtime types",
   );
   assert(
-    rpc.contents.includes("export interface RpcBootstrapClientTransport"),
-    "expected generated rpc bootstrap transport contract",
+    source.includes("transport.finish"),
+    "expected generated rpc lifecycle finish usage",
   );
   assert(
-    rpc.contents.includes("export interface RpcServerRegistry"),
-    "expected generated rpc server registry contract",
-  );
-  assert(
-    rpc.contents.includes("finish?(questionId: number"),
-    "expected generated rpc lifecycle finish hook",
-  );
-  assert(
-    rpc.contents.includes("PingerInterfaceId"),
+    source.includes("PingerInterfaceId"),
     "expected generated rpc interface id constant",
+  );
+  assert(
+    source.includes(
+      "export const Pinger: RpcServiceToken<Pinger> = Object.freeze({",
+    ),
+    "expected generated service token export",
+  );
+  assert(
+    source.includes("export interface Pinger {"),
+    "expected generated high-level service interface",
+  );
+  assert(
+    source.includes(
+      "ping(options?: RpcCallOptions): Promise<void>;",
+    ),
+    "expected generated zero-field method lowering in high-level interface",
+  );
+  assert(
+    source.includes("createPingerServiceClient"),
+    "expected generated service client adapter",
+  );
+  assert(
+    source.includes("createPingerServiceServer"),
+    "expected generated service server adapter",
+  );
+  assert(
+    source.includes("RpcServiceToken<Pinger>"),
+    "expected generated service token type annotation",
+  );
+  assert(
+    source.includes("bootstrapPingerClient"),
+    "expected generated service token bootstrap binding",
+  );
+  assert(
+    source.includes("registerPingerServer"),
+    "expected generated service token server registrar binding",
   );
   assert(
     meta.contents.includes("export const interfaceMethods = ["),
@@ -143,10 +170,10 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
 Deno.test("capnpc-deno generated interface/anyPointer codec roundtrips", async () => {
   const request = parseCodeGeneratorRequest(decodeBase64(REQUEST_BASE64));
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
   const mod = await importGeneratedModule(
-    fileByPath(generated, "interface_anypointer_codegen_capnp.ts").contents,
+    fileByPath(generated, "interface_anypointer_codegen_types.ts").contents,
   );
   const codec = mod.HolderCodec as
     | { encode(value: unknown): Uint8Array; decode(bytes: Uint8Array): unknown }
@@ -189,17 +216,13 @@ Deno.test("capnpc-deno generated interface/anyPointer codec roundtrips", async (
 Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods", async () => {
   const request = parseCodeGeneratorRequest(decodeBase64(REQUEST_BASE64));
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
-  const capnpFile = fileByPath(
-    generated,
-    "interface_anypointer_codegen_capnp.ts",
+  const mod = await importGeneratedModule(
+    fileByPath(generated, "interface_anypointer_codegen_types.ts").contents,
   );
-  const rpcFile = fileByPath(generated, "interface_anypointer_codegen_rpc.ts");
-  const { capnp, rpc } = await importRpcWithInlineCapnp(
-    capnpFile.contents,
-    rpcFile.contents,
-  );
+  const capnp = mod;
+  const rpc = mod;
 
   const paramsCodec = capnp.PingParamsCodec as
     | { encode(value: unknown): Uint8Array }
@@ -334,17 +357,13 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
 Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle hook", async () => {
   const request = parseCodeGeneratorRequest(decodeBase64(REQUEST_BASE64));
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
-  const capnpFile = fileByPath(
-    generated,
-    "interface_anypointer_codegen_capnp.ts",
+  const mod = await importGeneratedModule(
+    fileByPath(generated, "interface_anypointer_codegen_types.ts").contents,
   );
-  const rpcFile = fileByPath(generated, "interface_anypointer_codegen_rpc.ts");
-  const { capnp, rpc } = await importRpcWithInlineCapnp(
-    capnpFile.contents,
-    rpcFile.contents,
-  );
+  const capnp = mod;
+  const rpc = mod;
 
   const bootstrapClient = rpc.bootstrapPingerClient as
     | ((transport: {

@@ -114,6 +114,11 @@ Deno.test("capnpc-deno CLI maps schema layout and emits barrel", () => {
       contents: "// person meta",
     },
     {
+      path: "person_codegen_types.ts",
+      sourceFilename: "schemas/person.capnp",
+      contents: "// person types",
+    },
+    {
       path: "addressbook_capnp.ts",
       sourceFilename: "schemas/nested/addressbook.capnp",
       contents: "// addressbook",
@@ -126,30 +131,37 @@ Deno.test("capnpc-deno CLI maps schema layout and emits barrel", () => {
     emitBarrel: true,
   });
 
-  assertEquals(output.length, 5);
+  assertEquals(output.length, 6);
   assertEquals(output[0].path, "nested/addressbook_capnp.ts");
   assertEquals(output[1].path, "person_capnp.ts");
   assertEquals(output[2].path, "person_meta.ts");
   assertEquals(output[3].path, "person_rpc.ts");
-  assertEquals(output[4].path, "mod.ts");
+  assertEquals(output[4].path, "person_types.ts");
+  assertEquals(output[5].path, "mod.ts");
   assert(
-    output[4].contents.includes('export * from "./person_capnp.ts";'),
+    output[5].contents.includes('export * from "./person_capnp.ts";'),
     "expected barrel export for person schema",
   );
   assert(
-    output[4].contents.includes(
+    output[5].contents.includes(
       'export * from "./person_rpc.ts";',
     ),
     "expected barrel export for person rpc module",
   );
   assert(
-    output[4].contents.includes(
+    output[5].contents.includes(
+      'export * from "./person_types.ts";',
+    ),
+    "expected barrel export for person types module",
+  );
+  assert(
+    output[5].contents.includes(
       'export * from "./person_meta.ts";',
     ),
     "expected barrel export for person meta module",
   );
   assert(
-    output[4].contents.includes(
+    output[5].contents.includes(
       'export * from "./nested/addressbook_capnp.ts";',
     ),
     "expected barrel export for nested schema",
@@ -848,6 +860,17 @@ Deno.test("capnpc-deno CLI schema mapping handles root precedence and suffix fal
     ["/other"],
   );
   assertEquals(absoluteRootMismatch, "person_rpc.ts");
+
+  const typesSuffix = mapGeneratedFilePath(
+    {
+      path: "person_types.ts",
+      sourceFilename: "schemas/nested/person.capnp",
+      contents: "// person types",
+    },
+    "schema",
+    ["schemas"],
+  );
+  assertEquals(typesSuffix, "nested/person_types.ts");
 
   const emptyStem = mapGeneratedFilePath(
     {

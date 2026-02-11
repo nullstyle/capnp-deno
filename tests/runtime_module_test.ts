@@ -1,4 +1,4 @@
-import { createRuntimePeer } from "../src/runtime_module.ts";
+import { createRuntimePeer } from "../src/rpc/runtime_module.ts";
 import { assertEquals, assertThrows } from "./test_utils.ts";
 
 Deno.test("createRuntimePeer loads bundled runtime exports", () => {

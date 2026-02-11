@@ -36,15 +36,14 @@ deno task codegen generate --schema schema/person.capnp --out generated
 
 This generates files like:
 
-- `generated/schema/person_capnp.ts`
+- `generated/schema/person_types.ts`
 - `generated/schema/person_meta.ts`
-- `generated/schema/person_rpc.ts`
 - `generated/mod.ts`
 
 ## 3. Use Generated Binary Serde (Primary Path)
 
 ```ts
-import { type Person, PersonCodec } from "../generated/schema/person_capnp.ts";
+import { type Person, PersonCodec } from "../generated/schema/person_types.ts";
 
 const input: Person = {
   id: 123n,

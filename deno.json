@@ -4,10 +4,18 @@
   "license": "MIT",
   "exports": {
     ".": "./mod.ts",
-    "./codegen_runtime": "./src/codegen_runtime.ts"
+    "./encoding": "./encoding.ts",
+    "./rpc": "./rpc.ts"
   },
   "publish": {
-    "include": ["mod.ts", "src/**/*.ts", "generated/*.wasm", "README.md"],
+    "include": [
+      "mod.ts",
+      "encoding.ts",
+      "rpc.ts",
+      "src/**/*.ts",
+      "generated/*.wasm",
+      "README.md"
+    ],
     "exclude": [
       "tests/**",
       "bench/**",
@@ -23,30 +31,40 @@
   "include": ["generated/*.wasm"],
   "exclude": ["vendor/**"],
   "tasks": {
-    "fmt": "deno fmt mod.ts src tests bench examples docs scripts deno.json README.md AGENTS.md",
+    "fmt": "deno fmt mod.ts encoding.ts rpc.ts src tests bench examples docs scripts deno.json README.md AGENTS.md",
     "lint": "deno lint",
-    "check": "deno check mod.ts src/*.ts src/transports/*.ts src/rpc_wire/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*.ts",
+    "check": "deno check mod.ts encoding.ts rpc.ts src/*.ts src/encoding/*.ts src/rpc/*.ts src/rpc/wire/*.ts src/rpc/transports/*.ts tools/capnpc-deno/*.ts tests/*.ts bench/*.ts examples/*/*.ts examples/*/gen/*.ts",
+    "check:generated": "deno check tests/fixtures/generated/typegate_fixture_capnp.ts tests/fixtures/generated/typegate_fixture_rpc.ts",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
+    "codegen:compile": "bash scripts/build_capnpc_deno_binary.sh",
     "codegen:install": "deno install --global --allow-read --allow-write --allow-run=capnp --name capnpc-deno --force tools/capnpc-deno/main.ts",
     "codegen:uninstall": "deno uninstall --global capnpc-deno",
-    "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
-    "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src/codegen_runtime.ts tests --ignore=tests/socket_integration_test.ts,tests/real_wasm_serde_test.ts,tests/real_wasm_rpc_flow_test.ts,tests/real_wasm_service_flow_test.ts,tests/tcp_rpc_interop_test.ts",
+    "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,encoding.ts,rpc.ts,src tests/capnpc_deno_codegen_test.ts tests/capnpc_deno_union_codegen_test.ts tests/capnpc_deno_interface_codegen_test.ts tests/capnpc_deno_cli_test.ts tests/capnpc_deno_golden_codegen_test.ts tests/capnpc_deno_plugin_response_test.ts",
+    "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,encoding.ts,rpc.ts,src tests --ignore=tests/socket_integration_test.ts,tests/real_wasm_serde_test.ts,tests/real_wasm_rpc_flow_test.ts,tests/real_wasm_service_flow_test.ts,tests/tcp_rpc_interop_test.ts",
     "test:coverage": "deno task test:unit --coverage=coverage/",
     "test:integration": "deno test tests/socket_integration_test.ts --allow-net=127.0.0.1",
     "test:real": "deno test tests/real_wasm_serde_test.ts tests/real_wasm_rpc_flow_test.ts tests/real_wasm_service_flow_test.ts tests/tcp_rpc_interop_test.ts --allow-read --allow-net=127.0.0.1",
     "test": "deno task test:unit",
     "build:wasm": "bash scripts/build_wasm.sh",
-    "smoke:real": "deno run --allow-read examples/smoke_real_wasm.ts",
+    "smoke:real": "deno run --allow-read examples/smoke_real_wasm/smoke_real_wasm.ts",
     "bench": "deno task bench:fast",
     "bench:fast": "deno bench bench --ignore=bench/real_wasm_bench.ts",
     "bench:real": "deno bench bench/real_wasm_bench.ts --allow-read=generated/capnp_deno.wasm",
-    "verify": "deno task fmt && deno task lint && deno task check && deno task test:unit",
+    "verify": "deno task fmt && deno task lint && deno task check && deno task check:generated && deno task test:unit",
     "verify:integration": "deno task test:integration",
     "verify:real": "deno task build:wasm && deno task smoke:real && deno task test:integration && deno task test:real"
   },
   "lint": {
-    "exclude": ["vendor/capnp-zig/vendor/**"]
+    "exclude": [
+      "vendor/capnp-zig/vendor/**",
+      "**/generated/**",
+      "**/gen/**",
+      "**/*_capnp.ts",
+      "**/*_rpc.ts",
+      "**/*_meta.ts",
+      "**/*_types.ts"
+    ]
   },
   "compilerOptions": {
     "strict": true

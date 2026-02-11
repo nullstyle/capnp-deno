@@ -9,12 +9,36 @@
  * @module
  */
 
+/** Structured diagnostic metadata attached to Cap'n Proto errors. */
+export interface ErrorMetadata {
+  /** Phase where the error occurred. */
+  phase?:
+    | "frame_decode"
+    | "dispatch"
+    | "handler"
+    | "response_encode"
+    | "bootstrap"
+    | "capability_resolve";
+  /** Symbolic error type name (e.g. "InvalidInlineCompositePointer", "UnknownQuestion"). */
+  errorType?: string;
+  /** RPC question ID involved. */
+  questionId?: number;
+  /** Cap'n Proto interface ID involved. */
+  interfaceId?: bigint;
+  /** Method ordinal involved. */
+  methodId?: number;
+  /** Capability index involved. */
+  capabilityIndex?: number;
+}
+
 /**
  * Options for constructing a {@link CapnpError} or any of its subclasses.
  */
 export interface CapnpErrorOptions {
   /** The underlying cause of the error, preserved as the standard `Error.cause` property. */
   cause?: unknown;
+  /** Structured diagnostic metadata for the error. */
+  metadata?: ErrorMetadata;
 }
 
 /**
@@ -50,6 +74,8 @@ export type CapnpErrorKind =
 export class CapnpError extends Error {
   /** Discriminator string identifying the error category (e.g. "abi", "transport", "session"). */
   readonly kind: string;
+  /** Structured diagnostic metadata, when available. */
+  readonly metadata?: ErrorMetadata;
 
   /**
    * @param kind - The error category discriminator.
@@ -60,6 +86,9 @@ export class CapnpError extends Error {
     super(message, { cause: options.cause });
     this.name = "CapnpError";
     this.kind = kind;
+    if (options.metadata) {
+      this.metadata = options.metadata;
+    }
   }
 }
 

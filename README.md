@@ -13,7 +13,9 @@ It combines:
 - resilience/ops helpers (reconnect, connection pool, circuit breaker,
   middleware, streaming, observability).
 
-The public entrypoint is `mod.ts`. Advanced low-level WASM APIs are in
+Primary public entrypoint is `mod.ts`. Split entrypoints are available at
+`rpc.ts` (`@nullstyle/capnp/rpc`) and `encoding.ts`
+(`@nullstyle/capnp/encoding`). Advanced low-level WASM APIs are in
 `advanced.ts`.
 
 ## Core Contract
@@ -67,7 +69,7 @@ deno task codegen generate --schema schema/person.capnp --out generated
 Use generated codec:
 
 ```ts
-import { type Person, PersonCodec } from "./generated/schema/person_capnp.ts";
+import { type Person, PersonCodec } from "./generated/schema/person_types.ts";
 
 const input: Person = {
   id: 123n,
@@ -81,8 +83,7 @@ const roundtrip = PersonCodec.decode(bytes);
 
 Generated outputs include:
 
-- `*_capnp.ts` typed binary codecs
-- `*_rpc.ts` typed RPC helpers
+- `*_types.ts` typed codecs + RPC helpers
 - `*_meta.ts` reflection metadata
 - `generated/mod.ts` barrel (unless disabled)
 
@@ -94,22 +95,26 @@ WASM imports.
 ```ts
 import {
   InMemoryRpcHarnessTransport,
-  RpcServerBridge,
   RpcServerRuntime,
   SessionRpcClientTransport,
 } from "./mod.ts";
 import {
-  createPingerClient,
+  bootstrapPingerClient,
   PingerInterfaceId,
   registerPingerServer,
-} from "./generated/schema/pinger_rpc.ts";
+} from "./generated/schema/pinger_types.ts";
 
 const transport = new InMemoryRpcHarnessTransport();
-const bridge = new RpcServerBridge();
-
-const runtime = await RpcServerRuntime.create(transport, bridge, {
-  autoStart: true,
-});
+const runtime = await RpcServerRuntime.createWithRoot(
+  transport,
+  registerPingerServer,
+  {
+    async ping(_params) {
+      return {};
+    },
+  },
+  { autoStart: true },
+);
 
 const clientTransport = new SessionRpcClientTransport(
   runtime.session,
@@ -117,29 +122,21 @@ const clientTransport = new SessionRpcClientTransport(
   { interfaceId: PingerInterfaceId },
 );
 
-const bootstrap = await clientTransport.bootstrap();
-
-registerPingerServer(
-  bridge,
-  {
-    async ping(_params) {
-      return {};
-    },
-  },
-  { capabilityIndex: bootstrap.capabilityIndex, referenceCount: 2 },
-);
-
-const client = createPingerClient(clientTransport, bootstrap);
+const client = await bootstrapPingerClient(clientTransport);
 await client.ping({});
 
 await runtime.close();
 ```
+
+For network clients, use `connectAndBootstrap(...)` with generated
+`bootstrap*Client(...)` helpers to create a typed client in one step.
 
 ## Transports, Resilience, and Ops
 
 Built-in transports:
 
 - `TcpTransport` + `TcpServerListener`
+- `TcpRpcClientTransport` (raw RPC client adapter over a started transport)
 - `WebSocketTransport`
 - `MessagePortTransport`
 
@@ -180,11 +177,30 @@ deno task codegen:install
 capnp compile -I schema -odeno:generated schema/foo.capnp
 ```
 
+Compile a standalone `capnpc-deno` binary:
+
+```sh
+deno task codegen:compile
+./dist/capnpc-deno generate --schema schema/foo.capnp --out generated
+```
+
+Cross-compile a specific release target:
+
+```sh
+deno task codegen:compile x86_64-pc-windows-msvc dist/capnpc-deno-x86_64-pc-windows-msvc.exe
+```
+
 Local wrapper-script plugin mode (no install):
 
 ```sh
 capnp compile -I schema -o ./scripts/capnpc-deno:generated schema/foo.capnp
 ```
+
+GitHub release assets:
+
+- pushing a tag matching `v*` runs `.github/workflows/release.yml`
+- attached binaries include Linux/macOS/Windows targets compiled via
+  `deno compile`
 
 Useful options:
 
@@ -230,14 +246,16 @@ just ci-bench
 
 ## Repository Map
 
-- `mod.ts`: public API surface
+- `mod.ts`: umbrella public API surface
+- `rpc.ts`: RPC/runtime-focused entrypoint
+- `encoding.ts`: encoding-focused entrypoint
 - `advanced.ts`: low-level WASM/serde APIs (`WasmAbi`, `WasmPeer`, `WasmSerde`)
-- `src/session.ts`: session lifecycle + ordered inbound/outbound pumping
-- `src/server_runtime.ts`: session + bridge + host-call pump integration
-- `src/rpc_client.ts`: bootstrap/call/finish/release + pipelining transport
-- `src/rpc_server.ts`: server dispatch bridge + answer table/pipelining
-- `src/transports/*`: TCP, WebSocket, MessagePort adapters
-- `src/framer.ts`: Cap'n Proto stream framing
+- `src/rpc/session.ts`: session lifecycle + ordered inbound/outbound pumping
+- `src/rpc/server_runtime.ts`: session + bridge + host-call pump integration
+- `src/rpc/client.ts`: bootstrap/call/finish/release + pipelining transport
+- `src/rpc/server.ts`: server dispatch bridge + answer table/pipelining
+- `src/rpc/transports/*`: TCP, WebSocket, MessagePort adapters
+- `src/encoding/*`: frame limits, stream framing, RPC wire encode/decode
 - `tools/capnpc-deno/*`: TypeScript codegen CLI/plugin
 - `tests/*`: fake-wasm unit, integration, and real-wasm tests
 - `vendor/capnp-zig/`: canonical Zig implementation submodule
@@ -247,8 +265,12 @@ just ci-bench
 - Docs index: `docs/README.md`
 - Serde guide: `docs/getting_started_serde.md`
 - RPC guide: `docs/getting_started_rpc.md`
-- End-to-end walkthrough example: `examples/getting-started.ts`
-- Real-wasm smoke example: `examples/smoke_real_wasm.ts`
+- Examples index: `examples/README.md`
+- End-to-end walkthrough example:
+  `examples/getting-started/getting-started.ts` +
+  `examples/getting-started/getting-started.capnp`
+- Real-wasm smoke example: `examples/smoke_real_wasm/smoke_real_wasm.ts` +
+  `examples/smoke_real_wasm/smoke_real_wasm.capnp`
 
 ## Important Notes
 
@@ -256,5 +278,5 @@ just ci-bench
   `finish(questionId)` yourself when done.
 - `RpcServerRuntime` host-call pumping requires optional WASM host-call bridge
   exports; if unavailable, pumping is disabled (or throws if explicitly forced).
-- Generated files import `@nullstyle/capnp/codegen_runtime`. Ensure this import
-  resolves in your environment.
+- Generated files import `@nullstyle/capnp/encoding` and `@nullstyle/capnp/rpc`.
+  Ensure these imports resolve in your environment.

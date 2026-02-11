@@ -1,0 +1,54 @@
+set shell := ["bash", "-cu"]
+
+default:
+    @just --list
+
+# Run examples
+
+run-getting-started:
+    deno run getting-started/getting-started.ts
+
+run-tcp-golden-path:
+    deno run --allow-net=127.0.0.1 tcp_golden_path/tcp_golden_path.ts
+
+run-tcp-golden-server hostname="127.0.0.1" port="4000":
+    deno run --allow-net tcp_golden_path/tcp_golden_path_server.ts {{ hostname }} {{ port }}
+
+run-tcp-golden-client hostname="127.0.0.1" port="4000":
+    deno run --allow-net tcp_golden_path/tcp_golden_path_client.ts {{ hostname }} {{ port }}
+
+run-tcp-echo-server hostname="127.0.0.1" port="4000":
+    deno run --allow-net tcp_echo_server/tcp_echo_server.ts {{ hostname }} {{ port }}
+
+run-tcp-echo-client hostname="127.0.0.1" port="4000":
+    deno run --allow-net tcp_echo_server/tcp_echo_server_client.ts {{ hostname }} {{ port }}
+
+run-bidirectional-capability:
+    deno run bidirectional_capability/bidirectional_capability.ts
+
+run-warmup-stats:
+    deno run warmup_stats_example/warmup_stats_example.ts
+
+run-smoke-real-wasm:
+    deno run --allow-read smoke_real_wasm/smoke_real_wasm.ts
+
+# Generate RPC stubs for schema-driven examples
+
+gen-getting-started:
+    mkdir -p getting-started/gen
+    cd getting-started && capnp compile -odeno:./gen getting-started.capnp
+
+gen-tcp-golden-path:
+    rm -rf tcp_golden_path/generated
+    mkdir -p tcp_golden_path/generated
+    PATH="$HOME/.bin:$PATH" capnp compile -I .. -odeno:tcp_golden_path/generated tcp_golden_path/tcp_golden_path.capnp
+
+gen-tcp-echo-server:
+    rm -rf tcp_echo_server/generated
+    mkdir -p tcp_echo_server/generated
+    PATH="$HOME/.bin:$PATH" capnp compile -I .. -odeno:tcp_echo_server/generated tcp_echo_server/tcp_echo_server.capnp
+
+gen-rpc:
+    just gen-getting-started
+    just gen-tcp-golden-path
+    just gen-tcp-echo-server

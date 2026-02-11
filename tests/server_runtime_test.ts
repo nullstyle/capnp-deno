@@ -1,5 +1,15 @@
 import {
+  decodeCallRequestFrame,
+  decodeReleaseFrame,
+  decodeReturnFrame,
+  decodeRpcMessageTag,
+  encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
+  encodeReleaseFrame,
+  encodeReturnExceptionFrame,
+  encodeReturnResultsFrame,
+  RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_RELEASE,
   RpcServerBridge,
   RpcServerRuntime,
   type RpcServerWasmHost,
@@ -9,7 +19,7 @@ import {
   WasmPeer,
 } from "../advanced.ts";
 import { FakeCapnpWasm } from "./fake_wasm.ts";
-import { assert, assertEquals } from "./test_utils.ts";
+import { assert, assertEquals, withTimeout } from "./test_utils.ts";
 
 function encodeSingleU32StructMessage(value: number): Uint8Array {
   const out = new Uint8Array(24);
@@ -55,6 +65,136 @@ class MockTransport implements RpcTransport {
   async emit(frame: Uint8Array): Promise<void> {
     if (!this.#onFrame) throw new Error("transport not started");
     await this.#onFrame(frame);
+  }
+}
+
+class SerialLoopbackTransport implements RpcTransport {
+  #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
+  #inboundQueue: Uint8Array[] = [];
+  #draining = false;
+  #closed = false;
+
+  start(onFrame: (frame: Uint8Array) => void | Promise<void>): void {
+    this.#onFrame = onFrame;
+  }
+
+  send(frame: Uint8Array): void {
+    if (this.#closed) throw new Error("transport closed");
+    let tag: number;
+    try {
+      tag = decodeRpcMessageTag(frame);
+    } catch {
+      return;
+    }
+    if (tag !== RPC_MESSAGE_TAG_CALL) return;
+
+    const call = decodeCallRequestFrame(frame);
+    if (call.questionId < 0x4000_0000) return;
+
+    this.#inboundQueue.push(encodeReturnResultsFrame({
+      answerId: call.questionId,
+      content: encodeSingleU32StructMessage(1),
+      noFinishNeeded: true,
+    }));
+    void this.#drain();
+  }
+
+  close(): void {
+    this.#closed = true;
+    this.#inboundQueue = [];
+  }
+
+  async emit(frame: Uint8Array): Promise<void> {
+    if (this.#closed) throw new Error("transport closed");
+    this.#inboundQueue.push(frame);
+    await this.#drain();
+  }
+
+  async #drain(): Promise<void> {
+    if (this.#draining) return;
+    if (!this.#onFrame) throw new Error("transport not started");
+    this.#draining = true;
+    try {
+      while (!this.#closed && this.#inboundQueue.length > 0) {
+        const next = this.#inboundQueue.shift()!;
+        await this.#onFrame(next);
+      }
+    } finally {
+      this.#draining = false;
+    }
+  }
+}
+
+class ReleaseSensitiveTransport implements RpcTransport {
+  #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
+  #inboundQueue: Uint8Array[] = [];
+  #draining = false;
+  #closed = false;
+  #releasedCaps = new Set<number>();
+
+  start(onFrame: (frame: Uint8Array) => void | Promise<void>): void {
+    this.#onFrame = onFrame;
+  }
+
+  async send(frame: Uint8Array): Promise<void> {
+    if (this.#closed) throw new Error("transport closed");
+    let tag: number;
+    try {
+      tag = decodeRpcMessageTag(frame);
+    } catch {
+      return;
+    }
+
+    if (tag === RPC_MESSAGE_TAG_RELEASE) {
+      const release = decodeReleaseFrame(frame);
+      this.#releasedCaps.add(release.id);
+      return;
+    }
+
+    if (tag !== RPC_MESSAGE_TAG_CALL) return;
+    const call = decodeCallRequestFrame(frame);
+    if (call.questionId < 0x4000_0000) return;
+    if (call.target.tag !== 0) {
+      throw new Error("expected outbound callback call to importedCap target");
+    }
+
+    const returnFrame = this.#releasedCaps.has(call.target.importedCap)
+      ? encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason: `unknown capability index: ${call.target.importedCap}`,
+      })
+      : encodeReturnResultsFrame({
+        answerId: call.questionId,
+        content: encodeSingleU32StructMessage(1),
+        noFinishNeeded: true,
+      });
+    this.#inboundQueue.push(returnFrame);
+    await this.#drain();
+  }
+
+  close(): void {
+    this.#closed = true;
+    this.#inboundQueue = [];
+  }
+
+  async emit(frame: Uint8Array): Promise<void> {
+    if (this.#closed) throw new Error("transport closed");
+    this.#inboundQueue.push(frame);
+    await this.#drain();
+  }
+
+  async #drain(): Promise<void> {
+    if (this.#draining) return;
+    if (!this.#onFrame) throw new Error("transport not started");
+    this.#draining = true;
+    try {
+      while (!this.#closed && this.#inboundQueue.length > 0) {
+        const next = this.#inboundQueue.shift()!;
+        await this.#onFrame(next);
+      }
+    } finally {
+      this.#draining = false;
+    }
   }
 }
 
@@ -143,6 +283,119 @@ Deno.test("RpcServerRuntime auto-pumps wasm host calls after inbound frames", as
     assertEquals(hostAbi.results[0].questionId, 1);
     assertEquals(decodeSingleU32StructMessage(hostAbi.results[0].payload), 88);
     assertEquals(runtime.totalHostCallsPumped, 1);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime does not deadlock when host-call dispatch waits on outbound callback returns", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new SerialLoopbackTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: async (_methodId, _params, ctx) => {
+      if (!ctx.outboundClient) {
+        throw new Error("expected outboundClient for callback dispatch");
+      }
+      await ctx.outboundClient.call(
+        { capabilityIndex: 9 },
+        0,
+        encodeSingleU32StructMessage(7),
+        { interfaceId: 0x9000n },
+      );
+      return encodeSingleU32StructMessage(88);
+    },
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 4,
+      maxCallsTotal: 10,
+    },
+  });
+
+  try {
+    await runtime.start();
+    await withTimeout(
+      transport.emit(new Uint8Array([0x01])),
+      1500,
+      "serial inbound frame handling",
+    );
+    await withTimeout(runtime.flush(), 1500, "runtime flush");
+
+    assertEquals(hostAbi.exceptions.length, 0);
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(hostAbi.results[0].questionId, 1);
+    assertEquals(decodeSingleU32StructMessage(hostAbi.results[0].payload), 88);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime defers peer release frames until outbound callback calls complete", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [
+      encodeReleaseFrame({
+        id: 0,
+        referenceCount: 1,
+      }),
+    ],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new ReleaseSensitiveTransport();
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: async (_methodId, _params, ctx) => {
+      if (!ctx.outboundClient) {
+        throw new Error("expected outboundClient for callback dispatch");
+      }
+      await ctx.outboundClient.call(
+        { capabilityIndex: 0 },
+        0,
+        encodeSingleU32StructMessage(7),
+        { interfaceId: 0x9000n },
+      );
+      return encodeSingleU32StructMessage(99);
+    },
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new MockHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 4,
+      maxCallsTotal: 10,
+    },
+  });
+
+  try {
+    await runtime.start();
+    await withTimeout(
+      transport.emit(new Uint8Array([0x01])),
+      1500,
+      "release-sensitive inbound frame handling",
+    );
+    await withTimeout(runtime.flush(), 1500, "runtime flush");
+
+    assertEquals(hostAbi.exceptions.length, 0);
+    assertEquals(hostAbi.results.length, 1);
+    assertEquals(hostAbi.results[0].questionId, 1);
+    assertEquals(decodeSingleU32StructMessage(hostAbi.results[0].payload), 99);
   } finally {
     await runtime.close();
   }
@@ -406,6 +659,138 @@ Deno.test("RpcServerRuntime.create can auto-start without explicit peer wiring",
   } finally {
     await runtime.close();
   }
+});
+
+Deno.test("RpcServerRuntime.createWithRoot wires bootstrap and root dispatch by default", async () => {
+  const transport = new MockTransport();
+  const runtime = await RpcServerRuntime.createWithRoot(
+    transport,
+    (
+      bridge,
+      server: { result: number },
+      options,
+    ) =>
+      bridge.exportCapability({
+        interfaceId: 0x1234n,
+        dispatch: () =>
+          Promise.resolve(encodeSingleU32StructMessage(server.result)),
+      }, options),
+    { result: 42 },
+    {
+      autoStart: true,
+      hostCallPump: { enabled: false },
+    },
+  );
+
+  try {
+    assertEquals(runtime.started, true);
+    assertEquals(runtime.bridge.hasCapability(0), true);
+
+    const bootstrapResponse = await runtime.bridge.handleFrame(
+      encodeBootstrapRequestFrame({ questionId: 9 }),
+    );
+    assert(bootstrapResponse !== null, "expected bootstrap response frame");
+    const decodedBootstrap = decodeReturnFrame(bootstrapResponse);
+    assertEquals(decodedBootstrap.answerId, 9);
+    assertEquals(decodedBootstrap.kind, "results");
+    if (decodedBootstrap.kind === "results") {
+      assertEquals(decodedBootstrap.capTable[0].id, 0);
+    }
+
+    const callResponse = await runtime.bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 10,
+        interfaceId: 0x1234n,
+        methodId: 0,
+        targetImportedCap: 0,
+        paramsContent: encodeSingleU32StructMessage(1),
+      }),
+    );
+    assert(callResponse !== null, "expected call response frame");
+    const decodedCall = decodeReturnFrame(callResponse);
+    assertEquals(decodedCall.answerId, 10);
+    assertEquals(decodedCall.kind, "results");
+    if (decodedCall.kind === "results") {
+      assertEquals(decodeSingleU32StructMessage(decodedCall.contentBytes), 42);
+    }
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime.createWithRoot supports custom root index and ref count", async () => {
+  const transport = new MockTransport();
+  const runtime = await RpcServerRuntime.createWithRoot(
+    transport,
+    (bridge, _server, options) =>
+      bridge.exportCapability({
+        interfaceId: 0x4321n,
+        dispatch: () => Promise.resolve(encodeSingleU32StructMessage(5)),
+      }, options),
+    {},
+    {
+      autoStart: true,
+      hostCallPump: { enabled: false },
+      rootCapabilityIndex: 7,
+      rootReferenceCount: 2,
+    },
+  );
+
+  try {
+    assertEquals(runtime.bridge.hasCapability(7), true);
+
+    const bootstrapResponse = await runtime.bridge.handleFrame(
+      encodeBootstrapRequestFrame({ questionId: 2 }),
+    );
+    assert(bootstrapResponse !== null, "expected bootstrap response frame");
+    const decodedBootstrap = decodeReturnFrame(bootstrapResponse);
+    assertEquals(decodedBootstrap.kind, "results");
+    if (decodedBootstrap.kind === "results") {
+      assertEquals(decodedBootstrap.capTable[0].id, 7);
+    }
+
+    // nextCapabilityIndex defaults to root+1 so automatic exports are collision-safe
+    const extra = runtime.bridge.exportCapability({
+      interfaceId: 0x8888n,
+      dispatch: () => Promise.resolve(new Uint8Array()),
+    });
+    assertEquals(extra.capabilityIndex, 8);
+
+    assertEquals(runtime.bridge.releaseCapability(7, 1), true);
+    assertEquals(runtime.bridge.releaseCapability(7, 1), false);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("RpcServerRuntime.createWithRoot rejects registrars that ignore requested root index", async () => {
+  const transport = new MockTransport();
+
+  let thrown: unknown;
+  try {
+    await RpcServerRuntime.createWithRoot(
+      transport,
+      (bridge) =>
+        bridge.exportCapability({
+          interfaceId: 0x9999n,
+          dispatch: () => Promise.resolve(new Uint8Array()),
+        }),
+      {},
+      {
+        autoStart: false,
+        hostCallPump: { enabled: false },
+        rootCapabilityIndex: 5,
+      },
+    );
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /registerRoot must register at capabilityIndex 5/i.test(thrown.message),
+    `expected createWithRoot registrar mismatch error, got: ${String(thrown)}`,
+  );
 });
 
 Deno.test("RpcServerRuntime swallows warning callback failures at limit boundaries", async () => {

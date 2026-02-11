@@ -17,18 +17,27 @@ function decodeBase64(base64: string): Uint8Array {
   return out;
 }
 
-const CODEGEN_RUNTIME_URL = new URL(
-  "../src/codegen_runtime.ts",
+const ENCODING_RUNTIME_URL = new URL(
+  "../encoding.ts",
+  import.meta.url,
+).href;
+const RPC_RUNTIME_URL = new URL(
+  "../rpc.ts",
   import.meta.url,
 ).href;
 
 async function importGeneratedModule(
   source: string,
 ): Promise<Record<string, unknown>> {
-  const patched = source.replaceAll(
-    `"@nullstyle/capnp/codegen_runtime"`,
-    `"${CODEGEN_RUNTIME_URL}"`,
-  );
+  const patched = source
+    .replaceAll(
+      `"@nullstyle/capnp/encoding"`,
+      `"${ENCODING_RUNTIME_URL}"`,
+    )
+    .replaceAll(
+      `"@nullstyle/capnp/rpc"`,
+      `"${RPC_RUNTIME_URL}"`,
+    );
   const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
 }
@@ -74,9 +83,9 @@ Deno.test("capnpc-deno generated codec roundtrips union/group variants", async (
   const bytes = decodeBase64(REQUEST_BASE64);
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
-  const moduleSource = fileByPath(generated, "union_group_codegen_capnp.ts")
+  const moduleSource = fileByPath(generated, "union_group_codegen_types.ts")
     .contents;
   assert(
     moduleSource.includes("which?:"),
@@ -149,9 +158,9 @@ Deno.test("capnpc-deno identifies unnamed union members in mixed-field structs",
   );
 
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
   const source =
-    fileByPath(generated, "unnamed_union_codegen_capnp.ts").contents;
+    fileByPath(generated, "unnamed_union_codegen_types.ts").contents;
   assert(
     source.includes("which?:"),
     "expected union tag property in Sample interface",

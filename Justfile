@@ -12,6 +12,9 @@ lint:
 check:
     deno task check
 
+check-generated:
+    deno task check:generated
+
 check-tools:
     deno task check:tools
 
@@ -97,6 +100,12 @@ install-codegen-plugin:
 
 uninstall-codegen-plugin:
     deno task codegen:uninstall
+
+build-codegen-binary:
+    deno task codegen:compile
+
+build-codegen-binary-target target out:
+    deno task codegen:compile {{target}} {{out}}
 
 codegen-plugin schema out="generated" import_path=".":
     capnp compile -I {{import_path}} -odeno:{{out}} {{schema}}

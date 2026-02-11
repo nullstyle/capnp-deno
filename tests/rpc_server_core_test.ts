@@ -39,7 +39,24 @@ function decodeSingleU32StructMessage(frame: Uint8Array): number {
 // Bootstrap request dispatching
 // ---------------------------------------------------------------------------
 
-Deno.test("server core: bootstrap request is rejected as unsupported message tag", async () => {
+Deno.test("server core: bootstrap with onBootstrap callback returns correct frame", async () => {
+  const bridge = new RpcServerBridge({
+    onBootstrap: (_req) => ({ capabilityIndex: 42 }),
+  });
+  const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
+  const response = await bridge.handleFrame(bootstrapFrame);
+  assert(response !== null, "expected a response frame");
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.answerId, 1);
+  assert(decoded.kind === "results", "expected results");
+  // Verify the cap table has a sender-hosted entry
+  assert(decoded.capTable.length >= 1, "expected at least one cap descriptor");
+  assertEquals(decoded.capTable[0].tag, 1); // CAP_DESCRIPTOR_TAG_SENDER_HOSTED
+  assertEquals(decoded.capTable[0].id, 42);
+});
+
+Deno.test("server core: bootstrap without callback throws clear error", async () => {
   const bridge = new RpcServerBridge();
   const bootstrapFrame = encodeBootstrapRequestFrame({ questionId: 1 });
 
@@ -51,8 +68,8 @@ Deno.test("server core: bootstrap request is rejected as unsupported message tag
   }
   assert(
     thrown instanceof Error &&
-      /unsupported rpc message tag/i.test(thrown.message),
-    `expected unsupported-tag error, got: ${String(thrown)}`,
+      /bootstrap not configured/i.test(thrown.message),
+    `expected bootstrap-not-configured error, got: ${String(thrown)}`,
   );
 });
 

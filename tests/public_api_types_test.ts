@@ -42,6 +42,8 @@ import type {
   RpcObservabilityAttributes,
   RpcObservabilityAttributeValue,
   RpcObservabilityEvent,
+  RpcPeerAddress,
+  RpcPeerOptions,
   RpcPromisedAnswerOp,
   RpcPromisedAnswerTarget,
   RpcReleaseRequest,
@@ -57,19 +59,35 @@ import type {
   RpcServerCallResponse,
   RpcServerDispatch,
   RpcServerRuntimeCreateOptions,
+  RpcServerRuntimeCreateWithRootOptions,
   RpcServerRuntimeHostCallPumpOptions,
   RpcServerRuntimeOptions,
   RpcServerRuntimePumpOptions,
+  RpcServerRuntimeRootRegistrar,
+  RpcServerRuntimeRootRegistrationOptions,
   RpcServerRuntimeWarning,
   RpcServerRuntimeWarningCode,
   RpcServerWasmHost,
+  RpcServiceConstructor,
+  RpcServiceImplementation,
+  RpcServiceToken,
+  RpcServiceTokenCreateOptions,
   RpcSessionCreateOptions,
   RpcSessionHarnessTransport,
   RpcSessionOptions,
+  RpcStub,
+  RpcStubLifecycle,
   RpcTransport,
   RpcTransportMiddleware,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
+  TcpConnectOptions,
+  TcpPort,
+  TcpRpcClientConnectOptions,
+  TcpRpcClientTransportOptions,
+  TcpServeHandle,
+  TcpServeOptions,
+  TcpServiceApi,
   TcpTransportOptions,
   WebSocketTransportOptions,
 } from "../mod.ts";
@@ -111,6 +129,8 @@ type PublicTypeExportSmoke = {
   reconnectPolicyContext: ReconnectPolicyContext;
   reconnectRetryInfo: ReconnectRetryInfo;
   reconnectingRpcClientTransportOptions: ReconnectingRpcClientTransportOptions;
+  rpcPeerAddress: RpcPeerAddress;
+  rpcPeerOptions: RpcPeerOptions;
   rpcBootstrapRequest: RpcBootstrapRequest;
   rpcCallFrameRequest: RpcCallFrameRequest;
   rpcCallRequest: RpcCallRequest;
@@ -136,16 +156,30 @@ type PublicTypeExportSmoke = {
   rpcReturnResultsFrameRequest: RpcReturnResultsFrameRequest;
   rpcPromisedAnswerOp: RpcPromisedAnswerOp;
   rpcPromisedAnswerTarget: RpcPromisedAnswerTarget;
+  rpcServiceConstructor: RpcServiceConstructor<{ ping(): Promise<void> }>;
+  rpcServiceImplementation: RpcServiceImplementation<{ ping(): Promise<void> }>;
+  rpcServiceToken: RpcServiceToken<{ ping(): Promise<void> }>;
+  rpcServiceTokenCreateOptions: RpcServiceTokenCreateOptions<{
+    ping(): Promise<void>;
+  }>;
+  rpcStub: RpcStub<{ ping(): Promise<void> }>;
+  rpcStubLifecycle: RpcStubLifecycle;
   rpcServerBridgeOptions: RpcServerBridgeOptions;
   rpcServerRuntimeHostCallPumpOptions: RpcServerRuntimeHostCallPumpOptions;
   rpcServerRuntimeOptions: RpcServerRuntimeOptions;
   rpcServerRuntimePumpOptions: RpcServerRuntimePumpOptions;
+  rpcServerRuntimeRootRegistrationOptions:
+    RpcServerRuntimeRootRegistrationOptions;
+  rpcServerRuntimeRootRegistrar: RpcServerRuntimeRootRegistrar<{
+    ping(): Promise<void> | void;
+  }>;
   rpcServerRuntimeWarning: RpcServerRuntimeWarning;
   rpcServerRuntimeWarningCode: RpcServerRuntimeWarningCode;
   rpcServerBridgePumpHostCallsOptions: RpcServerBridgePumpHostCallsOptions;
   rpcServerCallContext: RpcServerCallContext;
   rpcServerCallResponse: RpcServerCallResponse;
   rpcServerRuntimeCreateOptions: RpcServerRuntimeCreateOptions;
+  rpcServerRuntimeCreateWithRootOptions: RpcServerRuntimeCreateWithRootOptions;
   rpcServerDispatch: RpcServerDispatch;
   rpcServerWasmHost: RpcServerWasmHost;
   rpcRuntimeModuleOptions: RpcRuntimeModuleOptions;
@@ -153,10 +187,17 @@ type PublicTypeExportSmoke = {
   rpcSessionHarnessTransport: RpcSessionHarnessTransport;
   rpcSessionOptions: RpcSessionOptions;
   rpcTransport: RpcTransport;
+  tcpConnectOptions: TcpConnectOptions;
+  tcpPort: TcpPort;
   sessionRpcClientTransportCreateOptions:
     SessionRpcClientTransportCreateOptions;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
+  tcpServeHandle: TcpServeHandle;
+  tcpServeOptions: TcpServeOptions;
+  tcpServiceApi: TcpServiceApi;
   tcpTransportOptions: TcpTransportOptions;
+  tcpRpcClientConnectOptions: TcpRpcClientConnectOptions;
+  tcpRpcClientTransportOptions: TcpRpcClientTransportOptions;
   webSocketTransportOptions: WebSocketTransportOptions;
 };
 

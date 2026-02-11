@@ -48,18 +48,27 @@ function decodeBase64(base64: string): Uint8Array {
   return out;
 }
 
-const CODEGEN_RUNTIME_URL = new URL(
-  "../src/codegen_runtime.ts",
+const ENCODING_RUNTIME_URL = new URL(
+  "../encoding.ts",
+  import.meta.url,
+).href;
+const RPC_RUNTIME_URL = new URL(
+  "../rpc.ts",
   import.meta.url,
 ).href;
 
 async function importGeneratedModule(
   source: string,
 ): Promise<Record<string, unknown>> {
-  const patched = source.replaceAll(
-    `"@nullstyle/capnp/codegen_runtime"`,
-    `"${CODEGEN_RUNTIME_URL}"`,
-  );
+  const patched = source
+    .replaceAll(
+      `"@nullstyle/capnp/encoding"`,
+      `"${ENCODING_RUNTIME_URL}"`,
+    )
+    .replaceAll(
+      `"@nullstyle/capnp/rpc"`,
+      `"${RPC_RUNTIME_URL}"`,
+    );
   const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
 }
@@ -419,7 +428,7 @@ Deno.test("roundtrip: Person with all fields populated", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -451,7 +460,7 @@ Deno.test("roundtrip: Person with empty/default values", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -479,7 +488,7 @@ Deno.test("roundtrip: Person with large UInt64 value", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -507,7 +516,7 @@ Deno.test("roundtrip: Person decode from zero-length message returns defaults", 
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -535,7 +544,7 @@ Deno.test("roundtrip: Example union variant 'none'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -552,7 +561,7 @@ Deno.test("roundtrip: Example union variant 'name'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -570,7 +579,7 @@ Deno.test("roundtrip: Example union variant 'count'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -588,7 +597,7 @@ Deno.test("roundtrip: Example union variant 'cfg' (group)", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -614,7 +623,7 @@ Deno.test("roundtrip: Example union discriminant changes between encode/decode c
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -651,7 +660,7 @@ Deno.test("roundtrip: Sample unnamed union variant 'none'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "unnamed_union_codegen_capnp.ts").contents,
+    fileByPath(generated, "unnamed_union_codegen_types.ts").contents,
   );
   const codec = mod.SampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected SampleCodec export");
@@ -668,7 +677,7 @@ Deno.test("roundtrip: Sample unnamed union variant 'name'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "unnamed_union_codegen_capnp.ts").contents,
+    fileByPath(generated, "unnamed_union_codegen_types.ts").contents,
   );
   const codec = mod.SampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected SampleCodec export");
@@ -686,7 +695,7 @@ Deno.test("roundtrip: Sample unnamed union variant 'count'", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "unnamed_union_codegen_capnp.ts").contents,
+    fileByPath(generated, "unnamed_union_codegen_types.ts").contents,
   );
   const codec = mod.SampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected SampleCodec export");
@@ -707,7 +716,7 @@ Deno.test("roundtrip: nested struct with Inner/Outer", async () => {
   const request = makeNestedStructRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "nested_capnp.ts").contents,
+    fileByPath(generated, "nested_types.ts").contents,
   );
   const codec = mod.OuterCodec as Codec | undefined;
   assert(codec !== undefined, "expected OuterCodec export");
@@ -739,7 +748,7 @@ Deno.test("roundtrip: nested struct with empty inner and empty list", async () =
   const request = makeNestedStructRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "nested_capnp.ts").contents,
+    fileByPath(generated, "nested_types.ts").contents,
   );
   const codec = mod.OuterCodec as Codec | undefined;
   assert(codec !== undefined, "expected OuterCodec export");
@@ -762,7 +771,7 @@ Deno.test("roundtrip: nested struct with null inner yields defaults", async () =
   const request = makeNestedStructRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "nested_capnp.ts").contents,
+    fileByPath(generated, "nested_types.ts").contents,
   );
   const codec = mod.OuterCodec as Codec | undefined;
   assert(codec !== undefined, "expected OuterCodec export");
@@ -786,7 +795,7 @@ Deno.test("roundtrip: List(Bool), List(UInt32), List(UInt64), List(Text)", async
   const request = makeListsRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "lists_capnp.ts").contents,
+    fileByPath(generated, "lists_types.ts").contents,
   );
   const codec = mod.ListHostCodec as Codec | undefined;
   assert(codec !== undefined, "expected ListHostCodec export");
@@ -835,7 +844,7 @@ Deno.test("roundtrip: all lists empty", async () => {
   const request = makeListsRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "lists_capnp.ts").contents,
+    fileByPath(generated, "lists_types.ts").contents,
   );
   const codec = mod.ListHostCodec as Codec | undefined;
   assert(codec !== undefined, "expected ListHostCodec export");
@@ -858,7 +867,7 @@ Deno.test("roundtrip: single-element lists", async () => {
   const request = makeListsRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "lists_capnp.ts").contents,
+    fileByPath(generated, "lists_types.ts").contents,
   );
   const codec = mod.ListHostCodec as Codec | undefined;
   assert(codec !== undefined, "expected ListHostCodec export");
@@ -889,7 +898,7 @@ Deno.test("roundtrip: all primitive types", async () => {
   const request = makePrimitivesRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "prims_capnp.ts").contents,
+    fileByPath(generated, "prims_types.ts").contents,
   );
   const codec = mod.PrimitivesCodec as Codec | undefined;
   assert(codec !== undefined, "expected PrimitivesCodec export");
@@ -935,7 +944,7 @@ Deno.test("roundtrip: primitives with zero/default values", async () => {
   const request = makePrimitivesRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "prims_capnp.ts").contents,
+    fileByPath(generated, "prims_types.ts").contents,
   );
   const codec = mod.PrimitivesCodec as Codec | undefined;
   assert(codec !== undefined, "expected PrimitivesCodec export");
@@ -979,7 +988,7 @@ Deno.test("roundtrip: double encode/decode cycle for Person", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -1019,7 +1028,7 @@ Deno.test("roundtrip: double encode/decode cycle for Example union", async () =>
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "union_group_codegen_capnp.ts").contents,
+    fileByPath(generated, "union_group_codegen_types.ts").contents,
   );
   const codec = mod.ExampleCodec as Codec | undefined;
   assert(codec !== undefined, "expected ExampleCodec export");
@@ -1053,7 +1062,7 @@ Deno.test("roundtrip: double encode/decode cycle for nested struct", async () =>
   const request = makeNestedStructRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "nested_capnp.ts").contents,
+    fileByPath(generated, "nested_types.ts").contents,
   );
   const codec = mod.OuterCodec as Codec | undefined;
   assert(codec !== undefined, "expected OuterCodec export");
@@ -1093,7 +1102,7 @@ Deno.test("roundtrip: Text with unicode and special characters", async () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as Codec | undefined;
   assert(codec !== undefined, "expected PersonCodec export");
@@ -1124,7 +1133,7 @@ Deno.test("roundtrip: nested Inner codec independently", async () => {
   const request = makeNestedStructRequest();
   const generated = generateTypescriptFiles(request);
   const mod = await importGeneratedModule(
-    fileByPath(generated, "nested_capnp.ts").contents,
+    fileByPath(generated, "nested_types.ts").contents,
   );
   const codec = mod.InnerCodec as Codec | undefined;
   assert(codec !== undefined, "expected InnerCodec export");

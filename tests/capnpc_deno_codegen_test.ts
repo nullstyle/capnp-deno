@@ -239,23 +239,22 @@ Deno.test("capnpc-deno emits binary codec runtime and schema types", () => {
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
 
-  assertEquals(generated.length, 3);
-  const capnp = fileByPath(generated, "person_codegen_capnp.ts");
-  const rpc = fileByPath(generated, "person_codegen_rpc.ts");
+  assertEquals(generated.length, 2);
+  const types = fileByPath(generated, "person_codegen_types.ts");
   const meta = fileByPath(generated, "person_codegen_meta.ts");
   assert(
-    capnp.contents.includes("@nullstyle/capnp/codegen_runtime"),
-    "expected codegen_runtime re-export in generated output",
+    types.contents.includes('from "@nullstyle/capnp/encoding";'),
+    "expected split encoding runtime import in generated types output",
   );
   assert(
-    capnp.contents.includes(
+    types.contents.includes('from "@nullstyle/capnp/rpc";'),
+    "expected split rpc runtime import in generated types output",
+  );
+  assert(
+    types.contents.includes(
       "export const PersonCodec: StructCodec<Person>",
     ),
     "expected Person codec export",
-  );
-  assert(
-    rpc.contents.includes("export {};"),
-    "expected empty rpc module when schema has no interfaces",
   );
   assert(
     meta.contents.includes("export const schemaFileId ="),
@@ -263,18 +262,27 @@ Deno.test("capnpc-deno emits binary codec runtime and schema types", () => {
   );
 });
 
-const CODEGEN_RUNTIME_URL = new URL(
-  "../src/codegen_runtime.ts",
+const ENCODING_RUNTIME_URL = new URL(
+  "../encoding.ts",
+  import.meta.url,
+).href;
+const RPC_RUNTIME_URL = new URL(
+  "../rpc.ts",
   import.meta.url,
 ).href;
 
 async function importGeneratedModule(
   source: string,
 ): Promise<Record<string, unknown>> {
-  const patched = source.replaceAll(
-    `"@nullstyle/capnp/codegen_runtime"`,
-    `"${CODEGEN_RUNTIME_URL}"`,
-  );
+  const patched = source
+    .replaceAll(
+      `"@nullstyle/capnp/encoding"`,
+      `"${ENCODING_RUNTIME_URL}"`,
+    )
+    .replaceAll(
+      `"@nullstyle/capnp/rpc"`,
+      `"${RPC_RUNTIME_URL}"`,
+    );
   const url = `data:application/typescript;base64,${btoa(patched)}`;
   return await import(url);
 }
@@ -283,10 +291,10 @@ Deno.test("capnpc-deno generated binary codec roundtrips Person", async () => {
   const bytes = decodeBase64(REQUEST_BASE64);
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as
     | { encode(value: unknown): Uint8Array; decode(bytes: Uint8Array): unknown }
@@ -317,10 +325,10 @@ Deno.test("capnpc-deno generated runtime decodes single-far root pointer", async
   const bytes = decodeBase64(REQUEST_BASE64);
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as
     | { encode(value: unknown): Uint8Array; decode(bytes: Uint8Array): unknown }
@@ -347,10 +355,10 @@ Deno.test("capnpc-deno generated runtime decodes far pointer text fields", async
   const bytes = decodeBase64(REQUEST_BASE64);
   const request = parseCodeGeneratorRequest(bytes);
   const generated = generateTypescriptFiles(request);
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
   const mod = await importGeneratedModule(
-    fileByPath(generated, "person_codegen_capnp.ts").contents,
+    fileByPath(generated, "person_codegen_types.ts").contents,
   );
   const codec = mod.PersonCodec as
     | { encode(value: unknown): Uint8Array; decode(bytes: Uint8Array): unknown }
@@ -781,22 +789,22 @@ function makeMissingGroupStructRequest(): CodeGeneratorRequestModel {
 
 Deno.test("capnpc-deno emitter handles rpc method name collisions", () => {
   const generated = generateTypescriptFiles(makeRpcMethodCollisionRequest());
-  const rpc = fileByPath(generated, "fallback_rpc.ts");
+  const types = fileByPath(generated, "fallback_types.ts");
 
   assert(
-    rpc.contents.includes("doThing: 0,"),
+    types.contents.includes("doThing: 0,"),
     "expected first collided method name",
   );
   assert(
-    rpc.contents.includes("doThing2: 1,"),
+    types.contents.includes("doThing2: 1,"),
     "expected deterministic suffix for collided method names",
   );
   assert(
-    rpc.contents.includes('"123start": 2,'),
+    types.contents.includes('"123start": 2,'),
     "expected quoted ordinal key for non-identifier method name",
   );
   assert(
-    rpc.contents.includes('"123start"(params:'),
+    types.contents.includes('"123start"(params:'),
     "expected quoted client method signature for non-identifier method name",
   );
 });
@@ -810,27 +818,27 @@ Deno.test("capnpc-deno emitter rejects rpc methods that reference unknown param/
 
 Deno.test("capnpc-deno emitter supports interface inheritance for rpc stubs", () => {
   const generated = generateTypescriptFiles(makeInheritedRpcInterfaceRequest());
-  const rpc = fileByPath(generated, "inheritance_rpc.ts");
+  const types = fileByPath(generated, "inheritance_types.ts");
 
   assert(
-    rpc.contents.includes("interfaceIds: [0x122n, 0x121n] as const"),
+    types.contents.includes("interfaceIds: [0x122n, 0x121n] as const"),
     "expected server dispatch to accept child and parent interface ids",
   );
   assert(
-    rpc.contents.includes("interfaceId: options?.interfaceId ?? 0x122n"),
+    types.contents.includes("interfaceId: options?.interfaceId ?? 0x122n"),
     "expected child methods to default to child interface id",
   );
   assert(
-    rpc.contents.includes("interfaceId: options?.interfaceId ?? 0x121n"),
+    types.contents.includes("interfaceId: options?.interfaceId ?? 0x121n"),
     "expected inherited methods to default to parent interface id",
   );
   assert(
-    rpc.contents.includes("case 0x122n: {") &&
-      rpc.contents.includes("case 0x121n: {"),
+    types.contents.includes("case 0x122n: {") &&
+      types.contents.includes("case 0x121n: {"),
     "expected dispatch branching by interface id",
   );
   assert(
-    rpc.contents.includes("base(params: ParentBaseParams"),
+    types.contents.includes("base(params: ParentBaseParams"),
     "expected child client/server surfaces to include inherited method",
   );
 });
@@ -838,7 +846,7 @@ Deno.test("capnpc-deno emitter supports interface inheritance for rpc stubs", ()
 Deno.test("capnpc-deno emitter renderSingleFileForTest rejects multi-file requests", () => {
   assertThrows(
     () => renderSingleFileForTest(makeMultiFileRequest()),
-    /expected exactly one generated capnp file, got 2/,
+    /expected exactly one generated types file, got 2/,
   );
 });
 

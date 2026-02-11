@@ -7,7 +7,7 @@
  * @module
  */
 
-import { AbiError } from "./errors.ts";
+import { AbiError, type CapnpErrorOptions } from "./errors.ts";
 
 // Cached TextEncoder and TextDecoder instances for efficient string conversion.
 // These are stateless and can be reused across all WasmAbi instances.
@@ -211,11 +211,28 @@ export class WasmAbiError extends AbiError {
    * @param message - Human-readable error description.
    * @param code - Numeric error code from the WASM module. Defaults to 0.
    */
-  constructor(message: string, code = 0) {
-    super(message);
+  /**
+   * @param message - Human-readable error description.
+   * @param code - Numeric error code from the WASM module. Defaults to 0.
+   * @param options - Optional settings, including a `cause` and `metadata`.
+   */
+  constructor(message: string, code = 0, options: CapnpErrorOptions = {}) {
+    super(message, options);
     this.name = "WasmAbiError";
     this.code = code;
   }
+}
+
+/**
+ * Extracts a symbolic error type from a WASM error message string.
+ * Falls back to `wasm_error_<code>` if no recognizable name is found.
+ */
+function extractWasmErrorType(message: string, code: number): string {
+  const match = message.match(
+    /\b([A-Z][a-zA-Z]+(?:Pointer|Question|Answer|Capability|Segment|Message|Export|Frame|Table|List|Struct|Error))\b/,
+  );
+  if (match) return match[1];
+  return `wasm_error_${code}`;
 }
 
 function expectFunction<T>(
@@ -1049,7 +1066,9 @@ export class WasmAbi {
     const len = this.exports.capnp_last_error_len();
     const message = this.decodeUtf8(ptr, len);
     const text = message.length > 0 ? message : `WASM error code ${code}`;
-    return new WasmAbiError(text, code);
+    return new WasmAbiError(text, code, {
+      metadata: { errorType: extractWasmErrorType(text, code) },
+    });
   }
 
   private initErrorTakeScratch(): void {
@@ -1165,7 +1184,9 @@ export class WasmAbi {
     const text = this.decodeUtf8(ptr, len);
     this.freeOutBuffer(ptr, len);
     const message = text.length > 0 ? text : `WASM error code ${code}`;
-    return new WasmAbiError(message, code);
+    return new WasmAbiError(message, code, {
+      metadata: { errorType: extractWasmErrorType(message, code) },
+    });
   }
 
   private decodeUtf8(ptr: number, len: number): string {

@@ -3,11 +3,7 @@
  * formatting, and collection utilities.
  */
 
-import type {
-  FieldModel,
-  NodeModel,
-  TypeModel,
-} from "./model.ts";
+import type { FieldModel, NodeModel, TypeModel } from "./model.ts";
 
 export interface EnumInfo {
   readonly id: bigint;
@@ -35,9 +31,12 @@ export interface InterfaceInfo {
 
 export const FIELD_NO_DISCRIMINANT = 0xffff;
 
-export type OutputModuleSuffix = "capnp" | "rpc" | "meta";
+export type OutputModuleSuffix = "capnp" | "rpc" | "types" | "meta";
 
-export function toOutputPath(filename: string, suffix: OutputModuleSuffix): string {
+export function toOutputPath(
+  filename: string,
+  suffix: OutputModuleSuffix,
+): string {
   const normalized = filename.replaceAll("\\", "/");
   const base = normalized.slice(normalized.lastIndexOf("/") + 1);
   const withoutExt = base.endsWith(".capnp") ? base.slice(0, -6) : base;
@@ -55,9 +54,8 @@ export function toPascalCase(value: string): string {
     .split(/\s+/)
     .filter((word) => word.length > 0);
   if (words.length === 0) return "GeneratedType";
-  return words.map((word) =>
-    `${word.charAt(0).toUpperCase()}${word.slice(1)}`
-  ).join("");
+  return words.map((word) => `${word.charAt(0).toUpperCase()}${word.slice(1)}`)
+    .join("");
 }
 
 export function toCamelCase(value: string): string {
@@ -67,9 +65,7 @@ export function toCamelCase(value: string): string {
 }
 
 export function quoteIfNeeded(name: string): string {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
-    ? name
-    : JSON.stringify(name);
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
 }
 
 export function simpleNodeName(node: NodeModel): string {

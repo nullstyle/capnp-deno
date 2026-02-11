@@ -224,52 +224,51 @@ function makeEmitterEdgeRequest(): CodeGeneratorRequestModel {
 
 Deno.test("capnpc-deno emitter handles edge naming and fallback paths", () => {
   const generated = generateTypescriptFiles(makeEmitterEdgeRequest());
-  assertEquals(generated.length, 3);
+  assertEquals(generated.length, 2);
 
-  const capnp = fileByPath(generated, "noext_capnp.ts");
-  const rpc = fileByPath(generated, "noext_rpc.ts");
+  const types = fileByPath(generated, "noext_types.ts");
   const meta = fileByPath(generated, "noext_meta.ts");
 
   assert(
-    capnp.contents.includes("interface Dup {") &&
-      capnp.contents.includes("interface Dup2 {"),
+    types.contents.includes("interface Dup {") &&
+      types.contents.includes("interface Dup2 {"),
     "expected deterministic suffixing for local type-name collisions",
   );
   assert(
-    capnp.contents.includes("interface GeneratedType {") &&
-      capnp.contents.includes("interface GeneratedType2 {"),
+    types.contents.includes("interface GeneratedType {") &&
+      types.contents.includes("interface GeneratedType2 {"),
     "expected GeneratedType fallback with deterministic suffixing",
   );
   assert(
-    capnp.contents.includes("interface SchemaNoext {"),
+    types.contents.includes("interface SchemaNoext {"),
     "expected simpleNodeName prefix>=length fallback path",
   );
   assert(
-    capnp.contents.includes(
+    types.contents.includes(
       'which?: "dupA" | "unknownEnum" | "unknownStruct";',
     ),
     "expected union fallback to deterministic field tail selection",
   );
   assert(
-    capnp.contents.includes("type: TYPE_UINT16,"),
+    types.contents.includes("type: TYPE_UINT16,"),
     "expected enum descriptor fallback when enum id is unknown",
   );
   assert(
-    capnp.contents.includes("type: TYPE_ANY_POINTER,"),
+    types.contents.includes("type: TYPE_ANY_POINTER,"),
     "expected struct descriptor fallback when struct id is unknown",
   );
   assert(
-    capnp.contents.includes("undefined as unknown as unknown"),
+    types.contents.includes("undefined as unknown as unknown"),
     "expected unknown reference default expression fallback",
   );
 
   assert(
-    rpc.contents.includes("export interface SvcClient") &&
-      rpc.contents.includes("export interface Svc2Client"),
+    types.contents.includes("export interface SvcClient") &&
+      types.contents.includes("export interface Svc2Client"),
     "expected deterministic interface name suffixing",
   );
-  const alphaIndex = rpc.contents.indexOf("alpha: 7,");
-  const zetaIndex = rpc.contents.indexOf("zeta: 7,");
+  const alphaIndex = types.contents.indexOf("alpha: 7,");
+  const zetaIndex = types.contents.indexOf("zeta: 7,");
   assert(alphaIndex >= 0 && zetaIndex >= 0 && alphaIndex < zetaIndex);
 
   assert(

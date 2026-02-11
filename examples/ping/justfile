@@ -1,0 +1,3 @@
+gen:
+    mkdir -p gen
+    deno task codegen --schema schema.capnp --out gen --layout flat

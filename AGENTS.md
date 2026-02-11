@@ -2,13 +2,14 @@
 
 ## Project Structure & Module Organization
 
-- `mod.ts` is the only public entrypoint; export user-facing APIs from here.
+- `mod.ts` is the umbrella public entrypoint; focused entrypoints are `rpc.ts`
+  and `encoding.ts`.
 - `src/abi.ts` wraps raw WASM exports (memory, alloc/free, error state, peer
   calls).
-- `src/wasm_peer.ts` and `src/session.ts` implement host runtime flow. Core
+- `src/wasm_peer.ts` and `src/rpc/session.ts` implement host runtime flow. Core
   invariant: after each inbound frame, drain all outbound frames in order.
-- `src/framer.ts` plus `src/transports/*.ts` provide stream/message adapters
-  (`TcpTransport`, `WebSocketTransport`, `MessagePortTransport`).
+- `src/encoding/framer.ts` plus `src/rpc/transports/*.ts` provide stream/message
+  adapters (`TcpTransport`, `WebSocketTransport`, `MessagePortTransport`).
 - `tests/` is split by scope: fake-WASM unit tests, socket/message-port
   integration tests, and real-WASM ABI/serde/RPC tests.
 - `vendor/capnp-zig/` is a git submodule containing the canonical WASM ABI

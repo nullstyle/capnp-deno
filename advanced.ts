@@ -23,4 +23,4 @@ export {
   type JsonSerdeCodecOptions,
   type JsonSerdeExportBinding,
   WasmSerde,
-} from "./src/serde.ts";
+} from "./src/encoding/serde.ts";

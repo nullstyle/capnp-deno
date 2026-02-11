@@ -37,7 +37,7 @@
 - Schema-layout output mapping updated to preserve `_capnp/_rpc/_meta` suffixes.
 - Far-pointer support landed in request reader + generated runtime decode path.
 - Added runtime wire tooling:
-  - `src/rpc_wire.ts`: bootstrap/call/finish/release encoders, return
+  - `src/encoding/rpc_wire.ts`: bootstrap/call/finish/release encoders, return
     encode/decode, and payload content extraction.
   - `src/rpc_client.ts`: payload-capable `SessionRpcClientTransport` with
     `finish`/`release` lifecycle support and `InMemoryRpcHarnessTransport`.
@@ -69,7 +69,7 @@
   - regression tests in `tests/websocket_transport_test.ts` and updated
     `tests/message_port_transport_test.ts`.
 - Added shared host-side Cap'n Proto frame limits module:
-  - `src/frame_limits.ts` with `validateCapnpFrame(...)` and
+  - `src/encoding/frame_limits.ts` with `validateCapnpFrame(...)` and
     `CapnpFrameLimitsOptions` (`maxSegmentCount`, `maxFrameBytes`,
     `maxTraversalWords`, `maxNestingDepth`).
   - nested pointer traversal validates struct/list pointer graphs and resolves
@@ -86,7 +86,7 @@
     `tests/tcp_transport_test.ts`, `tests/websocket_transport_test.ts`, and
     `tests/message_port_transport_test.ts`.
 - Expanded RPC payload cap-table semantics coverage:
-  - `src/rpc_wire.ts` now encodes and decodes `Call` payload cap tables
+  - `src/encoding/rpc_wire.ts` now encodes and decodes `Call` payload cap tables
     (`paramsCapTable`) in addition to `Return` payload cap tables.
   - `src/rpc_client.ts` now supports call payload cap-table injection via
     `RpcClientCallOptions.paramsCapTable` and exposes full result payload

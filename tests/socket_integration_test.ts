@@ -1,6 +1,9 @@
 import {
+  createRpcServiceToken,
+  type RpcPeer,
   RpcSession,
   type RpcTransport,
+  TCP,
   TcpTransport,
   WasmPeer,
   WebSocketTransport,
@@ -188,5 +191,72 @@ Deno.test("TcpTransport loopback e2e with RpcSession", async () => {
   } finally {
     listener.close();
     await closeAll(transports, sessions);
+  }
+});
+
+function reserveTcpPort(): number {
+  const listener = Deno.listen({
+    transport: "tcp",
+    hostname: "127.0.0.1",
+    port: 0,
+  });
+  try {
+    return (listener.addr as Deno.NetAddr).port;
+  } finally {
+    listener.close();
+  }
+}
+
+Deno.test("TCP.serve disposes constructor instances on peer disconnect", async () => {
+  const connected = deferred<RpcPeer>();
+  const disposed = deferred<RpcPeer>();
+
+  class DisposableServer {
+    readonly peer: RpcPeer;
+
+    constructor(peer: RpcPeer) {
+      this.peer = peer;
+      connected.resolve(peer);
+    }
+
+    [Symbol.dispose](): void {
+      disposed.resolve(this.peer);
+    }
+  }
+
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    DisposableServer
+  >({
+    interfaceId: 0x77n,
+    interfaceName: "DisposeProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const port = reserveTcpPort();
+  const handle = TCP.serve(service, "127.0.0.1", port, DisposableServer);
+
+  let conn: Deno.Conn | null = null;
+  try {
+    conn = await Deno.connect({
+      transport: "tcp",
+      hostname: "127.0.0.1",
+      port,
+    });
+
+    await withTimeout(connected.promise, 2000, "server connect callback");
+
+    conn.close();
+    conn = null;
+
+    await withTimeout(disposed.promise, 2000, "server dispose callback");
+  } finally {
+    try {
+      conn?.close();
+    } catch {
+      // no-op
+    }
+    await handle.close();
   }
 });

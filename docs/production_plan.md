@@ -11,7 +11,7 @@ coverage.
 ## Current Baseline
 
 - Typed ABI wrapper exists (`src/abi.ts`) with version check support.
-- Peer/session pump is implemented (`src/wasm_peer.ts`, `src/session.ts`).
+- Peer/session pump is implemented (`src/wasm_peer.ts`, `src/rpc/session.ts`).
 - Transport adapters exist for `MessagePort`, `WebSocket`, and TCP.
 - Real-WASM smoke, serde, and RPC fixture tests exist.
 - Root `Justfile` verification gates exist; hosted CI wiring and release

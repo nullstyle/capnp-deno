@@ -4,6 +4,11 @@
 
 - `docs/getting_started_serde.md`
 - `docs/getting_started_rpc.md`
+- `docs/dx_plan.md`
+- `docs/dx_v2_plan.md`
+- `docs/dx_v2_contract.md`
+- `docs/transport_composition.md`
+- `docs/troubleshooting.md`
 - `docs/capnp_zig_additions.md`
 - `docs/production_plan.md`
 

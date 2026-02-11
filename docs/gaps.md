@@ -10,11 +10,11 @@ commit `e988228` (feat: close arena gaps GAP-01 through GAP-11)
 The `capnp-deno` library has solid foundations for a Cap'n Proto RPC
 implementation:
 
-- **Codegen**: `capnpc-deno` parses `CodeGeneratorRequest` and emits three files
-  per schema (`_capnp.ts` for binary codecs, `_rpc.ts` for client/server stubs,
-  `_meta.ts` for reflection metadata). Struct types with primitives, enums,
-  text, data, lists, nested structs, unions/groups, interface pointers, and
-  AnyPointer fields are supported.
+- **Codegen**: `capnpc-deno` parses `CodeGeneratorRequest` and emits two files
+  per schema (`_types.ts` for binary codecs + client/server stubs, `_meta.ts`
+  for reflection metadata). Struct types with primitives, enums, text, data,
+  lists, nested structs, unions/groups, interface pointers, and AnyPointer
+  fields are supported.
 - **Wire format**: Complete encode/decode for Bootstrap, Call, Return (results +
   exception), Finish, Release, Resolve, and Disembargo RPC messages. Cap tables
   are encoded/decoded in both call params and return payloads.
@@ -151,12 +151,12 @@ streaming uses regular Call/Return messages; the sender limits concurrency.
 
 **Status**: CLOSED (commit `e988228`)
 
-**Resolution**: `TcpServerListener` class added to `src/transports/tcp.ts`.
+**Resolution**: `TcpServerListener` class added to `src/rpc/transports/tcp.ts`.
 Calls `Deno.listen()`, accepts connections via async `accept()` generator, wraps
 each `Deno.Conn` in a `TcpTransport`. Includes observability events
 (`rpc.transport.tcp.listen`, `rpc.transport.tcp.accept`,
 `rpc.transport.tcp.listen_close`). Exported in public API. 7 test cases in
-`src/transports/tcp_server_test.ts`.
+`src/rpc/transports/tcp_server_test.ts`.
 
 ---
 
@@ -165,7 +165,7 @@ each `Deno.Conn` in a `TcpTransport`. Includes observability events
 **Status**: CLOSED (commit `e988228`)
 
 **Resolution**: `NetworkRpcHarnessTransport` adapter class added to
-`src/rpc_client.ts`. Wraps any real `RpcTransport` (TCP, WebSocket, etc.) and
+`src/rpc/client.ts`. Wraps any real `RpcTransport` (TCP, WebSocket, etc.) and
 implements the `RpcSessionHarnessTransport` interface (`emitInbound`,
 `nextOutboundFrame`). Exported in public API.
 
@@ -220,7 +220,7 @@ The core `StructCodec` interface is unchanged for backward compatibility.
 
 **Status**: CLOSED (commit `e988228`)
 
-**Resolution**: New `src/server_outbound.ts` module provides:
+**Resolution**: New `src/rpc/server_outbound.ts` module provides:
 
 - `RpcServerCallInterceptTransport` -- wraps the real transport and intercepts
   Return frames for server-originated outbound calls.
@@ -237,11 +237,11 @@ public API. 18 test cases in `tests/server_outbound_test.ts`.
 
 **Status**: CLOSED (pending commit)
 
-**Resolution**: `StreamSender` abstraction added in `src/streaming.ts`. Provides
-flow-controlled, ordered streaming of RPC calls using regular Call/Return
-messages with a configurable `maxInFlight` window for backpressure. Supports
-`onResponse`/`onError` callbacks and `AbortSignal` cancellation. Exported in
-public API (`createStreamSender`, `StreamSender`, `StreamCallFn`,
+**Resolution**: `StreamSender` abstraction added in `src/rpc/streaming.ts`.
+Provides flow-controlled, ordered streaming of RPC calls using regular
+Call/Return messages with a configurable `maxInFlight` window for backpressure.
+Supports `onResponse`/`onError` callbacks and `AbortSignal` cancellation.
+Exported in public API (`createStreamSender`, `StreamSender`, `StreamCallFn`,
 `StreamSenderOptions`). 7 test cases in `tests/streaming_test.ts`.
 
 ---
@@ -262,9 +262,9 @@ on params. When the result has a non-empty cap table, it includes
 **Status**: CLOSED (commit `e988228`)
 
 **Resolution**: `RPC_MESSAGE_TAG_RESOLVE` (5) and `RPC_MESSAGE_TAG_DISEMBARGO`
-(13) defined in `src/rpc_wire/types.ts`. The router decodes these as opaque
-frames and passes them through to the WASM peer for handling. The server bridge
-explicitly passes Resolve and Disembargo frames through without error.
+(13) defined in `src/encoding/rpc_wire/types.ts`. The router decodes these as
+opaque frames and passes them through to the WASM peer for handling. The server
+bridge explicitly passes Resolve and Disembargo frames through without error.
 
 ---
 
@@ -286,7 +286,7 @@ task.
 **Status**: CLOSED (commit `e988228`)
 
 **Resolution**: `interfaceId?: bigint` added to `RpcClientCallOptions` in
-`src/rpc_client.ts`. Both `callRaw` and `callRawPipelined` use
+`src/rpc/client.ts`. Both `callRaw` and `callRawPipelined` use
 `options.interfaceId ?? this.#interfaceId` for per-call override. Generated
 client stubs pass the correct `interfaceId` for each interface.
 
@@ -297,11 +297,10 @@ client stubs pass the correct `interfaceId` for each interface.
 **Status**: CLOSED (pending commit)
 
 **Resolution**: Runtime preamble extracted from `emitter_preamble.ts` (deleted)
-to `src/codegen_runtime.ts`, exported as `@nullstyle/capnp/codegen_runtime`.
-Generated `_capnp.ts` files now
-`export * from "@nullstyle/capnp/codegen_runtime"` and import needed bindings
-locally. No more code duplication across generated files. All 837+ existing
-tests updated and passing.
+to shared runtime modules under `src/encoding/runtime.ts` and
+`src/rpc/runtime.ts`. Generated `_types.ts` files import
+`@nullstyle/capnp/encoding` and `@nullstyle/capnp/rpc` directly, removing the
+extra compatibility barrel and duplicate code preambles.
 
 ## 4. Status Summary
 

@@ -7,7 +7,7 @@ import {
   RpcServerCallInterceptTransport,
   RpcServerOutboundClient,
 } from "../mod.ts";
-import type { RpcTransport } from "../src/transport.ts";
+import type { RpcTransport } from "../src/rpc/transport.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 // ---------------------------------------------------------------------------

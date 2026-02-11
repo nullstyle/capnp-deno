@@ -26,6 +26,23 @@ interface ResolvedInterfaceInfo {
   readonly acceptedInterfaceIds: bigint[];
 }
 
+export type RpcResolvedMethodInfo = ResolvedMethodInfo;
+export type RpcResolvedInterfaceInfo = ResolvedInterfaceInfo;
+
+export function resolveRpcInterfaces(
+  fileNode: NodeModel,
+  nodeById: Map<bigint, NodeModel>,
+): RpcResolvedInterfaceInfo[] {
+  const localTypes = collectLocalTypes(fileNode, nodeById);
+  const structById = new Map(
+    localTypes.structInfos.map((item) => [item.id, item] as const),
+  );
+  const interfaces = collectLocalInterfaces(fileNode, nodeById);
+  return interfaces.map((info) =>
+    resolveInterfaceInfo(info, nodeById, structById)
+  );
+}
+
 export function emitRpcModule(
   fileNode: NodeModel,
   nodeById: Map<bigint, NodeModel>,
@@ -36,26 +53,33 @@ export function emitRpcModule(
   out.push("// DO NOT EDIT MANUALLY.");
   out.push("");
 
-  const localTypes = collectLocalTypes(fileNode, nodeById);
-  const structById = new Map(
-    localTypes.structInfos.map((item) => [item.id, item] as const),
-  );
-  const interfaces = collectLocalInterfaces(fileNode, nodeById);
-
-  if (interfaces.length === 0) {
+  const resolvedInterfaces = resolveRpcInterfaces(fileNode, nodeById);
+  if (resolvedInterfaces.length === 0) {
     out.push("export {};");
     out.push("");
     return out.join("\n");
   }
 
-  const resolvedInterfaces = interfaces.map((info) =>
-    resolveInterfaceInfo(info, nodeById, structById)
+  const sharedRpcTypeNames = [
+    "RpcBootstrapClientTransport",
+    "RpcCallContext",
+    "RpcCallOptions",
+    "RpcClientTransport",
+    "RpcExportCapabilityOptions",
+    "RpcFinishOptions",
+    "RpcServerDispatch",
+    "RpcServerDispatchResult",
+    "RpcServerRegistry",
+  ] as const;
+  const localSharedRpcTypeNames = sharedRpcTypeNames.filter((name) =>
+    name !== "RpcFinishOptions"
   );
 
   const typeImports = new Set<string>([
     "CapabilityPointer",
     "EncodeWithCapsResult",
     "PreambleCapDescriptor",
+    ...localSharedRpcTypeNames,
   ]);
   const valueImports = new Set<string>([
     "encodeStructMessageWithCaps",
@@ -92,92 +116,25 @@ export function emitRpcModule(
     );
   }
   out.push("");
-  out.push("export interface RpcCallOptions {");
-  out.push("  signal?: AbortSignal;");
-  out.push("  timeoutMs?: number;");
-  out.push("  interfaceId?: bigint;");
-  out.push("  onQuestionId?: (questionId: number) => void;");
-  out.push("  autoFinish?: boolean;");
-  out.push("  finish?: RpcFinishOptions;");
-  out.push("}");
-  out.push("");
-  out.push("export interface RpcFinishOptions {");
-  out.push("  releaseResultCaps?: boolean;");
-  out.push("  requireEarlyCancellation?: boolean;");
-  out.push("}");
-  out.push("");
-  out.push("export interface RpcCallContext {");
-  out.push("  readonly capability: CapabilityPointer;");
-  out.push("  readonly methodId: number;");
-  out.push("  readonly questionId?: number;");
-  out.push("  readonly interfaceId?: bigint;");
-  out.push("}");
-  out.push("");
-  out.push("export interface RpcClientTransport {");
-  out.push("  call(");
-  out.push("    capability: CapabilityPointer,");
-  out.push("    methodId: number,");
-  out.push("    params: Uint8Array,");
-  out.push("    options?: RpcCallOptions,");
-  out.push("  ): Promise<Uint8Array>;");
-  out.push("  callRaw?(");
-  out.push("    capability: CapabilityPointer,");
-  out.push("    methodId: number,");
-  out.push("    params: Uint8Array,");
-  out.push("    options?: RpcCallOptions,");
   out.push(
-    "  ): Promise<{ contentBytes: Uint8Array; capTable: PreambleCapDescriptor[] }>;",
+    `export type { ${sharedRpcTypeNames.join(", ")} } from ${
+      JSON.stringify(`./${capnpModulePath}`)
+    };`,
   );
-  out.push(
-    "  finish?(questionId: number, options?: RpcFinishOptions): Promise<void> | void;",
-  );
-  out.push(
-    "  release?(capability: CapabilityPointer, referenceCount?: number): Promise<void> | void;",
-  );
-  out.push("}");
-  out.push("");
-  out.push(
-    "export type RpcServerDispatchResult = Uint8Array | { content: Uint8Array; capTable?: PreambleCapDescriptor[] };",
-  );
-  out.push("");
-  out.push("export interface RpcServerDispatch {");
-  out.push("  readonly interfaceId: bigint;");
-  out.push("  readonly interfaceIds?: readonly bigint[];");
-  out.push("  dispatch(");
-  out.push("    methodId: number,");
-  out.push("    params: Uint8Array,");
-  out.push("    ctx: RpcCallContext,");
-  out.push(
-    "  ): Promise<RpcServerDispatchResult> | RpcServerDispatchResult;",
-  );
-  out.push("}");
-  out.push("");
-  out.push(
-    "export interface RpcBootstrapClientTransport extends RpcClientTransport {",
-  );
-  out.push(
-    "  bootstrap(options?: RpcCallOptions): Promise<CapabilityPointer>;",
-  );
-  out.push("}");
-  out.push("");
-  out.push("export interface RpcExportCapabilityOptions {");
-  out.push("  capabilityIndex?: number;");
-  out.push("  referenceCount?: number;");
-  out.push("}");
-  out.push("");
-  out.push("export interface RpcServerRegistry {");
-  out.push("  exportCapability(");
-  out.push("    dispatch: RpcServerDispatch,");
-  out.push("    options?: RpcExportCapabilityOptions,");
-  out.push("  ): CapabilityPointer;");
-  out.push("}");
   out.push("");
 
+  emitRpcInterfaceDefinitions(out, resolvedInterfaces);
+
+  return out.join("\n");
+}
+
+export function emitRpcInterfaceDefinitions(
+  out: string[],
+  resolvedInterfaces: RpcResolvedInterfaceInfo[],
+): void {
   for (const resolvedInfo of resolvedInterfaces) {
     emitInterfaceCode(out, resolvedInfo);
   }
-
-  return out.join("\n");
 }
 
 function emitInterfaceCode(
@@ -234,7 +191,7 @@ function emitInterfaceCode(
     );
     // Encode params with cap table support (handles capability parameters)
     out.push(
-      `      const encoded = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params as Record<string, unknown>);`,
+      `      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params);`,
     );
     out.push("      let questionId: number | undefined;");
     out.push(
@@ -513,7 +470,7 @@ function emitServerMethodSwitch(
   for (const resolved of methods) {
     out.push(`${indent}  case ${resolved.method.codeOrder}: {`);
     out.push(
-      `${indent}    const decoded = ${resolved.params.codecConst}.decode(params);`,
+      `${indent}    const decoded = decodeStructMessageWithCaps(${resolved.params.descriptorConst}, params, ctx.paramsCapTable ?? []) as ${resolved.params.typeName};`,
     );
     out.push(
       `${indent}    const result = await server[${
@@ -521,7 +478,7 @@ function emitServerMethodSwitch(
       }](decoded, ctx);`,
     );
     out.push(
-      `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result as Record<string, unknown>);`,
+      `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result);`,
     );
     out.push(`${indent}    if (encoded.capTable.length > 0) {`);
     out.push(
