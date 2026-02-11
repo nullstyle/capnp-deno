@@ -5,12 +5,15 @@
  */
 
 import { normalizeTransportError, TransportError } from "../../errors.ts";
-import { CapnpFrameFramer, type CapnpFrameFramerOptions } from "../framer.ts";
+import {
+  CapnpFrameFramer,
+  type CapnpFrameFramerOptions,
+} from "../wire/framer.ts";
 import {
   emitObservabilityEvent,
   type RpcObservability,
-} from "../../observability.ts";
-import type { RpcTransport } from "../transport.ts";
+} from "../../observability/observability.ts";
+import type { RpcTransport } from "./transport.ts";
 
 /**
  * Configuration options for {@link TcpServerListener}.

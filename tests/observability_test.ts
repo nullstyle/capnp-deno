@@ -3,7 +3,7 @@ import {
   getErrorType,
   type RpcObservability,
   type RpcObservabilityEvent,
-} from "../src/observability.ts";
+} from "../src/observability/observability.ts";
 import { assert, assertEquals } from "./test_utils.ts";
 
 // ---------------------------------------------------------------------------

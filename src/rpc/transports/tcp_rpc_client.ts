@@ -16,12 +16,12 @@ import type {
   RpcClientCallOptions,
   RpcClientCallResult,
   RpcFinishOptions,
-} from "../client.ts";
+} from "../session/client.ts";
 import {
   type CapabilityPointer,
   RpcServerBridge,
   type RpcServerDispatch,
-} from "../server.ts";
+} from "../server/bridge.ts";
 import {
   decodeReturnFrame,
   decodeRpcMessageTag,
@@ -37,7 +37,7 @@ import {
   RPC_MESSAGE_TAG_RETURN,
   type RpcReturnMessage,
 } from "../wire.ts";
-import type { RpcTransport } from "../transport.ts";
+import type { RpcTransport } from "./transport.ts";
 import { TcpTransport, type TcpTransportOptions } from "./tcp.ts";
 
 interface PendingReturnWaiter {

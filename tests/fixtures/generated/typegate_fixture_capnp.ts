@@ -19,7 +19,7 @@ export type {
   RpcServerDispatch,
   RpcServerDispatchResult,
   RpcServerRegistry,
-} from "../../../src/rpc/runtime.ts";
+} from "../../../src/rpc/server/rpc_runtime.ts";
 import type {
   AnyPointerValue,
   CapabilityPointer,

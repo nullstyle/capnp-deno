@@ -39,7 +39,7 @@ export {
   type RpcServerDispatch as RpcGeneratedServerDispatch,
   type RpcServerDispatchResult,
   type RpcServerRegistry,
-} from "./src/rpc/runtime.ts";
+} from "./src/rpc/server/rpc_runtime.ts";
 
 // === High-Level Service API (DX V2) ===
 
@@ -60,19 +60,19 @@ export {
   type TcpServeHandle,
   type TcpServeOptions,
   type TcpServiceApi,
-} from "./src/rpc/service.ts";
+} from "./src/rpc/server/service.ts";
 
 // === Session & Transport ===
 
-export { type RpcTransport } from "./src/rpc/transport.ts";
+export { type RpcTransport } from "./src/rpc/transports/transport.ts";
 
-export { type RpcRuntimeModuleOptions } from "./src/rpc/runtime_module.ts";
+export { type RpcRuntimeModuleOptions } from "./src/rpc/server/runtime_module.ts";
 
 export {
   RpcSession,
   type RpcSessionCreateOptions,
   type RpcSessionOptions,
-} from "./src/rpc/session.ts";
+} from "./src/rpc/session/session.ts";
 
 // === RPC Client ===
 
@@ -89,7 +89,7 @@ export {
   SessionRpcClientTransport,
   type SessionRpcClientTransportCreateOptions,
   type SessionRpcClientTransportOptions,
-} from "./src/rpc/client.ts";
+} from "./src/rpc/session/client.ts";
 
 // === RPC Server ===
 
@@ -106,12 +106,12 @@ export {
   type ServerMiddlewareContext,
   type ServerMiddlewareDispatchResult,
   type ServerMiddlewareFrameResult,
-} from "./src/rpc/server.ts";
+} from "./src/rpc/server/bridge.ts";
 
 export {
   RpcServerCallInterceptTransport,
   RpcServerOutboundClient,
-} from "./src/rpc/server_outbound.ts";
+} from "./src/rpc/server/outbound.ts";
 
 export {
   RpcServerRuntime,
@@ -124,7 +124,7 @@ export {
   type RpcServerRuntimeRootRegistrationOptions,
   type RpcServerRuntimeWarning,
   type RpcServerRuntimeWarningCode,
-} from "./src/rpc/server_runtime.ts";
+} from "./src/rpc/server/runtime.ts";
 
 // === Middleware (Client & Server) ===
 
@@ -145,7 +145,7 @@ export {
   type RpcMetricsMiddlewareOptions,
   type RpcMetricsSnapshot,
   type RpcTransportMiddleware,
-} from "./src/rpc/middleware.ts";
+} from "./src/rpc/transports/middleware.ts";
 
 // === Transports (TCP, WebSocket, MessagePort) ===
 
@@ -179,13 +179,13 @@ export {
   type RpcConnectionPoolStats,
   type RpcConnectionPoolWarmupStats,
   withConnection,
-} from "./src/rpc/connection_pool.ts";
+} from "./src/rpc/transports/connection_pool.ts";
 
 export {
   CircuitBreaker,
   type CircuitBreakerOptions,
   type CircuitBreakerState,
-} from "./src/rpc/circuit_breaker.ts";
+} from "./src/rpc/transports/circuit_breaker.ts";
 
 export {
   connectWithReconnect,
@@ -195,7 +195,7 @@ export {
   type ReconnectPolicy,
   type ReconnectPolicyContext,
   type ReconnectRetryInfo,
-} from "./src/rpc/reconnect.ts";
+} from "./src/rpc/transports/reconnect.ts";
 
 export {
   type ReconnectCapabilityRemapContext,
@@ -203,7 +203,7 @@ export {
   type ReconnectingRpcClientTransportOptions,
   type RpcCapabilityPointer,
   type RpcClientTransportLike,
-} from "./src/rpc/reconnecting_client.ts";
+} from "./src/rpc/transports/reconnecting_client.ts";
 
 export {
   connectTcpTransportWithReconnect,
@@ -213,7 +213,7 @@ export {
   type ConnectWebSocketTransportWithReconnectOptions,
   createRpcSessionWithReconnect,
   type CreateRpcSessionWithReconnectOptions,
-} from "./src/rpc/reconnect_wrappers.ts";
+} from "./src/rpc/transports/reconnect_wrappers.ts";
 
 // === Streaming ===
 
@@ -222,7 +222,7 @@ export {
   type StreamCallFn,
   type StreamSender,
   type StreamSenderOptions,
-} from "./src/rpc/streaming.ts";
+} from "./src/rpc/session/streaming.ts";
 
 // === Observability ===
 
@@ -232,9 +232,9 @@ export {
   type RpcObservabilityAttributes,
   type RpcObservabilityAttributeValue,
   type RpcObservabilityEvent,
-} from "./src/observability.ts";
+} from "./src/observability/observability.ts";
 
 export {
   createDenoOtelObservability,
   type DenoOtelObservabilityOptions,
-} from "./src/deno_otel.ts";
+} from "./src/observability/deno_otel.ts";

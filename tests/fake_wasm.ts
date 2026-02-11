@@ -1,4 +1,4 @@
-import type { CapnpWasmExports } from "../src/abi.ts";
+import type { CapnpWasmExports } from "../src/wasm/abi.ts";
 
 type PeerState = {
   queue: Uint8Array[];

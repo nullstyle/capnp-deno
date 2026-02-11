@@ -10,7 +10,7 @@ import {
   WasmAbi,
   WasmAbiError,
   type WasmAbiOptions,
-} from "../abi.ts";
+} from "../wasm/abi.ts";
 
 type SerdeExportFn = (
   input_ptr: number,

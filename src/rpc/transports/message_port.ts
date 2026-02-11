@@ -8,12 +8,12 @@ import { normalizeTransportError, TransportError } from "../../errors.ts";
 import {
   type CapnpFrameLimitsOptions,
   validateCapnpFrame,
-} from "../frame_limits.ts";
+} from "../wire/frame_limits.ts";
 import {
   emitObservabilityEvent,
   type RpcObservability,
-} from "../../observability.ts";
-import type { RpcTransport } from "../transport.ts";
+} from "../../observability/observability.ts";
+import type { RpcTransport } from "./transport.ts";
 
 interface PendingOutboundFrame {
   frame: Uint8Array;

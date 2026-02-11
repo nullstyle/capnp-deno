@@ -21,7 +21,7 @@ deno task verify
 deno task test:unit
 
 # Single test file
-deno test tests/session_test.ts
+deno test tests/session/session_test.ts
 
 # Socket integration tests (needs --allow-net)
 deno task test:integration
@@ -74,21 +74,26 @@ before processing the next.
 
 ### Key Source Files
 
-| Path                                                     | Role                                                   |
-| -------------------------------------------------------- | ------------------------------------------------------ |
-| `src/abi.ts`                                             | WASM ABI wrapper (memory, alloc/free, peer calls)      |
-| `src/wasm_peer.ts`                                       | Host-side peer lifecycle                               |
-| `src/rpc/session.ts`                                     | RPC session management                                 |
-| `src/rpc/client.ts`                                      | Client transport + pipeline                            |
-| `src/rpc/server.ts`                                      | Server bridge + dispatch                               |
-| `src/rpc/server_runtime.ts`                              | Combines session + bridge into a runtime               |
-| `src/rpc/wire.ts`                                        | Canonical RPC wire encode/decode/router barrel         |
-| `src/rpc/middleware.ts`                                  | Frame-level middleware (logging, metrics, size limits) |
-| `src/rpc/transports/`                                    | TCP, WebSocket, MessagePort adapters                   |
-| `src/rpc/reconnect.ts`, `src/rpc/reconnecting_client.ts` | Reconnection + resilience                              |
-| `src/rpc/connection_pool.ts`                             | Multi-connection pool                                  |
-| `src/rpc/framer.ts`                                      | Cap'n Proto segment framing                            |
-| `tools/capnpc-deno/`                                     | Schema→TypeScript code generator                       |
+| Path                                | Role                                                  |
+| ----------------------------------- | ----------------------------------------------------- |
+| `src/wasm/abi.ts`                   | WASM ABI wrapper (memory, alloc/free, peer calls)     |
+| `src/wasm/peer.ts`                  | Host-side peer lifecycle                              |
+| `src/wasm/load.ts`                  | WASM module loading                                   |
+| `src/observability/observability.ts` | Observability helpers (spans, metrics)                |
+| `src/rpc/session/session.ts`        | RPC session management                                |
+| `src/rpc/session/client.ts`         | Client transport + pipeline                           |
+| `src/rpc/session/streaming.ts`      | Streaming RPC support                                 |
+| `src/rpc/server/bridge.ts`          | Server bridge + dispatch                              |
+| `src/rpc/server/runtime.ts`         | Combines session + bridge into a runtime              |
+| `src/rpc/server/outbound.ts`        | Server outbound message handling                      |
+| `src/rpc/server/service.ts`         | Service registry + dispatch                           |
+| `src/rpc/wire.ts`                   | Canonical RPC wire encode/decode/router barrel        |
+| `src/rpc/transports/middleware.ts`   | Frame-level middleware (logging, metrics, size limits) |
+| `src/rpc/transports/`              | TCP, WebSocket, MessagePort adapters                  |
+| `src/rpc/transports/reconnect.ts`   | Reconnection + resilience                             |
+| `src/rpc/transports/connection_pool.ts` | Multi-connection pool                              |
+| `src/rpc/wire/framer.ts`            | Cap'n Proto segment framing                           |
+| `tools/capnpc-deno/`               | Schema→TypeScript code generator                      |
 
 ### Code Generation Pipeline
 
@@ -102,10 +107,15 @@ before processing the next.
 ### Test Organization
 
 - `tests/fake_wasm.ts` — mock WASM for fast unit tests (no build step needed)
-- `tests/*_test.ts` — unit tests (run with `deno task test:unit`)
-- `tests/socket_integration_test.ts` — TCP/WS loopback tests
-- `tests/real_wasm_*_test.ts` — actual WASM runtime tests (require `build-wasm`)
 - `tests/test_utils.ts` — shared test helpers
+- `tests/codegen/` — codegen test suite (`capnpc_deno_*_test.ts`)
+- `tests/encoding/` — serialization tests
+- `tests/server/` — server bridge, runtime, service, outbound tests
+- `tests/session/` — client, session, streaming, lifecycle tests
+- `tests/transports/` — TCP, WebSocket, MessagePort, reconnect, pool tests
+- `tests/wire/` — framer, frame limits, wire encode/decode tests
+- `tests/wasm/` — ABI, peer, and real WASM runtime tests (require `build-wasm`)
+- `tests/transports/socket_integration_test.ts` — TCP/WS loopback tests
 
 ## Code Style
 
