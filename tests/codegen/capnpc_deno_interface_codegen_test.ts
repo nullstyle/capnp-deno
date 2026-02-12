@@ -52,6 +52,25 @@ function fileByPath(
   return file;
 }
 
+function encodeSingleU32StructMessage(value: number): Uint8Array {
+  const out = new Uint8Array(24);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, 2, true);
+  view.setBigUint64(8, 0x0000_0001_0000_0000n, true);
+  view.setUint32(16, value >>> 0, true);
+  return out;
+}
+
+function decodeSingleU32StructMessage(frame: Uint8Array): number {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const root = view.getBigUint64(8, true);
+  const offset = Number((root >> 2n) & 0x3fff_ffffn);
+  const signedOffset = (offset & (1 << 29)) !== 0 ? offset - (1 << 30) : offset;
+  const dataWord = 1 + signedOffset;
+  return view.getUint32(8 + (dataWord * 8), true);
+}
+
 Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   const request = parseCodeGeneratorRequest(decodeBase64(REQUEST_BASE64));
   const pingerNode = request.nodes.find((node) =>
@@ -211,6 +230,25 @@ Deno.test("capnpc-deno generated interface/anyPointer codec roundtrips", async (
   >;
   assertEquals(decoded2.cap, null);
   assertEquals((decoded2.dyn as Record<string, unknown>).kind, "null");
+
+  const value3 = {
+    cap: null,
+    dyn: {
+      kind: "message",
+      message: encodeSingleU32StructMessage(123),
+    },
+  };
+  const decoded3 = codec.decode(codec.encode(value3)) as Record<
+    string,
+    unknown
+  >;
+  assertEquals(decoded3.cap, null);
+  assertEquals((decoded3.dyn as Record<string, unknown>).kind, "message");
+  const dynMessage = (decoded3.dyn as {
+    message?: Uint8Array;
+  }).message;
+  assert(dynMessage instanceof Uint8Array, "expected anyPointer message bytes");
+  assertEquals(decodeSingleU32StructMessage(dynMessage), 123);
 });
 
 Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods", async () => {

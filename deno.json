@@ -32,6 +32,7 @@
     "lint": "deno lint",
     "check": "deno check src/*.ts src/encoding/*.ts src/wasm/*.ts src/observability/*.ts src/rpc/*.ts src/rpc/server/*.ts src/rpc/session/*.ts src/rpc/wire/*.ts src/rpc/transports/*.ts tools/capnpc-deno/*.ts tests/*.ts tests/**/*_test.ts bench/*.ts examples/*/*.ts examples/*/gen/*.ts",
     "check:generated": "deno check tests/fixtures/generated/typegate_fixture_capnp.ts tests/fixtures/generated/typegate_fixture_rpc.ts",
+    "check:rpc-schema-sync": "bash scripts/check_rpc_schema_sync.sh",
     "check:tools": "deno check tools/capnpc-deno/*.ts",
     "codegen": "deno run --allow-read --allow-write --allow-run=capnp tools/capnpc-deno/main.ts",
     "codegen:compile": "bash scripts/build_capnpc_deno_binary.sh",
@@ -48,7 +49,7 @@
     "bench": "deno task bench:fast",
     "bench:fast": "deno bench bench --ignore=bench/real_wasm_bench.ts",
     "bench:real": "deno bench bench/real_wasm_bench.ts --allow-read=generated/capnp_deno.wasm",
-    "verify": "deno task fmt && deno task lint && deno task check && deno task check:generated && deno task test:unit",
+    "verify": "deno task fmt && deno task lint && deno task check && deno task check:generated && deno task check:rpc-schema-sync && deno task test:unit",
     "verify:integration": "deno task test:integration",
     "verify:real": "deno task build:wasm && deno task smoke:real && deno task test:integration && deno task test:real"
   },

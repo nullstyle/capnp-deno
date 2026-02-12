@@ -17,6 +17,7 @@ import type {
 import { toCamelCase, toOutputPath } from "./emitter_helpers.ts";
 import { emitTypesModule } from "./emitter_types_module.ts";
 import { emitMetaModule } from "./emitter_meta.ts";
+import { emitRpcWireConstantsModule } from "./emitter_rpc_wire_constants.ts";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -60,6 +61,22 @@ export function generateTypescriptFiles(
       contents: metaContents,
       sourceFilename: requested.filename,
     });
+
+    const wireConstantsContents = emitRpcWireConstantsModule(
+      fileNode,
+      nodeById,
+    );
+    if (wireConstantsContents !== null) {
+      const wireConstantsPath = toOutputPath(
+        requested.filename,
+        "wire_constants",
+      );
+      files.push({
+        path: wireConstantsPath,
+        contents: wireConstantsContents,
+        sourceFilename: requested.filename,
+      });
+    }
   }
   return files;
 }

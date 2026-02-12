@@ -15,6 +15,9 @@ check:
 check-generated:
     deno task check:generated
 
+check-rpc-schema-sync:
+    deno task check:rpc-schema-sync
+
 check-tools:
     deno task check:tools
 
@@ -85,6 +88,9 @@ vendor-test:
 
 regen-rpc-fixtures:
     cd vendor/capnp-zig && zig build gen-rpc-fixtures > ../../tests/fixtures/rpc_frames.ts
+
+regen-rpc-ts:
+    ./scripts/generate_rpc_schema_ts.sh
 
 codegen-schema schema out="generated":
     deno task codegen generate --schema {{schema}} --out {{out}}

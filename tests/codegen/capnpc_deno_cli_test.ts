@@ -891,6 +891,17 @@ Deno.test("capnpc-deno CLI schema mapping handles root precedence and suffix fal
   );
   assertEquals(typesSuffix, "nested/person_types.ts");
 
+  const wireConstantsSuffix = mapGeneratedFilePath(
+    {
+      path: "person_wire_constants.ts",
+      sourceFilename: "schemas/nested/person.capnp",
+      contents: "// person wire constants",
+    },
+    "schema",
+    ["schemas"],
+  );
+  assertEquals(wireConstantsSuffix, "nested/person_wire_constants.ts");
+
   const emptyStem = mapGeneratedFilePath(
     {
       path: "root_meta.ts",

@@ -6,6 +6,10 @@
  */
 
 import { ProtocolError } from "../../errors.ts";
+import {
+  decodeAnyPointerMessageFromReader,
+  MessageReader as RuntimeMessageReader,
+} from "../../encoding/runtime.ts";
 import type {
   PointerLocation,
   RpcBootstrapRequest,
@@ -20,9 +24,41 @@ import type {
   StructRef,
 } from "./types.ts";
 import {
+  BOOTSTRAP_QUESTION_ID_BYTE_OFFSET,
+  CALL_INTERFACE_ID_BYTE_OFFSET,
+  CALL_METHOD_ID_BYTE_OFFSET,
+  CALL_PARAMS_POINTER_INDEX,
+  CALL_QUESTION_ID_BYTE_OFFSET,
+  CALL_TARGET_POINTER_INDEX,
+  CAP_DESCRIPTOR_ID_BYTE_OFFSET,
+  CAP_DESCRIPTOR_TAG_BYTE_OFFSET,
   EMPTY_STRUCT_MESSAGE,
+  EXCEPTION_REASON_POINTER_INDEX,
+  FINISH_FLAGS_BYTE_OFFSET,
+  FINISH_QUESTION_ID_BYTE_OFFSET,
+  FINISH_RELEASE_RESULT_CAPS_FLAG_MASK,
+  FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK,
+  MESSAGE_TARGET_IMPORTED_CAP_BYTE_OFFSET,
+  MESSAGE_TARGET_PROMISED_ANSWER_POINTER_INDEX,
+  MESSAGE_TARGET_TAG_BYTE_OFFSET,
+  MESSAGE_UNION_TAG_BYTE_OFFSET,
+  MESSAGE_VARIANT_POINTER_INDEX,
+  PAYLOAD_CAP_TABLE_POINTER_INDEX,
+  PAYLOAD_CONTENT_POINTER_INDEX,
+  PROMISED_ANSWER_OP_GET_POINTER_FIELD_BYTE_OFFSET,
+  PROMISED_ANSWER_OP_TAG_BYTE_OFFSET,
+  PROMISED_ANSWER_QUESTION_ID_BYTE_OFFSET,
+  PROMISED_ANSWER_TRANSFORM_POINTER_INDEX,
+  RELEASE_ID_BYTE_OFFSET,
+  RELEASE_REFERENCE_COUNT_BYTE_OFFSET,
+  RETURN_ANSWER_ID_BYTE_OFFSET,
+  RETURN_FLAGS_BYTE_OFFSET,
+  RETURN_NO_FINISH_NEEDED_FLAG_MASK,
+  RETURN_RELEASE_PARAM_CAPS_FLAG_MASK,
+  RETURN_TAG_BYTE_OFFSET,
   RETURN_TAG_EXCEPTION,
   RETURN_TAG_RESULTS,
+  RETURN_VARIANT_POINTER_INDEX,
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_MESSAGE_TAG_BOOTSTRAP,
@@ -42,7 +78,6 @@ import {
 import {
   decodeStructListPointer,
   decodeStructPointer,
-  extractPointerContentAsMessage,
   pointerWordIndex,
   readTextFromPointer,
 } from "./pointers.ts";
@@ -50,6 +85,19 @@ import {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+function asProtocolError(
+  error: unknown,
+  context: string,
+): ProtocolError {
+  if (error instanceof ProtocolError) {
+    return error;
+  }
+  if (error instanceof Error) {
+    return new ProtocolError(`${context}: ${error.message}`, { cause: error });
+  }
+  return new ProtocolError(`${context}: ${String(error)}`, { cause: error });
+}
 
 function decodeCapTableFromPayload(
   table: SegmentTable,
@@ -71,8 +119,8 @@ function decodeCapTableFromPayload(
   for (let i = 0; i < capList.elementCount; i += 1) {
     itemRef.startWord = capList.elementsStartWord + (i * stride);
     capTable.push({
-      tag: readU16InStruct(table, itemRef, 0),
-      id: readU32InStruct(table, itemRef, 4),
+      tag: readU16InStruct(table, itemRef, CAP_DESCRIPTOR_TAG_BYTE_OFFSET),
+      id: readU32InStruct(table, itemRef, CAP_DESCRIPTOR_ID_BYTE_OFFSET),
     });
   }
 
@@ -95,7 +143,11 @@ function decodePromisedAnswerTransform(
       dataWordCount: list.dataWordCount,
       pointerCount: list.pointerCount,
     };
-    const tag = readU16InStruct(table, elemRef, 0);
+    const tag = readU16InStruct(
+      table,
+      elemRef,
+      PROMISED_ANSWER_OP_TAG_BYTE_OFFSET,
+    );
     if (tag === RPC_PROMISED_ANSWER_OP_TAG_NOOP) {
       out.push({ tag: RPC_PROMISED_ANSWER_OP_TAG_NOOP });
       continue;
@@ -103,7 +155,11 @@ function decodePromisedAnswerTransform(
     if (tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
       out.push({
         tag: RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
-        pointerIndex: readU16InStruct(table, elemRef, 2),
+        pointerIndex: readU16InStruct(
+          table,
+          elemRef,
+          PROMISED_ANSWER_OP_GET_POINTER_FIELD_BYTE_OFFSET,
+        ),
       });
       continue;
     }
@@ -116,17 +172,25 @@ function decodeCallTarget(
   table: SegmentTable,
   target: StructRef,
 ): RpcCallTarget {
-  const targetTag = readU16InStruct(table, target, 4);
+  const targetTag = readU16InStruct(
+    table,
+    target,
+    MESSAGE_TARGET_TAG_BYTE_OFFSET,
+  );
   if (targetTag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
     return {
       tag: RPC_CALL_TARGET_TAG_IMPORTED_CAP,
-      importedCap: readU32InStruct(table, target, 0),
+      importedCap: readU32InStruct(
+        table,
+        target,
+        MESSAGE_TARGET_IMPORTED_CAP_BYTE_OFFSET,
+      ),
     };
   }
   if (targetTag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
     const promisedRef = decodeStructPointer(
       table,
-      pointerWordIndex(target, 0),
+      pointerWordIndex(target, MESSAGE_TARGET_PROMISED_ANSWER_POINTER_INDEX),
     );
     if (!promisedRef) {
       throw new ProtocolError("call target promisedAnswer pointer is null");
@@ -134,10 +198,17 @@ function decodeCallTarget(
     return {
       tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
       promisedAnswer: {
-        questionId: readU32InStruct(table, promisedRef, 0),
+        questionId: readU32InStruct(
+          table,
+          promisedRef,
+          PROMISED_ANSWER_QUESTION_ID_BYTE_OFFSET,
+        ),
         transform: decodePromisedAnswerTransform(
           table,
-          pointerWordIndex(promisedRef, 0),
+          pointerWordIndex(
+            promisedRef,
+            PROMISED_ANSWER_TRANSFORM_POINTER_INDEX,
+          ),
         ),
       },
     };
@@ -149,10 +220,10 @@ function decodeReturnFlags(table: SegmentTable, ret: StructRef): {
   releaseParamCaps: boolean;
   noFinishNeeded: boolean;
 } {
-  const flags = readU32InStruct(table, ret, 4);
+  const flags = readU32InStruct(table, ret, RETURN_FLAGS_BYTE_OFFSET);
   return {
-    releaseParamCaps: (flags & 0x1) === 0,
-    noFinishNeeded: (flags & 0x2) !== 0,
+    releaseParamCaps: (flags & RETURN_RELEASE_PARAM_CAPS_FLAG_MASK) === 0,
+    noFinishNeeded: (flags & RETURN_NO_FINISH_NEEDED_FLAG_MASK) !== 0,
   };
 }
 
@@ -172,7 +243,7 @@ export function decodeRpcMessageTag(frame: Uint8Array): number {
   const table = segmentsFromFrame(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  return readU16InStruct(table, root, 0);
+  return readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET);
 }
 
 /**
@@ -188,13 +259,23 @@ export function decodeBootstrapRequestFrame(
   const table = segmentsFromFrame(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_BOOTSTRAP) {
+  if (
+    readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET) !==
+      RPC_MESSAGE_TAG_BOOTSTRAP
+  ) {
     throw new ProtocolError("rpc message is not bootstrap");
   }
-  const bootstrap = decodeStructPointer(table, pointerWordIndex(root, 0));
+  const bootstrap = decodeStructPointer(
+    table,
+    pointerWordIndex(root, MESSAGE_VARIANT_POINTER_INDEX),
+  );
   if (!bootstrap) throw new ProtocolError("bootstrap payload pointer is null");
   return {
-    questionId: readU32InStruct(table, bootstrap, 0),
+    questionId: readU32InStruct(
+      table,
+      bootstrap,
+      BOOTSTRAP_QUESTION_ID_BYTE_OFFSET,
+    ),
   };
 }
 
@@ -207,38 +288,59 @@ export function decodeBootstrapRequestFrame(
  */
 export function decodeCallRequestFrame(frame: Uint8Array): RpcCallRequest {
   const table = segmentsFromFrame(frame);
+  const runtimeReader = new RuntimeMessageReader(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_CALL) {
+  if (
+    readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET) !==
+      RPC_MESSAGE_TAG_CALL
+  ) {
     throw new ProtocolError("rpc message is not call");
   }
-  const call = decodeStructPointer(table, pointerWordIndex(root, 0));
+  const call = decodeStructPointer(
+    table,
+    pointerWordIndex(root, MESSAGE_VARIANT_POINTER_INDEX),
+  );
   if (!call) throw new ProtocolError("call payload pointer is null");
-  const target = decodeStructPointer(table, pointerWordIndex(call, 0));
+  const target = decodeStructPointer(
+    table,
+    pointerWordIndex(call, CALL_TARGET_POINTER_INDEX),
+  );
   if (!target) throw new ProtocolError("call target pointer is null");
   const callTarget = decodeCallTarget(table, target);
 
   let paramsContent = new Uint8Array(EMPTY_STRUCT_MESSAGE);
   let paramsCapTable: RpcCapDescriptor[] = [];
-  const payload = decodeStructPointer(table, pointerWordIndex(call, 1));
+  const payload = decodeStructPointer(
+    table,
+    pointerWordIndex(call, CALL_PARAMS_POINTER_INDEX),
+  );
   if (payload) {
-    paramsContent = new Uint8Array(
-      extractPointerContentAsMessage(
-        table,
-        pointerWordIndex(payload, 0),
-        "decodeCallRequestFrame",
-      ),
+    const contentPointer = pointerWordIndex(
+      payload,
+      PAYLOAD_CONTENT_POINTER_INDEX,
     );
+    try {
+      paramsContent = new Uint8Array(
+        decodeAnyPointerMessageFromReader(
+          runtimeReader,
+          contentPointer.segmentId,
+          contentPointer.wordIndex,
+        ),
+      );
+    } catch (error) {
+      throw asProtocolError(error, "invalid call params content pointer");
+    }
     paramsCapTable = decodeCapTableFromPayload(
       table,
-      pointerWordIndex(payload, 1),
+      pointerWordIndex(payload, PAYLOAD_CAP_TABLE_POINTER_INDEX),
     );
   }
 
   const request: RpcCallRequest = {
-    questionId: readU32InStruct(table, call, 0),
-    interfaceId: readU64InStruct(table, call, 8),
-    methodId: readU16InStruct(table, call, 4),
+    questionId: readU32InStruct(table, call, CALL_QUESTION_ID_BYTE_OFFSET),
+    interfaceId: readU64InStruct(table, call, CALL_INTERFACE_ID_BYTE_OFFSET),
+    methodId: readU16InStruct(table, call, CALL_METHOD_ID_BYTE_OFFSET),
     target: callTarget,
     paramsContent,
     paramsCapTable,
@@ -260,16 +362,23 @@ export function decodeFinishFrame(frame: Uint8Array): RpcFinishRequest {
   const table = segmentsFromFrame(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_FINISH) {
+  if (
+    readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET) !==
+      RPC_MESSAGE_TAG_FINISH
+  ) {
     throw new ProtocolError("rpc message is not finish");
   }
-  const finish = decodeStructPointer(table, pointerWordIndex(root, 0));
+  const finish = decodeStructPointer(
+    table,
+    pointerWordIndex(root, MESSAGE_VARIANT_POINTER_INDEX),
+  );
   if (!finish) throw new ProtocolError("finish payload pointer is null");
-  const flags = readU32InStruct(table, finish, 4);
+  const flags = readU32InStruct(table, finish, FINISH_FLAGS_BYTE_OFFSET);
   return {
-    questionId: readU32InStruct(table, finish, 0),
-    releaseResultCaps: (flags & 0x1) === 0,
-    requireEarlyCancellation: (flags & 0x2) === 0,
+    questionId: readU32InStruct(table, finish, FINISH_QUESTION_ID_BYTE_OFFSET),
+    releaseResultCaps: (flags & FINISH_RELEASE_RESULT_CAPS_FLAG_MASK) === 0,
+    requireEarlyCancellation:
+      (flags & FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK) === 0,
   };
 }
 
@@ -284,14 +393,24 @@ export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
   const table = segmentsFromFrame(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_RELEASE) {
+  if (
+    readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET) !==
+      RPC_MESSAGE_TAG_RELEASE
+  ) {
     throw new ProtocolError("rpc message is not release");
   }
-  const release = decodeStructPointer(table, pointerWordIndex(root, 0));
+  const release = decodeStructPointer(
+    table,
+    pointerWordIndex(root, MESSAGE_VARIANT_POINTER_INDEX),
+  );
   if (!release) throw new ProtocolError("release payload pointer is null");
   return {
-    id: readU32InStruct(table, release, 0),
-    referenceCount: readU32InStruct(table, release, 4),
+    id: readU32InStruct(table, release, RELEASE_ID_BYTE_OFFSET),
+    referenceCount: readU32InStruct(
+      table,
+      release,
+      RELEASE_REFERENCE_COUNT_BYTE_OFFSET,
+    ),
   };
 }
 
@@ -304,24 +423,37 @@ export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
  */
 export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   const table = segmentsFromFrame(frame);
+  const runtimeReader = new RuntimeMessageReader(frame);
   const root = decodeStructPointer(table, { segmentId: 0, wordIndex: 0 });
   if (!root) throw new ProtocolError("rpc message root pointer is null");
-  if (readU16InStruct(table, root, 0) !== RPC_MESSAGE_TAG_RETURN) {
+  if (
+    readU16InStruct(table, root, MESSAGE_UNION_TAG_BYTE_OFFSET) !==
+      RPC_MESSAGE_TAG_RETURN
+  ) {
     throw new ProtocolError("rpc message is not return");
   }
-  const ret = decodeStructPointer(table, pointerWordIndex(root, 0));
+  const ret = decodeStructPointer(
+    table,
+    pointerWordIndex(root, MESSAGE_VARIANT_POINTER_INDEX),
+  );
   if (!ret) throw new ProtocolError("return payload pointer is null");
 
-  const answerId = readU32InStruct(table, ret, 0);
-  const tag = readU16InStruct(table, ret, 6);
+  const answerId = readU32InStruct(table, ret, RETURN_ANSWER_ID_BYTE_OFFSET);
+  const tag = readU16InStruct(table, ret, RETURN_TAG_BYTE_OFFSET);
   const returnFlags = decodeReturnFlags(table, ret);
 
   if (tag === RETURN_TAG_EXCEPTION) {
-    const ex = decodeStructPointer(table, pointerWordIndex(ret, 0));
+    const ex = decodeStructPointer(
+      table,
+      pointerWordIndex(ret, RETURN_VARIANT_POINTER_INDEX),
+    );
     if (!ex) {
       throw new ProtocolError("return.exception payload pointer is null");
     }
-    const reason = readTextFromPointer(table, pointerWordIndex(ex, 0)) ?? "";
+    const reason = readTextFromPointer(
+      table,
+      pointerWordIndex(ex, EXCEPTION_REASON_POINTER_INDEX),
+    ) ?? "";
     return {
       kind: "exception",
       answerId,
@@ -332,21 +464,32 @@ export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   }
 
   if (tag === RETURN_TAG_RESULTS) {
-    const payload = decodeStructPointer(table, pointerWordIndex(ret, 0));
+    const payload = decodeStructPointer(
+      table,
+      pointerWordIndex(ret, RETURN_VARIANT_POINTER_INDEX),
+    );
     const capTable: RpcCapDescriptor[] = [];
     let contentBytes = new Uint8Array(EMPTY_STRUCT_MESSAGE);
 
     if (payload) {
-      contentBytes = new Uint8Array(
-        extractPointerContentAsMessage(
-          table,
-          pointerWordIndex(payload, 0),
-          "decodeReturnFrame",
-        ),
+      const contentPointer = pointerWordIndex(
+        payload,
+        PAYLOAD_CONTENT_POINTER_INDEX,
       );
+      try {
+        contentBytes = new Uint8Array(
+          decodeAnyPointerMessageFromReader(
+            runtimeReader,
+            contentPointer.segmentId,
+            contentPointer.wordIndex,
+          ),
+        );
+      } catch (error) {
+        throw asProtocolError(error, "invalid return results content pointer");
+      }
       const payloadCapTable = decodeCapTableFromPayload(
         table,
-        pointerWordIndex(payload, 1),
+        pointerWordIndex(payload, PAYLOAD_CAP_TABLE_POINTER_INDEX),
       );
       capTable.push(...payloadCapTable);
     }

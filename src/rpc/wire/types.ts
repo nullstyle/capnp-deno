@@ -1,8 +1,7 @@
 /**
  * Shared interfaces, type aliases, and constants for the Cap'n Proto RPC wire format.
  *
- * This module is dependency-free within rpc_wire/ and provides the canonical
- * type definitions consumed by encoding, decoding, and routing modules.
+ * Wire-level constants are generated from `rpc.capnp` schema artifacts.
  *
  * @module
  */
@@ -16,60 +15,7 @@ export const MASK_29 = 0x1fff_ffffn;
 export const MASK_30 = 0x3fff_ffffn;
 export const POINTER_OFFSET_MASK = MASK_30 << 2n;
 export const FAR_POINTER_HOP_LIMIT = 8;
-
-/** Tag value for a Cap'n Proto RPC Call message. */
-export const RPC_MESSAGE_TAG_CALL = 2;
-/** Tag value for a Cap'n Proto RPC Return message. */
-export const RPC_MESSAGE_TAG_RETURN = 3;
-/** Tag value for a Cap'n Proto RPC Finish message. */
-export const RPC_MESSAGE_TAG_FINISH = 4;
-/** Tag value for a Cap'n Proto RPC Resolve message (Level 1). */
-export const RPC_MESSAGE_TAG_RESOLVE = 5;
-/** Tag value for a Cap'n Proto RPC Release message. */
-export const RPC_MESSAGE_TAG_RELEASE = 6;
-/** Tag value for a Cap'n Proto RPC Bootstrap message. */
-export const RPC_MESSAGE_TAG_BOOTSTRAP = 8;
-/** Tag value for a Cap'n Proto RPC Disembargo message (Level 1). */
-export const RPC_MESSAGE_TAG_DISEMBARGO = 13;
-
-/** Call target tag: the target is an imported capability. */
-export const RPC_CALL_TARGET_TAG_IMPORTED_CAP = 0;
-/** Call target tag: the target is a promised answer (pipelined call). */
-export const RPC_CALL_TARGET_TAG_PROMISED_ANSWER = 1;
-
-/** PromisedAnswer transform op: no-op (identity). */
-export const RPC_PROMISED_ANSWER_OP_TAG_NOOP = 0;
-/** PromisedAnswer transform op: follow a pointer field in the result struct. */
-export const RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD = 1;
-
-export const RETURN_TAG_RESULTS = 0;
-export const RETURN_TAG_EXCEPTION = 1;
-
-export const CAP_DESCRIPTOR_TAG_SENDER_HOSTED = 1;
-export const CAP_DESCRIPTOR_TAG_RECEIVER_HOSTED = 3;
-
-/**
- * A minimal Cap'n Proto message containing an empty struct.
- * Used as the default content for payloads that carry no data.
- */
-export const EMPTY_STRUCT_MESSAGE: Uint8Array = new Uint8Array([
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x01,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-]);
+export * from "../gen/capnp/rpc_wire_constants.ts";
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -134,11 +80,13 @@ export interface RpcPromisedAnswerTarget {
 /** Discriminated union of call target types: imported capability or promised answer. */
 export type RpcCallTarget =
   | {
-    tag: typeof RPC_CALL_TARGET_TAG_IMPORTED_CAP;
+    tag:
+      typeof import("../gen/capnp/rpc_wire_constants.ts").RPC_CALL_TARGET_TAG_IMPORTED_CAP;
     importedCap: number;
   }
   | {
-    tag: typeof RPC_CALL_TARGET_TAG_PROMISED_ANSWER;
+    tag:
+      typeof import("../gen/capnp/rpc_wire_constants.ts").RPC_CALL_TARGET_TAG_PROMISED_ANSWER;
     promisedAnswer: RpcPromisedAnswerTarget;
   };
 

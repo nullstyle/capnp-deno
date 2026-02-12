@@ -18,7 +18,8 @@ export interface CapabilityPointer {
  */
 export type AnyPointerValue =
   | { kind: "null" }
-  | { kind: "interface"; capabilityIndex: number };
+  | { kind: "interface"; capabilityIndex: number }
+  | { kind: "message"; message: Uint8Array };
 
 export type PrimitiveTypeKind =
   | "void"
@@ -139,6 +140,7 @@ export const TYPE_ANY_POINTER: AnyPointerTypeDescriptor = {
 export const WORD_BYTES = 8;
 export const MASK_30 = 0x3fff_ffffn;
 export const MASK_29 = 0x1fff_ffffn;
+export const POINTER_OFFSET_MASK = MASK_30 << 2n;
 export const TEXT_ENCODER: TextEncoder = new TextEncoder();
 export const TEXT_DECODER: TextDecoder = new TextDecoder();
 
@@ -296,6 +298,9 @@ export function asAnyPointerValue(value: unknown): AnyPointerValue {
   if (value === null || value === undefined) {
     return { kind: "null" };
   }
+  if (value instanceof Uint8Array) {
+    return { kind: "message", message: value };
+  }
   if (typeof value === "object" && value !== null) {
     const record = value as Record<string, unknown>;
     if (record.kind === "null") return { kind: "null" };
@@ -303,6 +308,13 @@ export function asAnyPointerValue(value: unknown): AnyPointerValue {
       const index = capabilityIndexFrom(record.capabilityIndex);
       if (index === null) return { kind: "null" };
       return { kind: "interface", capabilityIndex: index };
+    }
+    if (record.kind === "message") {
+      const message = record.message;
+      if (!(message instanceof Uint8Array)) {
+        throw new Error("invalid anyPointer message payload");
+      }
+      return { kind: "message", message };
     }
   }
   const index = capabilityIndexFrom(value);
@@ -719,7 +731,11 @@ export class MessageReader {
   }
 
   readResolvedPointerWord(segmentId: number, pointerWord: number): bigint {
-    return this.resolvePointer(segmentId, pointerWord).word;
+    return this.readResolvedPointer(segmentId, pointerWord).word;
+  }
+
+  readResolvedPointer(segmentId: number, pointerWord: number): ResolvedPointer {
+    return this.resolvePointer(segmentId, pointerWord);
   }
 
   pointerWordIndex(structRef: StructRef, pointerOffset: number): number {
@@ -914,9 +930,11 @@ export class MessageReader {
       const pad0Offset = Number((pad0 >> 3n) & MASK_29);
       const pad0SegmentId = Number((pad0 >> 32n) & 0xffff_ffffn);
 
-      currentSegmentId = pad0SegmentId;
-      currentPointerWord = pad0Offset;
-      word = this.readWord(landingSegmentId, landingPadWord + 1);
+      return {
+        segmentId: pad0SegmentId,
+        pointerWord: pad0Offset - 1,
+        word: this.readWord(landingSegmentId, landingPadWord + 1),
+      };
     }
 
     throw new Error("far pointer chain exceeded maximum hop count");
@@ -1408,6 +1426,324 @@ export function decodeDataField(
   }
 }
 
+function listDataWordsForAnyPointerCopy(
+  elementSize: number,
+  elementCount: number,
+): number {
+  switch (elementSize) {
+    case 0:
+      return 0;
+    case 1:
+      return Math.ceil(elementCount / 64);
+    case 2:
+      return bytesToWords(elementCount);
+    case 3:
+      return bytesToWords(elementCount * 2);
+    case 4:
+      return bytesToWords(elementCount * 4);
+    case 5:
+    case 6:
+      return elementCount;
+    default:
+      throw new Error(
+        "unsupported list element size for anyPointer copy: " + elementSize,
+      );
+  }
+}
+
+function copyWordsForAnyPointer(
+  reader: MessageReader,
+  srcSegmentId: number,
+  srcStartWord: number,
+  wordCount: number,
+  builder: MessageBuilder,
+  dstStartWord: number,
+): void {
+  for (let i = 0; i < wordCount; i += 1) {
+    builder.writeWord(
+      dstStartWord + i,
+      reader.readWord(srcSegmentId, srcStartWord + i),
+    );
+  }
+}
+
+function deepCopyAnyPointerSubPointer(
+  reader: MessageReader,
+  srcSegmentId: number,
+  srcPointerWord: number,
+  builder: MessageBuilder,
+  dstPointerWord: number,
+): void {
+  const word = reader.readWord(srcSegmentId, srcPointerWord);
+  const kind = Number(word & 0x3n);
+  if (word === 0n) {
+    builder.writeWord(dstPointerWord, 0n);
+    return;
+  }
+  if (kind === 2) {
+    const resolved = reader.readResolvedPointer(srcSegmentId, srcPointerWord);
+    deepCopyAnyPointerPointer(
+      reader,
+      resolved.segmentId,
+      resolved.pointerWord,
+      resolved.word,
+      builder,
+      dstPointerWord,
+    );
+    return;
+  }
+  deepCopyAnyPointerPointer(
+    reader,
+    srcSegmentId,
+    srcPointerWord,
+    word,
+    builder,
+    dstPointerWord,
+  );
+}
+
+function deepCopyAnyPointerPointer(
+  reader: MessageReader,
+  srcSegmentId: number,
+  srcPointerWord: number,
+  pointerWord: bigint,
+  builder: MessageBuilder,
+  dstPointerWord: number,
+): void {
+  if (pointerWord === 0n) {
+    builder.writeWord(dstPointerWord, 0n);
+    return;
+  }
+
+  const kind = Number(pointerWord & 0x3n);
+  if (kind === 3) {
+    builder.writeWord(dstPointerWord, pointerWord);
+    return;
+  }
+  if (kind === 2) {
+    throw new Error("deep anyPointer copy received unresolved far pointer");
+  }
+
+  if (kind === 0) {
+    const offsetWords = signed30((pointerWord >> 2n) & MASK_30);
+    const dataWordCount = Number((pointerWord >> 32n) & 0xffffn);
+    const pointerCount = Number((pointerWord >> 48n) & 0xffffn);
+    const srcStartWord = srcPointerWord + 1 + offsetWords;
+    const totalWords = dataWordCount + pointerCount;
+    const dstStartWord = builder.allocWords(totalWords);
+    const dstOffset = dstStartWord - (dstPointerWord + 1);
+    const rebased = (pointerWord & ~POINTER_OFFSET_MASK) |
+      (encodeSigned30(dstOffset) << 2n);
+    builder.writeWord(dstPointerWord, rebased);
+
+    if (dataWordCount > 0) {
+      copyWordsForAnyPointer(
+        reader,
+        srcSegmentId,
+        srcStartWord,
+        dataWordCount,
+        builder,
+        dstStartWord,
+      );
+    }
+
+    for (let i = 0; i < pointerCount; i += 1) {
+      deepCopyAnyPointerSubPointer(
+        reader,
+        srcSegmentId,
+        srcStartWord + dataWordCount + i,
+        builder,
+        dstStartWord + dataWordCount + i,
+      );
+    }
+    return;
+  }
+
+  const offsetWords = signed30((pointerWord >> 2n) & MASK_30);
+  const elementSize = Number((pointerWord >> 32n) & 0x7n);
+  const elementCount = Number((pointerWord >> 35n) & 0x1fff_ffffn);
+  const srcListStartWord = srcPointerWord + 1 + offsetWords;
+
+  if (elementSize === 7) {
+    const tagWord = reader.readWord(srcSegmentId, srcListStartWord);
+    const tagKind = Number(tagWord & 0x3n);
+    if (tagKind !== 0) {
+      throw new Error(
+        "invalid inline composite tag kind for anyPointer copy: " + tagKind,
+      );
+    }
+    const tagElementCount = Number((tagWord >> 2n) & MASK_30);
+    const tagDataWordCount = Number((tagWord >> 32n) & 0xffffn);
+    const tagPointerCount = Number((tagWord >> 48n) & 0xffffn);
+    const stride = tagDataWordCount + tagPointerCount;
+    const wordsInElements = tagElementCount * stride;
+
+    const dstListStartWord = builder.allocWords(1 + wordsInElements);
+    const dstOffset = dstListStartWord - (dstPointerWord + 1);
+    const rebased = 1n |
+      (encodeSigned30(dstOffset) << 2n) |
+      (BigInt(elementSize) << 32n) |
+      (BigInt(elementCount) << 35n);
+    builder.writeWord(dstPointerWord, rebased);
+    builder.writeWord(dstListStartWord, tagWord);
+
+    for (let i = 0; i < tagElementCount; i += 1) {
+      const srcElementStart = srcListStartWord + 1 + (i * stride);
+      const dstElementStart = dstListStartWord + 1 + (i * stride);
+
+      if (tagDataWordCount > 0) {
+        copyWordsForAnyPointer(
+          reader,
+          srcSegmentId,
+          srcElementStart,
+          tagDataWordCount,
+          builder,
+          dstElementStart,
+        );
+      }
+
+      for (let j = 0; j < tagPointerCount; j += 1) {
+        deepCopyAnyPointerSubPointer(
+          reader,
+          srcSegmentId,
+          srcElementStart + tagDataWordCount + j,
+          builder,
+          dstElementStart + tagDataWordCount + j,
+        );
+      }
+    }
+    return;
+  }
+
+  if (elementSize === 6) {
+    const dstListStartWord = builder.allocWords(elementCount);
+    const dstOffset = dstListStartWord - (dstPointerWord + 1);
+    const rebased = 1n |
+      (encodeSigned30(dstOffset) << 2n) |
+      (BigInt(elementSize) << 32n) |
+      (BigInt(elementCount) << 35n);
+    builder.writeWord(dstPointerWord, rebased);
+
+    for (let i = 0; i < elementCount; i += 1) {
+      deepCopyAnyPointerSubPointer(
+        reader,
+        srcSegmentId,
+        srcListStartWord + i,
+        builder,
+        dstListStartWord + i,
+      );
+    }
+    return;
+  }
+
+  const dataWords = listDataWordsForAnyPointerCopy(elementSize, elementCount);
+  const dstListStartWord = builder.allocWords(dataWords);
+  const dstOffset = dstListStartWord - (dstPointerWord + 1);
+  const rebased = 1n |
+    (encodeSigned30(dstOffset) << 2n) |
+    (BigInt(elementSize) << 32n) |
+    (BigInt(elementCount) << 35n);
+  builder.writeWord(dstPointerWord, rebased);
+  if (dataWords > 0) {
+    copyWordsForAnyPointer(
+      reader,
+      srcSegmentId,
+      srcListStartWord,
+      dataWords,
+      builder,
+      dstListStartWord,
+    );
+  }
+}
+
+export function encodeAnyPointerMessageIntoBuilder(
+  builder: {
+    allocWords(count: number): number;
+    writeWord(wordIndex: number, value: bigint): void;
+  },
+  pointerWord: number,
+  message: Uint8Array,
+): void {
+  const flatMessage = decodeAnyPointerMessageFromReader(
+    new MessageReader(message),
+    0,
+    0,
+  );
+  const flatSegment = flatMessage.subarray(8);
+  const segmentWordCount = Math.floor(flatSegment.byteLength / WORD_BYTES);
+  if (segmentWordCount === 0) {
+    builder.writeWord(pointerWord, 0n);
+    return;
+  }
+  const segmentView = new DataView(
+    flatSegment.buffer,
+    flatSegment.byteOffset,
+    flatSegment.byteLength,
+  );
+  const sourceRootPointer = segmentView.getBigUint64(0, true);
+  if (sourceRootPointer === 0n) {
+    builder.writeWord(pointerWord, 0n);
+    return;
+  }
+  const copiedStartWord = builder.allocWords(segmentWordCount);
+  for (let i = 0; i < segmentWordCount; i += 1) {
+    builder.writeWord(
+      copiedStartWord + i,
+      segmentView.getBigUint64(i * WORD_BYTES, true),
+    );
+  }
+  builder.writeWord(
+    pointerWord,
+    rebaseCopiedAnyPointerRootPointer(
+      sourceRootPointer,
+      copiedStartWord,
+      pointerWord,
+    ),
+  );
+}
+
+export function decodeAnyPointerMessageFromReader(
+  reader: MessageReader,
+  segmentId: number,
+  pointerWord: number,
+): Uint8Array {
+  const resolved = reader.readResolvedPointer(segmentId, pointerWord);
+  const builder = new MessageBuilder();
+  deepCopyAnyPointerPointer(
+    reader,
+    resolved.segmentId,
+    resolved.pointerWord,
+    resolved.word,
+    builder,
+    0,
+  );
+  return builder.toMessageBytes();
+}
+
+function rebaseCopiedAnyPointerRootPointer(
+  sourceRootPointer: bigint,
+  copiedStartWord: number,
+  destinationPointerWord: number,
+): bigint {
+  if (sourceRootPointer === 0n) return 0n;
+  const kind = Number(sourceRootPointer & 0x3n);
+  if (kind === 0 || kind === 1) {
+    const sourceOffset = signed30((sourceRootPointer >> 2n) & MASK_30);
+    const sourceTargetWord = 1 + sourceOffset;
+    const destinationTargetWord = copiedStartWord + sourceTargetWord;
+    const destinationOffset = destinationTargetWord -
+      (destinationPointerWord + 1);
+    return (sourceRootPointer & ~POINTER_OFFSET_MASK) |
+      (encodeSigned30(destinationOffset) << 2n);
+  }
+  if (kind === 2) {
+    throw new Error(
+      "anyPointer message encoding does not support far-pointer roots",
+    );
+  }
+  return sourceRootPointer;
+}
+
 export function encodePointerField(
   builder: MessageBuilder,
   pointerWord: number,
@@ -1466,10 +1802,14 @@ export function encodePointerField(
         builder.writeWord(pointerWord, 0n);
         return;
       }
-      builder.writeWord(
-        pointerWord,
-        encodeCapabilityPointerWord(pointer.capabilityIndex),
-      );
+      if (pointer.kind === "interface") {
+        builder.writeWord(
+          pointerWord,
+          encodeCapabilityPointerWord(pointer.capabilityIndex),
+        );
+        return;
+      }
+      encodeAnyPointerMessageIntoBuilder(builder, pointerWord, pointer.message);
       return;
     }
     default:
@@ -1502,19 +1842,24 @@ export function decodePointerField(
       return decodeCapabilityPointerWord(word);
     }
     case "anyPointer": {
-      const word = reader.readResolvedPointerWord(segmentId, pointerWord);
-      if (word === 0n) return { kind: "null" } as AnyPointerValue;
-      const kind = Number(word & 0x3n);
+      const resolved = reader.readResolvedPointer(segmentId, pointerWord);
+      if (resolved.word === 0n) return { kind: "null" } as AnyPointerValue;
+      const kind = Number(resolved.word & 0x3n);
       if (kind === 3) {
-        const cap = decodeCapabilityPointerWord(word);
+        const cap = decodeCapabilityPointerWord(resolved.word);
         return {
           kind: "interface",
           capabilityIndex: cap.capabilityIndex,
         } as AnyPointerValue;
       }
-      throw new Error(
-        "anyPointer decode currently supports null or interface pointers only",
-      );
+      return {
+        kind: "message",
+        message: decodeAnyPointerMessageFromReader(
+          reader,
+          segmentId,
+          pointerWord,
+        ),
+      } as AnyPointerValue;
     }
     default:
       throw new Error("unexpected data type in pointer field: " + type.kind);

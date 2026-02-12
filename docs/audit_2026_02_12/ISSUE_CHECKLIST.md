@@ -9,13 +9,16 @@ Legend: `[ ]` not started, `[-]` in progress, `[x]` done
 - [x] All `P3` fixes implemented (tests where appropriate)
 - [x] `deno task verify` passes
 - [x] `deno task verify:integration` passes
-- [x] Audit docs updated with final outcomes (commit hash reference pending user commit)
+- [x] Audit docs updated with final outcomes (commit hash reference pending user
+      commit)
 
 ## 1. F-001 (`P1`) RpcSession start/close race (`src/rpc/session/session.ts`)
 
 - [x] Add post-await closed-state guard in `start()` before `#started = true`
-- [x] Ensure transport/peer cleanup semantics remain consistent when close wins race
-- [x] Add regression test: concurrent `start()` + `close()` with delayed transport start
+- [x] Ensure transport/peer cleanup semantics remain consistent when close wins
+      race
+- [x] Add regression test: concurrent `start()` + `close()` with delayed
+      transport start
 - [x] Assert final state is not `started=true` after close wins
 - [x] Run targeted tests for session lifecycle suite
 
@@ -37,7 +40,8 @@ Legend: `[ ]` not started, `[-]` in progress, `[x]` done
 ## 4. F-004 (`P2`) CircuitBreaker half-open probe concurrency (`src/rpc/transports/circuit_breaker.ts`)
 
 - [x] Introduce single-probe gate for `HALF_OPEN` state
-- [x] Define behavior for concurrent callers during probe (fail fast) and document
+- [x] Define behavior for concurrent callers during probe (fail fast) and
+      document
 - [x] Add regression test asserting only one probe executes concurrently
 - [x] Re-run full `circuit_breaker_test.ts`
 
@@ -55,7 +59,38 @@ Legend: `[ ]` not started, `[-]` in progress, `[x]` done
 - [x] Add stress/regression test for timeout-only churn scenario
 - [x] Re-run connection pool test suites
 
-## 7. Closeout
+## 7. F-007 (`P1`) AnyPointer payload decode contract (`src/rpc/wire/decode.ts`)
+
+- [x] Normalize runtime AnyPointer decode failures to `ProtocolError` in
+      `decodeCallRequestFrame`
+- [x] Normalize runtime AnyPointer decode failures to `ProtocolError` in
+      `decodeReturnFrame`
+- [x] Re-run corrupted-payload fuzz coverage
+- [x] Re-run `just ci-fast` and confirm full fast gate passes
+
+## 8. F-008 (`P2`) Broken real-WASM smoke task path (`deno.json`)
+
+- [x] Restore `examples/smoke_real_wasm/smoke_real_wasm.ts` expected by
+      `deno task smoke:real`
+- [x] Add matching `examples/smoke_real_wasm/smoke_real_wasm.capnp`
+- [x] Re-run `just ci-real` and confirm end-to-end real gate passes
+
+## 9. F-009 (`P3`) RPC schema regen script portability (`scripts/generate_rpc_schema_ts.sh`)
+
+- [x] Replace macOS-only `sed -i ''` usage with cross-platform in-place logic
+- [x] Re-run `./scripts/generate_rpc_schema_ts.sh` to validate the updated flow
+
+## 10. F-010 (`P2`) Remove runtime schema-derivation layer (`src/rpc/wire/types.ts`)
+
+- [x] Add generated RPC wire constants module:
+      `src/rpc/gen/capnp/rpc_wire_constants.ts`
+- [x] Teach `capnpc-deno` to emit `rpc_wire_constants.ts` for
+      `rpc.capnp` and include it in generated `mod.ts`
+- [x] Replace `src/rpc/wire/types.ts` schema introspection helpers with direct
+      constant re-export from generated module
+- [x] Re-run `just ci-fast`, `just ci-integration`, and `just ci-real`
+
+## 11. Closeout
 
 - [x] Update `docs/audit_2026_02_12/DEVLOG.md` with each fix/test result
 - [x] Mark completed items in this checklist

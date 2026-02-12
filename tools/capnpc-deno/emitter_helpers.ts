@@ -31,7 +31,12 @@ export interface InterfaceInfo {
 
 export const FIELD_NO_DISCRIMINANT = 0xffff;
 
-export type OutputModuleSuffix = "capnp" | "rpc" | "types" | "meta";
+export type OutputModuleSuffix =
+  | "capnp"
+  | "rpc"
+  | "types"
+  | "meta"
+  | "wire_constants";
 
 export function toOutputPath(
   filename: string,

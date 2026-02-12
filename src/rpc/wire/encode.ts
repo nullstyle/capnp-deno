@@ -6,6 +6,7 @@
  */
 
 import { ProtocolError } from "../../errors.ts";
+import { encodeAnyPointerMessageIntoBuilder } from "../../encoding/runtime.ts";
 
 // Cached TextEncoder instance to avoid repeated allocation on the encode path.
 const TEXT_ENCODER = new TextEncoder();
@@ -21,10 +22,68 @@ import type {
   RpcReturnResultsFrameRequest,
 } from "./types.ts";
 import {
+  BOOTSTRAP_DATA_WORD_COUNT,
+  BOOTSTRAP_POINTER_COUNT,
+  BOOTSTRAP_QUESTION_ID_BYTE_OFFSET,
+  CALL_DATA_WORD_COUNT,
+  CALL_INTERFACE_ID_BYTE_OFFSET,
+  CALL_METHOD_ID_BYTE_OFFSET,
+  CALL_PARAMS_POINTER_INDEX,
+  CALL_POINTER_COUNT,
+  CALL_QUESTION_ID_BYTE_OFFSET,
+  CALL_SEND_RESULTS_TO_TAG_BYTE_OFFSET,
+  CALL_SEND_RESULTS_TO_TAG_CALLER,
+  CALL_TARGET_POINTER_INDEX,
+  CAP_DESCRIPTOR_DATA_WORD_COUNT,
+  CAP_DESCRIPTOR_ID_BYTE_OFFSET,
+  CAP_DESCRIPTOR_POINTER_COUNT,
+  CAP_DESCRIPTOR_TAG_BYTE_OFFSET,
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   EMPTY_STRUCT_MESSAGE,
+  EXCEPTION_DATA_WORD_COUNT,
+  EXCEPTION_POINTER_COUNT,
+  EXCEPTION_REASON_POINTER_INDEX,
+  FINISH_DATA_WORD_COUNT,
+  FINISH_FLAGS_BYTE_OFFSET,
+  FINISH_POINTER_COUNT,
+  FINISH_QUESTION_ID_BYTE_OFFSET,
+  FINISH_RELEASE_RESULT_CAPS_FLAG_MASK,
+  FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK,
+  MESSAGE_DATA_WORD_COUNT,
+  MESSAGE_POINTER_COUNT,
+  MESSAGE_TARGET_DATA_WORD_COUNT,
+  MESSAGE_TARGET_IMPORTED_CAP_BYTE_OFFSET,
+  MESSAGE_TARGET_POINTER_COUNT,
+  MESSAGE_TARGET_PROMISED_ANSWER_POINTER_INDEX,
+  MESSAGE_TARGET_TAG_BYTE_OFFSET,
+  MESSAGE_UNION_TAG_BYTE_OFFSET,
+  MESSAGE_VARIANT_POINTER_INDEX,
+  PAYLOAD_CAP_TABLE_POINTER_INDEX,
+  PAYLOAD_CONTENT_POINTER_INDEX,
+  PAYLOAD_DATA_WORD_COUNT,
+  PAYLOAD_POINTER_COUNT,
+  PROMISED_ANSWER_DATA_WORD_COUNT,
+  PROMISED_ANSWER_OP_DATA_WORD_COUNT,
+  PROMISED_ANSWER_OP_GET_POINTER_FIELD_BYTE_OFFSET,
+  PROMISED_ANSWER_OP_POINTER_COUNT,
+  PROMISED_ANSWER_OP_TAG_BYTE_OFFSET,
+  PROMISED_ANSWER_POINTER_COUNT,
+  PROMISED_ANSWER_QUESTION_ID_BYTE_OFFSET,
+  PROMISED_ANSWER_TRANSFORM_POINTER_INDEX,
+  RELEASE_DATA_WORD_COUNT,
+  RELEASE_ID_BYTE_OFFSET,
+  RELEASE_POINTER_COUNT,
+  RELEASE_REFERENCE_COUNT_BYTE_OFFSET,
+  RETURN_ANSWER_ID_BYTE_OFFSET,
+  RETURN_DATA_WORD_COUNT,
+  RETURN_FLAGS_BYTE_OFFSET,
+  RETURN_NO_FINISH_NEEDED_FLAG_MASK,
+  RETURN_POINTER_COUNT,
+  RETURN_RELEASE_PARAM_CAPS_FLAG_MASK,
+  RETURN_TAG_BYTE_OFFSET,
   RETURN_TAG_EXCEPTION,
   RETURN_TAG_RESULTS,
+  RETURN_VARIANT_POINTER_INDEX,
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_MESSAGE_TAG_BOOTSTRAP,
@@ -36,18 +95,7 @@ import {
   RPC_PROMISED_ANSWER_OP_TAG_NOOP,
   WORD_BYTES,
 } from "./types.ts";
-import {
-  encodeSigned30,
-  ensureU16,
-  ensureU32,
-  ensureU64,
-  readWord,
-  segmentsFromFrame,
-} from "./segments.ts";
-import {
-  extractPointerContentAsMessage,
-  rebaseCopiedRootPointer,
-} from "./pointers.ts";
+import { encodeSigned30, ensureU16, ensureU32, ensureU64 } from "./segments.ts";
 
 // ---------------------------------------------------------------------------
 // MessageBuilder
@@ -249,6 +297,14 @@ function inlineCompositeTag(
   return tag;
 }
 
+function pointerWordIndex(
+  structWord: number,
+  dataWordCount: number,
+  pointerIndex: number,
+): number {
+  return structWord + dataWordCount + pointerIndex;
+}
+
 function encodeCapTable(
   builder: MessageBuilder,
   listPointerWord: number,
@@ -256,18 +312,34 @@ function encodeCapTable(
 ): void {
   const entries = capTable ?? [];
   const count = entries.length;
-  const strideWords = 2; // CapDescriptor { data=1, ptr=1 }
+  const strideWords = CAP_DESCRIPTOR_DATA_WORD_COUNT +
+    CAP_DESCRIPTOR_POINTER_COUNT;
   const tagWord = builder.allocWords(1 + (count * strideWords));
   // For inline-composite lists, the list pointer count field stores the
   // payload word count (excluding the tag), not the element count.
   builder.setListPointer(listPointerWord, tagWord, 7, count * strideWords);
-  builder.writeWord(tagWord, inlineCompositeTag(count, 1, 1));
+  builder.writeWord(
+    tagWord,
+    inlineCompositeTag(
+      count,
+      CAP_DESCRIPTOR_DATA_WORD_COUNT,
+      CAP_DESCRIPTOR_POINTER_COUNT,
+    ),
+  );
 
   for (let i = 0; i < count; i += 1) {
     const entry = entries[i];
     const elemWord = tagWord + 1 + (i * strideWords);
-    builder.writeU16(elemWord, 0, ensureU16(entry.tag, `capTable[${i}].tag`));
-    builder.writeU32(elemWord, 4, ensureU32(entry.id, `capTable[${i}].id`));
+    builder.writeU16(
+      elemWord,
+      CAP_DESCRIPTOR_TAG_BYTE_OFFSET,
+      ensureU16(entry.tag, `capTable[${i}].tag`),
+    );
+    builder.writeU32(
+      elemWord,
+      CAP_DESCRIPTOR_ID_BYTE_OFFSET,
+      ensureU32(entry.id, `capTable[${i}].id`),
+    );
   }
 }
 
@@ -278,9 +350,9 @@ function encodeReturnFlags(
   noFinishNeeded: boolean,
 ): void {
   let flags = 0;
-  if (!releaseParamCaps) flags |= 0x1;
-  if (noFinishNeeded) flags |= 0x2;
-  builder.writeU32(returnWord, 4, flags);
+  if (!releaseParamCaps) flags |= RETURN_RELEASE_PARAM_CAPS_FLAG_MASK;
+  if (noFinishNeeded) flags |= RETURN_NO_FINISH_NEEDED_FLAG_MASK;
+  builder.writeU32(returnWord, RETURN_FLAGS_BYTE_OFFSET, flags);
 }
 
 function writePayloadContentPointer(
@@ -290,40 +362,16 @@ function writePayloadContentPointer(
   fieldName: string,
 ): void {
   const payload = normalizePayloadContent(content, fieldName);
-
-  // Parse the content as a (potentially multi-segment) frame and flatten
-  // it into a single-segment message via deep copy.  This resolves any
-  // far pointers in the content so the resulting segment is self-contained.
-  const table = segmentsFromFrame(payload);
-  const flatMessage = extractPointerContentAsMessage(
-    table,
-    { segmentId: 0, wordIndex: 0 },
-    fieldName,
-  );
-
-  // Read the root pointer from the flat single-segment message.
-  // The flat message has an 8-byte header followed by segment data.
-  const flatSegment = flatMessage.subarray(8);
-  if (flatSegment.byteLength === 0) {
-    builder.writeWord(contentPointerWord, 0n);
-    return;
+  try {
+    encodeAnyPointerMessageIntoBuilder(builder, contentPointerWord, payload);
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new ProtocolError(
+        `${fieldName} is not a valid framed Cap'n Proto message: ${error.message}`,
+      );
+    }
+    throw error;
   }
-  const flatRoot = readWord(flatSegment, 0);
-  if (flatRoot === 0n) {
-    builder.writeWord(contentPointerWord, 0n);
-    return;
-  }
-
-  // Copy the entire flat segment into the builder and rebase the root pointer.
-  const copiedStart = builder.allocWords(flatSegment.byteLength / WORD_BYTES);
-  builder.copyWords(copiedStart, flatSegment);
-  const rebasedRoot = rebaseCopiedRootPointer(
-    flatRoot,
-    copiedStart,
-    contentPointerWord,
-    fieldName,
-  );
-  builder.writeWord(contentPointerWord, rebasedRoot);
 }
 
 function normalizeCallTarget(
@@ -401,7 +449,14 @@ function encodePromisedAnswerTransform(
 
   const tagWord = builder.allocWords(1 + ops.length);
   builder.setListPointer(pointerWord, tagWord, 7, ops.length);
-  builder.writeWord(tagWord, inlineCompositeTag(ops.length, 1, 0));
+  builder.writeWord(
+    tagWord,
+    inlineCompositeTag(
+      ops.length,
+      PROMISED_ANSWER_OP_DATA_WORD_COUNT,
+      PROMISED_ANSWER_OP_POINTER_COUNT,
+    ),
+  );
   for (let i = 0; i < ops.length; i += 1) {
     const normalized = normalizePromisedAnswerOp(
       ops[i],
@@ -410,13 +465,13 @@ function encodePromisedAnswerTransform(
     const elemWord = tagWord + 1 + i;
     builder.writeU16(
       elemWord,
-      0,
+      PROMISED_ANSWER_OP_TAG_BYTE_OFFSET,
       ensureU16(normalized.tag, "promisedAnswer op tag"),
     );
     if (normalized.tag === RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD) {
       builder.writeU16(
         elemWord,
-        2,
+        PROMISED_ANSWER_OP_GET_POINTER_FIELD_BYTE_OFFSET,
         ensureU16(normalized.pointerIndex!, "promisedAnswer op pointerIndex"),
       );
     }
@@ -440,13 +495,39 @@ export function encodeBootstrapRequestFrame(
   const questionId = ensureU32(request.questionId, "questionId");
   const builder = new MessageBuilder();
 
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_BOOTSTRAP);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_BOOTSTRAP,
+  );
 
-  const bootstrapWord = builder.allocWords(2); // Bootstrap { data=1, ptrs=1 }
-  builder.setStructPointer(messageWord + 1, bootstrapWord, 1, 1);
-  builder.writeU32(bootstrapWord, 0, questionId);
+  const bootstrapWord = builder.allocWords(
+    BOOTSTRAP_DATA_WORD_COUNT + BOOTSTRAP_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    bootstrapWord,
+    BOOTSTRAP_DATA_WORD_COUNT,
+    BOOTSTRAP_POINTER_COUNT,
+  );
+  builder.writeU32(
+    bootstrapWord,
+    BOOTSTRAP_QUESTION_ID_BYTE_OFFSET,
+    questionId,
+  );
 
   return builder.toMessageBytes();
 }
@@ -493,50 +574,133 @@ export function encodeCallRequestFrame(
 
   const builder = new MessageBuilder();
 
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_CALL);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_CALL,
+  );
 
-  const callWord = builder.allocWords(6); // Call { data=3, ptrs=3 }
-  builder.setStructPointer(messageWord + 1, callWord, 3, 3);
-  builder.writeU32(callWord, 0, questionId);
-  builder.writeU16(callWord, 4, methodId);
-  builder.writeU16(callWord, 6, 0); // sendResultsTo=caller
-  builder.writeU64(callWord + 1, 0, interfaceId);
+  const callWord = builder.allocWords(
+    CALL_DATA_WORD_COUNT + CALL_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    callWord,
+    CALL_DATA_WORD_COUNT,
+    CALL_POINTER_COUNT,
+  );
+  builder.writeU32(callWord, CALL_QUESTION_ID_BYTE_OFFSET, questionId);
+  builder.writeU16(callWord, CALL_METHOD_ID_BYTE_OFFSET, methodId);
+  builder.writeU16(
+    callWord,
+    CALL_SEND_RESULTS_TO_TAG_BYTE_OFFSET,
+    CALL_SEND_RESULTS_TO_TAG_CALLER,
+  );
+  builder.writeU64(
+    callWord + Math.floor(CALL_INTERFACE_ID_BYTE_OFFSET / WORD_BYTES),
+    CALL_INTERFACE_ID_BYTE_OFFSET % WORD_BYTES,
+    interfaceId,
+  );
 
-  const targetWord = builder.allocWords(2); // MessageTarget { data=1, ptrs=1 }
-  builder.setStructPointer(callWord + 3, targetWord, 1, 1);
+  const targetWord = builder.allocWords(
+    MESSAGE_TARGET_DATA_WORD_COUNT + MESSAGE_TARGET_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(callWord, CALL_DATA_WORD_COUNT, CALL_TARGET_POINTER_INDEX),
+    targetWord,
+    MESSAGE_TARGET_DATA_WORD_COUNT,
+    MESSAGE_TARGET_POINTER_COUNT,
+  );
   if (target.tag === RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
-    builder.writeU32(targetWord, 0, target.importedCap);
-    builder.writeU16(targetWord, 4, RPC_CALL_TARGET_TAG_IMPORTED_CAP);
+    builder.writeU32(
+      targetWord,
+      MESSAGE_TARGET_IMPORTED_CAP_BYTE_OFFSET,
+      target.importedCap,
+    );
+    builder.writeU16(
+      targetWord,
+      MESSAGE_TARGET_TAG_BYTE_OFFSET,
+      RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+    );
   } else {
-    builder.writeU16(targetWord, 4, RPC_CALL_TARGET_TAG_PROMISED_ANSWER);
-    const promisedWord = builder.allocWords(2); // PromisedAnswer { data=1, ptrs=1 }
-    builder.setStructPointer(targetWord + 1, promisedWord, 1, 1);
+    builder.writeU16(
+      targetWord,
+      MESSAGE_TARGET_TAG_BYTE_OFFSET,
+      RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+    );
+    const promisedWord = builder.allocWords(
+      PROMISED_ANSWER_DATA_WORD_COUNT + PROMISED_ANSWER_POINTER_COUNT,
+    );
+    builder.setStructPointer(
+      pointerWordIndex(
+        targetWord,
+        MESSAGE_TARGET_DATA_WORD_COUNT,
+        MESSAGE_TARGET_PROMISED_ANSWER_POINTER_INDEX,
+      ),
+      promisedWord,
+      PROMISED_ANSWER_DATA_WORD_COUNT,
+      PROMISED_ANSWER_POINTER_COUNT,
+    );
     builder.writeU32(
       promisedWord,
-      0,
+      PROMISED_ANSWER_QUESTION_ID_BYTE_OFFSET,
       target.promisedAnswer.questionId,
     );
     encodePromisedAnswerTransform(
       builder,
-      promisedWord + 1,
+      pointerWordIndex(
+        promisedWord,
+        PROMISED_ANSWER_DATA_WORD_COUNT,
+        PROMISED_ANSWER_TRANSFORM_POINTER_INDEX,
+      ),
       target.promisedAnswer.transform,
     );
   }
 
-  const payloadWord = builder.allocWords(2); // Payload { data=0, ptrs=2 }
-  builder.setStructPointer(callWord + 4, payloadWord, 0, 2);
+  const payloadWord = builder.allocWords(
+    PAYLOAD_DATA_WORD_COUNT + PAYLOAD_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(callWord, CALL_DATA_WORD_COUNT, CALL_PARAMS_POINTER_INDEX),
+    payloadWord,
+    PAYLOAD_DATA_WORD_COUNT,
+    PAYLOAD_POINTER_COUNT,
+  );
 
   writePayloadContentPointer(
     builder,
-    payloadWord,
+    pointerWordIndex(
+      payloadWord,
+      PAYLOAD_DATA_WORD_COUNT,
+      PAYLOAD_CONTENT_POINTER_INDEX,
+    ),
     request.paramsContent,
     "paramsContent",
   );
 
   // Keep an explicit cap-table list for deterministic frame layout.
-  encodeCapTable(builder, payloadWord + 1, request.paramsCapTable);
+  encodeCapTable(
+    builder,
+    pointerWordIndex(
+      payloadWord,
+      PAYLOAD_DATA_WORD_COUNT,
+      PAYLOAD_CAP_TABLE_POINTER_INDEX,
+    ),
+    request.paramsCapTable,
+  );
 
   return builder.toMessageBytes();
 }
@@ -558,18 +722,42 @@ export function encodeFinishFrame(request: {
   const requireEarlyCancellation = request.requireEarlyCancellation ?? false;
 
   const builder = new MessageBuilder();
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_FINISH);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_FINISH,
+  );
 
-  const finishWord = builder.allocWords(1); // Finish { data=1, ptrs=0 }
-  builder.setStructPointer(messageWord + 1, finishWord, 1, 0);
-  builder.writeU32(finishWord, 0, questionId);
+  const finishWord = builder.allocWords(
+    FINISH_DATA_WORD_COUNT + FINISH_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    finishWord,
+    FINISH_DATA_WORD_COUNT,
+    FINISH_POINTER_COUNT,
+  );
+  builder.writeU32(finishWord, FINISH_QUESTION_ID_BYTE_OFFSET, questionId);
 
   let flags = 0;
-  if (!releaseResultCaps) flags |= 0x1;
-  if (!requireEarlyCancellation) flags |= 0x2;
-  builder.writeU32(finishWord, 4, flags);
+  if (!releaseResultCaps) flags |= FINISH_RELEASE_RESULT_CAPS_FLAG_MASK;
+  if (!requireEarlyCancellation) {
+    flags |= FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK;
+  }
+  builder.writeU32(finishWord, FINISH_FLAGS_BYTE_OFFSET, flags);
 
   return builder.toMessageBytes();
 }
@@ -586,14 +774,40 @@ export function encodeReleaseFrame(request: RpcReleaseRequest): Uint8Array {
   const referenceCount = ensureU32(request.referenceCount, "referenceCount");
 
   const builder = new MessageBuilder();
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_RELEASE);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_RELEASE,
+  );
 
-  const releaseWord = builder.allocWords(1); // Release { data=1, ptrs=0 }
-  builder.setStructPointer(messageWord + 1, releaseWord, 1, 0);
-  builder.writeU32(releaseWord, 0, id);
-  builder.writeU32(releaseWord, 4, referenceCount);
+  const releaseWord = builder.allocWords(
+    RELEASE_DATA_WORD_COUNT + RELEASE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    releaseWord,
+    RELEASE_DATA_WORD_COUNT,
+    RELEASE_POINTER_COUNT,
+  );
+  builder.writeU32(releaseWord, RELEASE_ID_BYTE_OFFSET, id);
+  builder.writeU32(
+    releaseWord,
+    RELEASE_REFERENCE_COUNT_BYTE_OFFSET,
+    referenceCount,
+  );
 
   return builder.toMessageBytes();
 }
@@ -613,21 +827,71 @@ export function encodeReturnResultsFrame(
   const noFinishNeeded = request.noFinishNeeded ?? false;
 
   const builder = new MessageBuilder();
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_RETURN);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_RETURN,
+  );
 
-  const returnWord = builder.allocWords(3); // Return { data=2, ptrs=1 }
-  builder.setStructPointer(messageWord + 1, returnWord, 2, 1);
-  builder.writeU32(returnWord, 0, answerId);
+  const returnWord = builder.allocWords(
+    RETURN_DATA_WORD_COUNT + RETURN_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    returnWord,
+    RETURN_DATA_WORD_COUNT,
+    RETURN_POINTER_COUNT,
+  );
+  builder.writeU32(returnWord, RETURN_ANSWER_ID_BYTE_OFFSET, answerId);
   encodeReturnFlags(builder, returnWord, releaseParamCaps, noFinishNeeded);
-  builder.writeU16(returnWord, 6, RETURN_TAG_RESULTS);
+  builder.writeU16(returnWord, RETURN_TAG_BYTE_OFFSET, RETURN_TAG_RESULTS);
 
-  const payloadWord = builder.allocWords(2); // Payload { data=0, ptrs=2 }
-  builder.setStructPointer(returnWord + 2, payloadWord, 0, 2);
+  const payloadWord = builder.allocWords(
+    PAYLOAD_DATA_WORD_COUNT + PAYLOAD_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      returnWord,
+      RETURN_DATA_WORD_COUNT,
+      RETURN_VARIANT_POINTER_INDEX,
+    ),
+    payloadWord,
+    PAYLOAD_DATA_WORD_COUNT,
+    PAYLOAD_POINTER_COUNT,
+  );
 
-  writePayloadContentPointer(builder, payloadWord, request.content, "content");
-  encodeCapTable(builder, payloadWord + 1, request.capTable);
+  writePayloadContentPointer(
+    builder,
+    pointerWordIndex(
+      payloadWord,
+      PAYLOAD_DATA_WORD_COUNT,
+      PAYLOAD_CONTENT_POINTER_INDEX,
+    ),
+    request.content,
+    "content",
+  );
+  encodeCapTable(
+    builder,
+    pointerWordIndex(
+      payloadWord,
+      PAYLOAD_DATA_WORD_COUNT,
+      PAYLOAD_CAP_TABLE_POINTER_INDEX,
+    ),
+    request.capTable,
+  );
 
   return builder.toMessageBytes();
 }
@@ -648,23 +912,65 @@ export function encodeReturnExceptionFrame(
   const reasonBytes = TEXT_ENCODER.encode(request.reason);
 
   const builder = new MessageBuilder();
-  const messageWord = builder.allocWords(2); // Message { data=1, ptrs=1 }
-  builder.setStructPointer(0, messageWord, 1, 1);
-  builder.writeU16(messageWord, 0, RPC_MESSAGE_TAG_RETURN);
+  const messageWord = builder.allocWords(
+    MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    0,
+    messageWord,
+    MESSAGE_DATA_WORD_COUNT,
+    MESSAGE_POINTER_COUNT,
+  );
+  builder.writeU16(
+    messageWord,
+    MESSAGE_UNION_TAG_BYTE_OFFSET,
+    RPC_MESSAGE_TAG_RETURN,
+  );
 
-  const returnWord = builder.allocWords(3); // Return { data=2, ptrs=1 }
-  builder.setStructPointer(messageWord + 1, returnWord, 2, 1);
-  builder.writeU32(returnWord, 0, answerId);
+  const returnWord = builder.allocWords(
+    RETURN_DATA_WORD_COUNT + RETURN_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      messageWord,
+      MESSAGE_DATA_WORD_COUNT,
+      MESSAGE_VARIANT_POINTER_INDEX,
+    ),
+    returnWord,
+    RETURN_DATA_WORD_COUNT,
+    RETURN_POINTER_COUNT,
+  );
+  builder.writeU32(returnWord, RETURN_ANSWER_ID_BYTE_OFFSET, answerId);
   encodeReturnFlags(builder, returnWord, releaseParamCaps, noFinishNeeded);
-  builder.writeU16(returnWord, 6, RETURN_TAG_EXCEPTION);
+  builder.writeU16(returnWord, RETURN_TAG_BYTE_OFFSET, RETURN_TAG_EXCEPTION);
 
-  const exWord = builder.allocWords(3); // Exception { data=1, ptrs=2 }
-  builder.setStructPointer(returnWord + 2, exWord, 1, 2);
+  const exWord = builder.allocWords(
+    EXCEPTION_DATA_WORD_COUNT + EXCEPTION_POINTER_COUNT,
+  );
+  builder.setStructPointer(
+    pointerWordIndex(
+      returnWord,
+      RETURN_DATA_WORD_COUNT,
+      RETURN_VARIANT_POINTER_INDEX,
+    ),
+    exWord,
+    EXCEPTION_DATA_WORD_COUNT,
+    EXCEPTION_POINTER_COUNT,
+  );
 
   const textElementCount = reasonBytes.byteLength + 1; // NUL-terminated Text.
   const textWordCount = Math.ceil(textElementCount / WORD_BYTES);
   const textWord = builder.allocWords(textWordCount);
-  builder.setListPointer(exWord + 1, textWord, 2, textElementCount);
+  builder.setListPointer(
+    pointerWordIndex(
+      exWord,
+      EXCEPTION_DATA_WORD_COUNT,
+      EXCEPTION_REASON_POINTER_INDEX,
+    ),
+    textWord,
+    2,
+    textElementCount,
+  );
   builder.writeBytes(textWord, 0, reasonBytes);
 
   return builder.toMessageBytes();
