@@ -304,6 +304,7 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
           if (entry.settled) return;
           entry.settled = true;
           this.#pendingSettled++;
+          this.#compactPending();
           reject(
             new SessionError(
               `connection pool acquire timed out after ${this.#acquireTimeoutMs}ms`,

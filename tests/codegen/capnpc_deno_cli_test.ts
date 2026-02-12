@@ -11,7 +11,10 @@ import {
   parseCliConfigToml,
   renderBarrelModule,
 } from "../../tools/capnpc-deno/cli.ts";
-import { CliConfigError, CliUsageError } from "../../tools/capnpc-deno/errors.ts";
+import {
+  CliConfigError,
+  CliUsageError,
+} from "../../tools/capnpc-deno/errors.ts";
 import type { GeneratedFile } from "../../tools/capnpc-deno/emitter.ts";
 import { assert, assertEquals, assertThrows } from "../test_utils.ts";
 
@@ -599,6 +602,22 @@ Deno.test("capnpc-deno CLI validates missing values for value-taking flags", () 
 Deno.test("capnpc-deno CLI accepts -- sentinel and keeps positional schemas", () => {
   const options = parseCliArgs(["generate", "--", "schema/foo.capnp"]);
   assertEquals(options.schemas.join(","), "schema/foo.capnp");
+});
+
+Deno.test("capnpc-deno CLI treats option-like tokens after -- as positional schemas", () => {
+  const options = parseCliArgs([
+    "generate",
+    "--",
+    "--schema",
+    "schema/foo.capnp",
+    "-I",
+    "vendor/capnp",
+  ]);
+  assertEquals(
+    options.schemas.join(","),
+    "--schema,schema/foo.capnp,-I,vendor/capnp",
+  );
+  assertEquals(options.importPaths.length, 0);
 });
 
 Deno.test("capnpc-deno CLI parses mixed-quote arrays and rejects malformed multiline arrays", () => {

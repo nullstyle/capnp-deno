@@ -158,6 +158,11 @@ export class RpcSession {
           .catch((error) => this.handleError(error));
         return this.#inboundChain;
       });
+      if (this.#closed) {
+        throw new SessionError(
+          "RpcSession was closed while start was in progress",
+        );
+      }
       this.#started = true;
       emitObservabilityEvent(this.#observability, {
         name: "rpc.session.start",

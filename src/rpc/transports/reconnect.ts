@@ -106,20 +106,23 @@ async function defaultSleep(
   signal?: AbortSignal,
 ): Promise<void> {
   if (delayMs <= 0) return;
+  throwIfAborted(signal);
 
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, delayMs);
-
     const onAbort = (): void => {
       clearTimeout(timer);
       reject(new TransportError("reconnect aborted"));
     };
 
-    if (signal) {
-      signal.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+
+    if (!signal) return;
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
     }
   });
 }
@@ -305,6 +308,7 @@ export async function connectWithReconnect<T>(
         }
       }
 
+      throwIfAborted(options.signal);
       try {
         await sleep(delayMs, options.signal);
       } catch (sleepError) {

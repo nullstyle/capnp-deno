@@ -23,7 +23,8 @@ import {
  *   Requests are rejected immediately without attempting the underlying
  *   factory. After a cooldown period the breaker transitions to `HALF_OPEN`.
  * - `HALF_OPEN` -- A single probe request is allowed through. If it succeeds
- *   the circuit closes; if it fails the circuit reopens.
+ *   the circuit closes; if it fails the circuit reopens. Concurrent requests
+ *   during the probe are rejected until the probe settles.
  */
 export type CircuitBreakerState = "CLOSED" | "OPEN" | "HALF_OPEN";
 
@@ -105,6 +106,7 @@ export class CircuitBreaker<T> {
   #state: CircuitBreakerState = "CLOSED";
   #consecutiveFailures = 0;
   #openedAtMs = 0;
+  #halfOpenProbeInFlight = false;
 
   constructor(options: CircuitBreakerOptions = {}) {
     const maxConsecutiveFailures = options.maxConsecutiveFailures ?? 5;
@@ -159,6 +161,17 @@ export class CircuitBreaker<T> {
       this.#transitionTo("HALF_OPEN");
     }
 
+    let halfOpenProbe = false;
+    if (this.#state === "HALF_OPEN") {
+      if (this.#halfOpenProbeInFlight) {
+        throw new TransportError(
+          "circuit breaker half-open probe already in progress",
+        );
+      }
+      this.#halfOpenProbeInFlight = true;
+      halfOpenProbe = true;
+    }
+
     try {
       const result = await factory();
       this.#onSuccess();
@@ -166,6 +179,10 @@ export class CircuitBreaker<T> {
     } catch (error) {
       this.#onFailure();
       throw error;
+    } finally {
+      if (halfOpenProbe) {
+        this.#halfOpenProbeInFlight = false;
+      }
     }
   }
 
@@ -175,6 +192,7 @@ export class CircuitBreaker<T> {
    * health-check endpoint comes back online).
    */
   reset(): void {
+    this.#halfOpenProbeInFlight = false;
     this.#consecutiveFailures = 0;
     if (this.#state !== "CLOSED") {
       this.#transitionTo("CLOSED");

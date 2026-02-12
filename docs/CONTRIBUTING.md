@@ -36,24 +36,28 @@ deno task bench
 - Use `const` by default; `let` only when reassignment is needed.
 - Prefer named `function` declarations over arrow functions.
 - Use `#private` fields for class encapsulation.
-- All public APIs must have JSDoc with `@param`, `@returns`, and `@example` tags.
+- All public APIs must have JSDoc with `@param`, `@returns`, and `@example`
+  tags.
 
 ## Error handling
 
-- Use the custom error hierarchy (`AbiError`, `TransportError`, `ProtocolError`, `SessionError`, `InstantiationError`).
-- Never throw bare `Error` from library code (validation functions are the sole exception).
+- Use the custom error hierarchy (`AbiError`, `TransportError`, `ProtocolError`,
+  `SessionError`, `InstantiationError`).
+- Never throw bare `Error` from library code (validation functions are the sole
+  exception).
 - Normalize caught errors with `normalizeCapnpError()` and friends.
 - Never swallow errors silently without a comment explaining why.
 
 ## Testing
 
 - Place tests in `tests/` with the naming convention `{module}_test.ts`.
-- Use the helpers in `tests/test_utils.ts` (`assertEquals`, `assertThrows`, `assertBytes`, `deferred`, `withTimeout`).
+- Use the helpers in `tests/test_utils.ts` (`assertEquals`, `assertThrows`,
+  `assertBytes`, `deferred`, `withTimeout`).
 - Clean up resources in `try/finally` blocks.
 - Use deterministic clocks for timing-sensitive tests.
 - All tests must pass before merging: `deno task verify`.
 
 ## Commits
 
-- Write concise commit messages that explain *why*, not *what*.
+- Write concise commit messages that explain _why_, not _what_.
 - Keep commits focused on a single logical change.

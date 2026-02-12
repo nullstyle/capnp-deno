@@ -130,7 +130,7 @@ Deno.test("connectWithReconnect can be aborted between retries", async () => {
   }
 
   assertEquals(retryCalls, 1);
-  assertEquals(sleepCalls, 1);
+  assertEquals(sleepCalls, 0);
   assert(
     thrown instanceof TransportError &&
       /reconnect aborted/i.test(thrown.message),

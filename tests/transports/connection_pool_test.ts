@@ -1262,6 +1262,47 @@ Deno.test("RpcConnectionPool timeout+release race does not corrupt FIFO ordering
   }
 });
 
+Deno.test("RpcConnectionPool remains stable under timeout-only pending churn", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 1,
+    acquireTimeoutMs: 20,
+  });
+
+  try {
+    const held = await pool.acquire();
+
+    for (let round = 0; round < 3; round += 1) {
+      const pendingBatch = Array.from({ length: 40 }, () => pool.acquire());
+      const settled = await Promise.allSettled(pendingBatch);
+      for (const result of settled) {
+        assert(
+          result.status === "rejected" &&
+            result.reason instanceof SessionError &&
+            /acquire timed out/i.test(result.reason.message),
+          `expected acquire timeout rejection, got: ${JSON.stringify(result)}`,
+        );
+      }
+      assertEquals(pool.stats.pending, 0);
+    }
+
+    pool.release(held);
+    assertEquals(pool.stats.idle, 1);
+    assertEquals(pool.stats.pending, 0);
+
+    const reacquired = await withTimeout(
+      pool.acquire(),
+      1000,
+      "acquire after timeout-only churn",
+    );
+    assert(reacquired !== undefined, "expected pooled connection after churn");
+    assertEquals(pool.stats.pending, 0);
+    pool.release(reacquired);
+  } finally {
+    await pool.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Timeout + release race: release before timeout satisfies waiter correctly
 // ---------------------------------------------------------------------------

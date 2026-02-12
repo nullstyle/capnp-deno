@@ -1286,6 +1286,57 @@ Deno.test("RpcServerBridge pipelining: chained pipelining through multiple answe
 
 // --- Answer Table Bounds and Eviction Tests ---
 
+Deno.test("RpcServerBridge rejects duplicate live question ids", async () => {
+  const gate = deferred<void>();
+  const bridge = new RpcServerBridge();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: async () => {
+      await gate.promise;
+      return encodeSingleU32StructMessage(99);
+    },
+  }, { capabilityIndex: 5 });
+
+  const firstResponsePromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  await Promise.resolve();
+  assertEquals(bridge.answerTableSize, 1);
+
+  const duplicateResponse = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 5,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(duplicateResponse !== null, "expected duplicate rejection response");
+  const decodedDuplicate = decodeReturnFrame(duplicateResponse);
+  assertEquals(decodedDuplicate.kind, "exception");
+  assertEquals(decodedDuplicate.answerId, 1);
+  if (decodedDuplicate.kind === "exception") {
+    assert(
+      /duplicate questionId/i.test(decodedDuplicate.reason),
+      `unexpected duplicate rejection reason: ${decodedDuplicate.reason}`,
+    );
+  }
+  assertEquals(bridge.answerTableSize, 1);
+
+  gate.resolve();
+  const firstResponse = await firstResponsePromise;
+  assert(firstResponse !== null, "expected first call response");
+  assertEquals(decodeReturnFrame(firstResponse).kind, "results");
+
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
+  assertEquals(bridge.answerTableSize, 0);
+});
+
 Deno.test("RpcServerBridge rejects new calls when answer table is full", async () => {
   const bridge = new RpcServerBridge({
     maxAnswerTableSize: 2,

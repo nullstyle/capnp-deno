@@ -116,6 +116,19 @@ export function parseCliArgs(args: string[]): CliOptions {
 
   for (let i = 0; i < queue.length; i += 1) {
     const arg = queue[i];
+    if (arg === "--") {
+      for (let j = i + 1; j < queue.length; j += 1) {
+        const positional = queue[j];
+        if (pluginMode) {
+          throw new CliUsageError(
+            `unexpected positional argument in plugin mode: ${positional} (use "generate" to pass positional schemas)`,
+          );
+        }
+        options.schemas.push(positional);
+        options.overrides.schemas = true;
+      }
+      break;
+    }
     switch (arg) {
       case "--help":
       case "-h":
@@ -202,8 +215,6 @@ export function parseCliArgs(args: string[]): CliOptions {
       case "--plugin-response":
         options.pluginResponse = true;
         options.overrides.pluginResponse = true;
-        break;
-      case "--":
         break;
       default:
         if (arg.startsWith("-")) {

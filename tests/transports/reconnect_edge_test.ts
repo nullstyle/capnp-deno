@@ -277,3 +277,45 @@ Deno.test("connectWithReconnect default sleep respects abort during backoff", as
     `expected default-sleep abort path, got: ${String(thrown)}`,
   );
 });
+
+Deno.test("connectWithReconnect default sleep aborts immediately for synchronous onRetry abort", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const startedAt = Date.now();
+  let thrown: unknown;
+
+  try {
+    await connectWithReconnect(
+      () => {
+        attempts += 1;
+        return Promise.reject(new Error("dial failed"));
+      },
+      {
+        policy: createExponentialBackoffReconnectPolicy({
+          maxAttempts: 3,
+          initialDelayMs: 500,
+          maxDelayMs: 500,
+          jitterRatio: 0,
+        }),
+        signal: controller.signal,
+        onRetry: () => {
+          controller.abort();
+        },
+      },
+    );
+  } catch (error) {
+    thrown = error;
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  assertEquals(attempts, 1);
+  assert(
+    thrown instanceof TransportError &&
+      /aborted/i.test(thrown.message),
+    `expected abort TransportError, got: ${String(thrown)}`,
+  );
+  assert(
+    elapsedMs < 300,
+    `expected immediate abort before 500ms backoff, elapsed=${elapsedMs}ms`,
+  );
+});

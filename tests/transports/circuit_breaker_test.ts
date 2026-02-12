@@ -349,6 +349,58 @@ Deno.test("CircuitBreaker HALF_OPEN probe success closes the circuit", async () 
   assertEquals(breaker.consecutiveFailures, 0);
 });
 
+Deno.test("CircuitBreaker HALF_OPEN allows only one concurrent probe", async () => {
+  const clock = makeClock();
+  const breaker = new CircuitBreaker<string>({
+    maxConsecutiveFailures: 1,
+    cooldownMs: 1_000,
+    now: clock.now,
+  });
+
+  try {
+    await breaker.call(() => Promise.reject(new TransportError("down")));
+  } catch {
+    // expected
+  }
+  assertEquals(breaker.state, "OPEN");
+
+  clock.advance(1_000);
+  let probeCalls = 0;
+  let releaseProbe!: () => void;
+  const probeGate = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+
+  const firstProbe = breaker.call(async () => {
+    probeCalls += 1;
+    await probeGate;
+    return "recovered";
+  });
+
+  await Promise.resolve();
+  let concurrentError: unknown;
+  try {
+    await breaker.call(() => {
+      probeCalls += 1;
+      return Promise.resolve("should-not-run");
+    });
+  } catch (error) {
+    concurrentError = error;
+  }
+
+  assert(
+    concurrentError instanceof TransportError &&
+      /half-open probe already in progress/i.test(concurrentError.message),
+    `expected half-open concurrency guard, got: ${String(concurrentError)}`,
+  );
+
+  releaseProbe();
+  const recovered = await firstProbe;
+  assertEquals(recovered, "recovered");
+  assertEquals(probeCalls, 1);
+  assertEquals(breaker.state, "CLOSED");
+});
+
 // ---------------------------------------------------------------------------
 // Reset
 // ---------------------------------------------------------------------------

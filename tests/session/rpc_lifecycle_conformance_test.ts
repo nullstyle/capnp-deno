@@ -10,6 +10,7 @@ import {
   RPC_MESSAGE_TAG_RELEASE,
   type RpcCapDescriptor,
   RpcSession,
+  SessionError,
   SessionRpcClientTransport,
   WasmPeer,
 } from "../../src/advanced.ts";
@@ -235,4 +236,56 @@ Deno.test("rpc lifecycle: autoFinish=false keeps answer live until explicit fini
   } finally {
     await session.close();
   }
+});
+
+Deno.test("rpc lifecycle: close during start prevents started state", async () => {
+  let releaseStart!: () => void;
+  let transportStartCalls = 0;
+  let transportCloseCalls = 0;
+
+  const transport = {
+    async start(): Promise<void> {
+      transportStartCalls += 1;
+      await new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+    },
+    send(): void {
+      // no-op
+    },
+    close(): Promise<void> {
+      transportCloseCalls += 1;
+      return Promise.resolve();
+    },
+  };
+
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const session = new RpcSession(peer, transport);
+
+  const startPromise = session.start();
+  const closePromise = session.close();
+  releaseStart();
+
+  let startError: unknown;
+  try {
+    await startPromise;
+  } catch (error) {
+    startError = error;
+  }
+  await closePromise;
+
+  assert(
+    startError instanceof SessionError &&
+      /closed while start was in progress/i.test(startError.message),
+    `expected start to fail with close-during-start SessionError, got: ${
+      String(startError)
+    }`,
+  );
+  assertEquals(session.started, false);
+  assertEquals(session.closed, true);
+  assertEquals(transportStartCalls, 1);
+  assertEquals(transportCloseCalls, 1);
 });

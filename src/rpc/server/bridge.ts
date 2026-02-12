@@ -731,6 +731,14 @@ export class RpcServerBridge {
     call: RpcCallRequest,
     middlewareState?: Map<string, unknown>,
   ): Promise<Uint8Array> {
+    if (this.#answerTable.has(call.questionId)) {
+      return encodeReturnExceptionFrame({
+        answerId: call.questionId,
+        reason:
+          `duplicate questionId ${call.questionId}: question is already in progress`,
+      });
+    }
+
     // Enforce answer table size limit to prevent unbounded growth.
     if (
       this.#maxAnswerTableSize > 0 &&
