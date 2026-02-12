@@ -2,7 +2,7 @@ import {
   connectWithReconnect,
   createExponentialBackoffReconnectPolicy,
   TransportError,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 Deno.test("createExponentialBackoffReconnectPolicy enforces retry budget and delays", () => {

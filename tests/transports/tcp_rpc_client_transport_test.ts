@@ -12,7 +12,7 @@ import {
   type RpcTransport,
   SessionError,
   TcpRpcClientTransport,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import {
   assert,
   assertBytes,

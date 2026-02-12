@@ -13,7 +13,7 @@ import {
   RpcSession,
   SessionRpcClientTransport,
   WasmPeer,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 

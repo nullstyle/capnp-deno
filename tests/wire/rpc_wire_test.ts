@@ -13,7 +13,7 @@ import {
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   extractBootstrapCapabilityIndex,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import {
   BOOTSTRAP_Q1_SUCCESS_INBOUND,
   BOOTSTRAP_Q1_SUCCESS_OUTBOUND,

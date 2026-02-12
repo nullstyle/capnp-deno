@@ -52,8 +52,8 @@ CI gates: `just ci-fast` (PR minimum), `just ci-integration`, `just ci-real`.
 
 ### Module Entrypoints
 
-- `mod.ts` — public API; all user-facing exports go here
-- `advanced.ts` — re-exports `mod.ts` plus low-level WASM APIs (`WasmAbi`,
+- `src/mod.ts` — public API; all user-facing exports go here
+- `src/advanced.ts` — re-exports `mod.ts` plus low-level WASM APIs (`WasmAbi`,
   `WasmPeer`, `instantiatePeer`, `WasmSerde`)
 
 ### Layered RPC Stack

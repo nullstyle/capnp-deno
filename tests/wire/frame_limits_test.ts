@@ -1,4 +1,4 @@
-import { ProtocolError, validateCapnpFrame } from "../../advanced.ts";
+import { ProtocolError, validateCapnpFrame } from "../../src/advanced.ts";
 import { assert, assertThrows } from "../test_utils.ts";
 
 const WORD_BYTES = 8;

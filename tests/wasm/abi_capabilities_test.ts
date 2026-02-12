@@ -1,4 +1,4 @@
-import { getCapnpWasmExports, WasmAbi, WasmAbiError } from "../../advanced.ts";
+import { getCapnpWasmExports, WasmAbi, WasmAbiError } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import { assertEquals, assertThrows } from "../test_utils.ts";
 

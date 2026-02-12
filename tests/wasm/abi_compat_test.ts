@@ -1,4 +1,4 @@
-import { WasmAbi } from "../../advanced.ts";
+import { WasmAbi } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
   assert,

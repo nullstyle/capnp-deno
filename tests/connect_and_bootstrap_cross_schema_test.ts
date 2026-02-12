@@ -3,7 +3,7 @@ import {
   InMemoryRpcHarnessTransport,
   RpcServerRuntime,
   SessionRpcClientTransport,
-} from "../mod.ts";
+} from "../src/mod.ts";
 import {
   bootstrapPingerClient,
   registerPingerServer,

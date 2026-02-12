@@ -8,7 +8,7 @@ import {
   TcpTransport,
   TransportError,
   WebSocketTransport,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 function reconnectOptions() {

@@ -8,7 +8,7 @@ import {
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   type RpcMessageHandlers,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals, assertThrows } from "../test_utils.ts";
 
 // ---------------------------------------------------------------------------

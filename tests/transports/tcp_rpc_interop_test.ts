@@ -18,7 +18,7 @@ import {
   RpcServerRuntime,
   TcpServerListener,
   TcpTransport,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 const wasmPath = new URL("../../generated/capnp_deno.wasm", import.meta.url);

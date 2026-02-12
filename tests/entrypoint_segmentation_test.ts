@@ -1,5 +1,5 @@
-import * as encoding from "../encoding.ts";
-import * as rpc from "../rpc.ts";
+import * as encoding from "../src/encoding.ts";
+import * as rpc from "../src/rpc.ts";
 import { assert } from "./test_utils.ts";
 
 Deno.test("rpc entrypoint exposes runtime APIs but not encoding helpers", () => {

@@ -14,7 +14,7 @@ import {
   type RpcTransport,
   type RpcTransportMiddleware,
   TransportError,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertBytes, assertEquals } from "../test_utils.ts";
 
 // ---------------------------------------------------------------------------

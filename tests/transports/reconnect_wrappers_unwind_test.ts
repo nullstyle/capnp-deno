@@ -3,7 +3,7 @@ import {
   createRpcSessionWithReconnect,
   type RpcTransport,
   SessionError,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 function reconnectOptions() {

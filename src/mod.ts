@@ -1,10 +1,3 @@
-/**
- * Public RPC/runtime entrypoint.
- *
- * Import from `@nullstyle/capnp/rpc` when you need session, transport,
- * client/server, and resilience APIs without the wire/frame encoding helpers.
- */
-
 // === Core: Errors, Validation, Types ===
 
 export {
@@ -16,30 +9,18 @@ export {
   ProtocolError,
   SessionError,
   TransportError,
-} from "./src/errors.ts";
+} from "./errors.ts";
 
 export {
   assertNonNegativeFinite,
   assertNonNegativeInteger,
   assertPositiveFinite,
   assertPositiveInteger,
-} from "./src/validation.ts";
+} from "./validation.ts";
 
 // === Generated RPC Helpers ===
 
-export {
-  connectAndBootstrap,
-  type RpcBootstrapClientFactory,
-  type RpcBootstrapClientTransport,
-  type RpcCallContext,
-  type RpcCallOptions,
-  type RpcClientTransport,
-  type RpcConnectedClient,
-  type RpcExportCapabilityOptions,
-  type RpcServerDispatch as RpcGeneratedServerDispatch,
-  type RpcServerDispatchResult,
-  type RpcServerRegistry,
-} from "./src/rpc/server/rpc_runtime.ts";
+export { connectAndBootstrap } from "./rpc/server/rpc_runtime.ts";
 
 // === High-Level Service API (DX V2) ===
 
@@ -60,19 +41,97 @@ export {
   type TcpServeHandle,
   type TcpServeOptions,
   type TcpServiceApi,
-} from "./src/rpc/server/service.ts";
+} from "./rpc/server/service.ts";
+
+// === Wire Format & Message Routing ===
+
+export {
+  CAP_DESCRIPTOR_TAG_RECEIVER_HOSTED,
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  decodeBootstrapRequestFrame,
+  decodeCallRequestFrame,
+  decodeFinishFrame,
+  decodeReleaseFrame,
+  decodeReturnFrame,
+  decodeRpcMessage,
+  decodeRpcMessageTag,
+  dispatchRpcMessage,
+  EMPTY_STRUCT_MESSAGE,
+  encodeBootstrapRequestFrame,
+  encodeBootstrapResponseFrame,
+  encodeCallRequestFrame,
+  encodeFinishFrame,
+  encodeReleaseFrame,
+  encodeReturnExceptionFrame,
+  encodeReturnResultsFrame,
+  extractBootstrapCapabilityIndex,
+  frameFromSegment,
+  MessageBuilder,
+  RETURN_TAG_EXCEPTION,
+  RETURN_TAG_RESULTS,
+  RPC_CALL_TARGET_TAG_IMPORTED_CAP,
+  RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+  RPC_MESSAGE_TAG_BOOTSTRAP,
+  RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_DISEMBARGO,
+  RPC_MESSAGE_TAG_FINISH,
+  RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RESOLVE,
+  RPC_MESSAGE_TAG_RETURN,
+  RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+  RPC_PROMISED_ANSWER_OP_TAG_NOOP,
+  type RpcBootstrapRequest,
+  type RpcCallFrameRequest,
+  type RpcCallRequest,
+  type RpcCallTarget,
+  type RpcCapDescriptor,
+  type RpcFinishRequest,
+  type RpcMessage,
+  type RpcMessageHandlers,
+  type RpcMessageTagBootstrap,
+  type RpcMessageTagCall,
+  type RpcMessageTagDisembargo,
+  type RpcMessageTagFinish,
+  type RpcMessageTagRelease,
+  type RpcMessageTagResolve,
+  type RpcMessageTagReturn,
+  type RpcPromisedAnswerOp,
+  type RpcPromisedAnswerTarget,
+  type RpcReleaseRequest,
+  type RpcReturnException,
+  type RpcReturnExceptionFrameRequest,
+  type RpcReturnMessage,
+  type RpcReturnResults,
+  type RpcReturnResultsFrameRequest,
+  segmentsFromFrame,
+  type SegmentTable,
+} from "./rpc/wire.ts";
+
+export {
+  type CapnpFrameLimitsOptions,
+  DEFAULT_MAX_FRAME_BYTES,
+  DEFAULT_MAX_NESTING_DEPTH,
+  DEFAULT_MAX_SEGMENT_COUNT,
+  DEFAULT_MAX_TRAVERSAL_WORDS,
+  validateCapnpFrame,
+} from "./rpc/wire/frame_limits.ts";
+
+export {
+  CapnpFrameFramer,
+  type CapnpFrameFramerOptions,
+} from "./rpc/wire/framer.ts";
 
 // === Session & Transport ===
 
-export { type RpcTransport } from "./src/rpc/transports/transport.ts";
+export { type RpcTransport } from "./rpc/transports/transport.ts";
 
-export { type RpcRuntimeModuleOptions } from "./src/rpc/server/runtime_module.ts";
+export { type RpcRuntimeModuleOptions } from "./rpc/server/runtime_module.ts";
 
 export {
   RpcSession,
   type RpcSessionCreateOptions,
   type RpcSessionOptions,
-} from "./src/rpc/session/session.ts";
+} from "./rpc/session/session.ts";
 
 // === RPC Client ===
 
@@ -89,7 +148,7 @@ export {
   SessionRpcClientTransport,
   type SessionRpcClientTransportCreateOptions,
   type SessionRpcClientTransportOptions,
-} from "./src/rpc/session/client.ts";
+} from "./rpc/session/client.ts";
 
 // === RPC Server ===
 
@@ -106,12 +165,12 @@ export {
   type ServerMiddlewareContext,
   type ServerMiddlewareDispatchResult,
   type ServerMiddlewareFrameResult,
-} from "./src/rpc/server/bridge.ts";
+} from "./rpc/server/bridge.ts";
 
 export {
   RpcServerCallInterceptTransport,
   RpcServerOutboundClient,
-} from "./src/rpc/server/outbound.ts";
+} from "./rpc/server/outbound.ts";
 
 export {
   RpcServerRuntime,
@@ -124,7 +183,7 @@ export {
   type RpcServerRuntimeRootRegistrationOptions,
   type RpcServerRuntimeWarning,
   type RpcServerRuntimeWarningCode,
-} from "./src/rpc/server/runtime.ts";
+} from "./rpc/server/runtime.ts";
 
 // === Middleware (Client & Server) ===
 
@@ -145,7 +204,7 @@ export {
   type RpcMetricsMiddlewareOptions,
   type RpcMetricsSnapshot,
   type RpcTransportMiddleware,
-} from "./src/rpc/transports/middleware.ts";
+} from "./rpc/transports/middleware.ts";
 
 // === Transports (TCP, WebSocket, MessagePort) ===
 
@@ -154,22 +213,22 @@ export {
   type TcpServerListenerOptions,
   TcpTransport,
   type TcpTransportOptions,
-} from "./src/rpc/transports/tcp.ts";
+} from "./rpc/transports/tcp.ts";
 export {
   type TcpRpcClientConnectOptions,
   TcpRpcClientTransport,
   type TcpRpcClientTransportOptions,
-} from "./src/rpc/transports/tcp_rpc_client.ts";
+} from "./rpc/transports/tcp_rpc_client.ts";
 
 export {
   WebSocketTransport,
   type WebSocketTransportOptions,
-} from "./src/rpc/transports/websocket.ts";
+} from "./rpc/transports/websocket.ts";
 
 export {
   MessagePortTransport,
   type MessagePortTransportOptions,
-} from "./src/rpc/transports/message_port.ts";
+} from "./rpc/transports/message_port.ts";
 
 // === Resilience (Connection Pool, Circuit Breaker, Reconnect) ===
 
@@ -179,13 +238,13 @@ export {
   type RpcConnectionPoolStats,
   type RpcConnectionPoolWarmupStats,
   withConnection,
-} from "./src/rpc/transports/connection_pool.ts";
+} from "./rpc/transports/connection_pool.ts";
 
 export {
   CircuitBreaker,
   type CircuitBreakerOptions,
   type CircuitBreakerState,
-} from "./src/rpc/transports/circuit_breaker.ts";
+} from "./rpc/transports/circuit_breaker.ts";
 
 export {
   connectWithReconnect,
@@ -195,7 +254,7 @@ export {
   type ReconnectPolicy,
   type ReconnectPolicyContext,
   type ReconnectRetryInfo,
-} from "./src/rpc/transports/reconnect.ts";
+} from "./rpc/transports/reconnect.ts";
 
 export {
   type ReconnectCapabilityRemapContext,
@@ -203,7 +262,7 @@ export {
   type ReconnectingRpcClientTransportOptions,
   type RpcCapabilityPointer,
   type RpcClientTransportLike,
-} from "./src/rpc/transports/reconnecting_client.ts";
+} from "./rpc/transports/reconnecting_client.ts";
 
 export {
   connectTcpTransportWithReconnect,
@@ -213,7 +272,7 @@ export {
   type ConnectWebSocketTransportWithReconnectOptions,
   createRpcSessionWithReconnect,
   type CreateRpcSessionWithReconnectOptions,
-} from "./src/rpc/transports/reconnect_wrappers.ts";
+} from "./rpc/transports/reconnect_wrappers.ts";
 
 // === Streaming ===
 
@@ -222,7 +281,7 @@ export {
   type StreamCallFn,
   type StreamSender,
   type StreamSenderOptions,
-} from "./src/rpc/session/streaming.ts";
+} from "./rpc/session/streaming.ts";
 
 // === Observability ===
 
@@ -232,9 +291,9 @@ export {
   type RpcObservabilityAttributes,
   type RpcObservabilityAttributeValue,
   type RpcObservabilityEvent,
-} from "./src/observability/observability.ts";
+} from "./observability/observability.ts";
 
 export {
   createDenoOtelObservability,
   type DenoOtelObservabilityOptions,
-} from "./src/observability/deno_otel.ts";
+} from "./observability/deno_otel.ts";

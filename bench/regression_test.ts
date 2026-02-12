@@ -25,7 +25,7 @@ import {
   encodeReturnResultsFrame,
   type RpcCapDescriptor,
   validateCapnpFrame,
-} from "../advanced.ts";
+} from "../src/advanced.ts";
 
 // ---------------------------------------------------------------------------
 // Result collection for CI trend tracking

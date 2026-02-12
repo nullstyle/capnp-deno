@@ -20,8 +20,8 @@
  * environment-independent.
  */
 
-import { TransportError } from "../../advanced.ts";
-import type { RpcTransport } from "../../advanced.ts";
+import { TransportError } from "../../src/advanced.ts";
+import type { RpcTransport } from "../../src/advanced.ts";
 import {
   assert,
   assertBytes,
@@ -618,7 +618,7 @@ Deno.test("transport contract: emitInbound before start() throws", async () => {
 // also conforms to the same contract expectations tested above.
 
 Deno.test("transport contract: MessagePortTransport send-after-close throws TransportError", async () => {
-  const { MessagePortTransport } = await import("../../advanced.ts");
+  const { MessagePortTransport } = await import("../../src/advanced.ts");
   const channel = new MessageChannel();
   const transport = new MessagePortTransport(channel.port1, {
     closePortOnClose: true,
@@ -644,7 +644,7 @@ Deno.test("transport contract: MessagePortTransport send-after-close throws Tran
 });
 
 Deno.test("transport contract: MessagePortTransport close() is idempotent", async () => {
-  const { MessagePortTransport } = await import("../../advanced.ts");
+  const { MessagePortTransport } = await import("../../src/advanced.ts");
   const channel = new MessageChannel();
   const transport = new MessagePortTransport(channel.port1, {
     closePortOnClose: true,
@@ -661,7 +661,7 @@ Deno.test("transport contract: MessagePortTransport close() is idempotent", asyn
 });
 
 Deno.test("transport contract: MessagePortTransport start-twice throws TransportError", async () => {
-  const { MessagePortTransport } = await import("../../advanced.ts");
+  const { MessagePortTransport } = await import("../../src/advanced.ts");
   const channel = new MessageChannel();
   const transport = new MessagePortTransport(channel.port1, {
     closePortOnClose: true,
@@ -680,7 +680,7 @@ Deno.test("transport contract: MessagePortTransport start-twice throws Transport
 });
 
 Deno.test("transport contract: MessagePortTransport send-before-start throws TransportError", async () => {
-  const { MessagePortTransport } = await import("../../advanced.ts");
+  const { MessagePortTransport } = await import("../../src/advanced.ts");
   const channel = new MessageChannel();
   const transport = new MessagePortTransport(channel.port1, {
     closePortOnClose: true,

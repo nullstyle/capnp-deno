@@ -6,7 +6,7 @@ import {
   encodeReturnResultsFrame,
   RpcServerCallInterceptTransport,
   RpcServerOutboundClient,
-} from "../../mod.ts";
+} from "../../src/mod.ts";
 import type { RpcTransport } from "../../src/rpc/transports/transport.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 

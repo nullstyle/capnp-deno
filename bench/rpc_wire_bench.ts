@@ -7,7 +7,7 @@ import {
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   type RpcCapDescriptor,
-} from "../advanced.ts";
+} from "../src/advanced.ts";
 import {
   BOOTSTRAP_Q1_SUCCESS_INBOUND,
   CALL_BOOTSTRAP_CAP_Q2_INBOUND,

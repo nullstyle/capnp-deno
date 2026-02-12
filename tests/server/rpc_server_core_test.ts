@@ -7,7 +7,7 @@ import {
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   RpcServerBridge,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;

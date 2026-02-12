@@ -5,4 +5,4 @@
  * encode/decode helpers without RPC runtime APIs.
  */
 
-export * from "./src/encoding/mod.ts";
+export * from "./encoding/mod.ts";

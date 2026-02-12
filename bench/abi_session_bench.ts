@@ -3,7 +3,7 @@ import {
   type RpcTransport,
   WasmAbi,
   WasmPeer,
-} from "../advanced.ts";
+} from "../src/advanced.ts";
 import { FakeCapnpWasm } from "../tests/fake_wasm.ts";
 
 class SinkTransport implements RpcTransport {

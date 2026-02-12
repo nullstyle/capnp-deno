@@ -1,4 +1,4 @@
-import { CapnpFrameFramer, validateCapnpFrame } from "../advanced.ts";
+import { CapnpFrameFramer, validateCapnpFrame } from "../src/advanced.ts";
 
 const WORD_BYTES = 8;
 

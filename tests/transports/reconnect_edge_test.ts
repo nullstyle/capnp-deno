@@ -2,7 +2,7 @@ import {
   connectWithReconnect,
   createExponentialBackoffReconnectPolicy,
   TransportError,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 function expectError(

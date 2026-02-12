@@ -11,11 +11,11 @@ export {
   type WasmAbiOptions,
   type WasmHostCallRecord,
   type WasmSendFinishOptions,
-} from "./src/wasm/abi.ts";
+} from "./wasm/abi.ts";
 
-export { WasmPeer } from "./src/wasm/peer.ts";
+export { WasmPeer } from "./wasm/peer.ts";
 
-export { instantiatePeer } from "./src/wasm/load.ts";
+export { instantiatePeer } from "./wasm/load.ts";
 
 export {
   type JsonSerdeCodec,
@@ -23,4 +23,4 @@ export {
   type JsonSerdeCodecOptions,
   type JsonSerdeExportBinding,
   WasmSerde,
-} from "./src/encoding/serde.ts";
+} from "./encoding/serde.ts";

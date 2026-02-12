@@ -1,4 +1,4 @@
-import { type CapnpWasmExports, WasmSerde } from "../../advanced.ts";
+import { type CapnpWasmExports, WasmSerde } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import { assertBytes, assertEquals, assertThrows } from "../test_utils.ts";
 

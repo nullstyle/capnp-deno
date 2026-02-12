@@ -5,7 +5,7 @@ import {
   type RpcTransport,
   SessionError,
   WasmPeer,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import { assert, assertBytes, assertEquals } from "../test_utils.ts";
 

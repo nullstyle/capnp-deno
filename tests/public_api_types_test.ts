@@ -90,7 +90,7 @@ import type {
   TcpServiceApi,
   TcpTransportOptions,
   WebSocketTransportOptions,
-} from "../mod.ts";
+} from "../src/mod.ts";
 
 type Assert<T extends true> = T;
 type IsEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends

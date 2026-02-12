@@ -1,4 +1,4 @@
-import { TransportError, WebSocketTransport } from "../../advanced.ts";
+import { TransportError, WebSocketTransport } from "../../src/advanced.ts";
 import { assert, assertEquals, withTimeout } from "../test_utils.ts";
 
 function buildFrame(words: number): Uint8Array {

@@ -15,11 +15,11 @@ function decodeBase64(base64: string): Uint8Array {
 }
 
 const ENCODING_RUNTIME_URL = new URL(
-  "../../encoding.ts",
+  "../../src/encoding.ts",
   import.meta.url,
 ).href;
 const RPC_RUNTIME_URL = new URL(
-  "../../rpc.ts",
+  "../../src/rpc.ts",
   import.meta.url,
 ).href;
 

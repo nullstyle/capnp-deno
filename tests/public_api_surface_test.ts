@@ -1,4 +1,4 @@
-import * as capnp from "../mod.ts";
+import * as capnp from "../src/mod.ts";
 import { assertEquals } from "./test_utils.ts";
 
 const EXPECTED_RUNTIME_EXPORTS = [

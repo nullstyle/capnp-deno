@@ -3,7 +3,7 @@ import {
   RpcSession,
   type RpcTransport,
   WasmPeer,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import { assertBytes, deferred, withTimeout } from "../test_utils.ts";
 

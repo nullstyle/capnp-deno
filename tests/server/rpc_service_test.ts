@@ -1,4 +1,4 @@
-import { createRpcServiceToken, RpcPeer } from "../../mod.ts";
+import { createRpcServiceToken, RpcPeer } from "../../src/mod.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
 Deno.test("createRpcServiceToken returns a frozen token", () => {

@@ -16,7 +16,7 @@ import {
   SessionError,
   SessionRpcClientTransport,
   WasmPeer,
-} from "../../advanced.ts";
+} from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
   BOOTSTRAP_Q1_SUCCESS_INBOUND,
