@@ -62,7 +62,8 @@ export const FINISH_POINTER_COUNT = 0 as const;
 export const FINISH_QUESTION_ID_BYTE_OFFSET = 0 as const;
 export const FINISH_FLAGS_BYTE_OFFSET = 4 as const;
 export const FINISH_RELEASE_RESULT_CAPS_FLAG_MASK = 1 as const;
-export const FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK = 2 as const;
+export const FINISH_REQUIRE_EARLY_CANCELLATION_WORKAROUND_FLAG_MASK =
+  2 as const;
 export const RELEASE_DATA_WORD_COUNT = 1 as const;
 export const RELEASE_POINTER_COUNT = 0 as const;
 export const RELEASE_ID_BYTE_OFFSET = 0 as const;

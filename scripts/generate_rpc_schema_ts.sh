@@ -30,3 +30,6 @@ sed "${sed_in_place[@]}" \
   's|"@nullstyle/capnp/encoding"|"../../../encoding.ts"|g; s|"@nullstyle/capnp/rpc"|"../../server/rpc_runtime.ts"|g; s|RpcGeneratedServerDispatch as RpcServerDispatch|RpcServerDispatch|g' \
   "$out_dir/rpc_types.ts" \
   "$out_dir/persistent_types.ts"
+
+# Keep generated output fmt-stable so `deno fmt` and schema sync checks agree.
+deno fmt "$out_dir"

@@ -33,13 +33,15 @@ export const schemaNodes = [
   {
     id: 0xf76fba59183073a5n,
     kind: "struct",
-    displayName: "vendor/capnp-zig/src/rpc/capnp/persistent.capnp:Persistent.SaveParams",
+    displayName:
+      "vendor/capnp-zig/src/rpc/capnp/persistent.capnp:Persistent.SaveParams",
     scopeId: 0xc8cb212fcd9f5691n,
   },
   {
     id: 0xb76848c18c40efbfn,
     kind: "struct",
-    displayName: "vendor/capnp-zig/src/rpc/capnp/persistent.capnp:Persistent.SaveResults",
+    displayName:
+      "vendor/capnp-zig/src/rpc/capnp/persistent.capnp:Persistent.SaveResults",
     scopeId: 0xc8cb212fcd9f5691n,
   },
 ] as const;

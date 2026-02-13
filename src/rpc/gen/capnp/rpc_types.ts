@@ -61,21 +61,30 @@ import {
 
 const RPC_STUB_CAPABILITY = Symbol.for("@nullstyle/capnp/rpcStubCapability");
 
-interface RpcClientTransportWithCapabilityExport
-  extends RpcClientTransport {
-  exportCapability?(dispatch: RpcServerDispatch, options?: RpcExportCapabilityOptions): CapabilityPointer;
+interface RpcClientTransportWithCapabilityExport extends RpcClientTransport {
+  exportCapability?(
+    dispatch: RpcServerDispatch,
+    options?: RpcExportCapabilityOptions,
+  ): CapabilityPointer;
 }
 
 function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
   if (!value || typeof value !== "object") return null;
   const direct = value as { capabilityIndex?: unknown };
-  if (typeof direct.capabilityIndex === "number" && Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0) {
+  if (
+    typeof direct.capabilityIndex === "number" &&
+    Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: direct.capabilityIndex };
   }
   const tagged = (value as Record<PropertyKey, unknown>)[RPC_STUB_CAPABILITY];
   if (!tagged || typeof tagged !== "object") return null;
   const taggedPointer = tagged as { capabilityIndex?: unknown };
-  if (typeof taggedPointer.capabilityIndex === "number" && Number.isInteger(taggedPointer.capabilityIndex) && taggedPointer.capabilityIndex >= 0) {
+  if (
+    typeof taggedPointer.capabilityIndex === "number" &&
+    Number.isInteger(taggedPointer.capabilityIndex) &&
+    taggedPointer.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: taggedPointer.capabilityIndex };
   }
   return null;
@@ -116,20 +125,32 @@ function withCapabilityStubLifecycle<TClient extends object>(
 function capabilityToServiceStub<TClient extends object>(
   value: unknown,
   transport: RpcClientTransport,
-  createClient: (transport: RpcClientTransport, capability: CapabilityPointer) => TClient,
+  createClient: (
+    transport: RpcClientTransport,
+    capability: CapabilityPointer,
+  ) => TClient,
 ): RpcStub<TClient> {
   const capability = requireRpcStubCapability(value);
-  return withCapabilityStubLifecycle(createClient(transport, capability), capability, transport);
+  return withCapabilityStubLifecycle(
+    createClient(transport, capability),
+    capability,
+    transport,
+  );
 }
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error("rpc outbound client is unavailable for capability callbacks");
+    throw new Error(
+      "rpc outbound client is unavailable for capability callbacks",
+    );
   }
   return ctx.outboundClient;
 }
 
-function exportCapabilityFromTransport<TClient extends object, TServer extends object>(
+function exportCapabilityFromTransport<
+  TClient extends object,
+  TServer extends object,
+>(
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -151,7 +172,10 @@ function exportCapabilityFromTransport<TClient extends object, TServer extends o
   );
 }
 
-function exportCapabilityFromContext<TClient extends object, TServer extends object>(
+function exportCapabilityFromContext<
+  TClient extends object,
+  TServer extends object,
+>(
   ctx: RpcCallContext,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -159,7 +183,9 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error("rpc call context does not support exporting local capabilities");
+    throw new Error(
+      "rpc call context does not support exporting local capabilities",
+    );
   }
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
@@ -168,7 +194,12 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   );
 }
 
-const TypeValues = ["failed", "overloaded", "disconnected", "unimplemented"] as const;
+const TypeValues = [
+  "failed",
+  "overloaded",
+  "disconnected",
+  "unimplemented",
+] as const;
 type Type = typeof TypeValues[number];
 const TypeType: EnumTypeDescriptor<Type> = {
   kind: "enum",
@@ -212,7 +243,13 @@ interface SendResultsTo {
 }
 
 export interface CapDescriptor {
-  which?: "none" | "senderHosted" | "senderPromise" | "receiverHosted" | "receiverAnswer" | "thirdPartyHosted";
+  which?:
+    | "none"
+    | "senderHosted"
+    | "senderPromise"
+    | "receiverHosted"
+    | "receiverAnswer"
+    | "thirdPartyHosted";
   none?: undefined;
   senderHosted?: number;
   senderPromise?: number;
@@ -261,7 +298,22 @@ export interface Join {
 }
 
 export interface Message {
-  which?: "unimplemented" | "abort" | "call" | "return" | "finish" | "resolve" | "release" | "obsoleteSave" | "bootstrap" | "obsoleteDelete" | "provide" | "accept" | "join" | "disembargo" | "thirdPartyAnswer";
+  which?:
+    | "unimplemented"
+    | "abort"
+    | "call"
+    | "return"
+    | "finish"
+    | "resolve"
+    | "release"
+    | "obsoleteSave"
+    | "bootstrap"
+    | "obsoleteDelete"
+    | "provide"
+    | "accept"
+    | "join"
+    | "disembargo"
+    | "thirdPartyAnswer";
   unimplemented?: Message;
   abort?: Exception;
   bootstrap?: Bootstrap;
@@ -320,7 +372,13 @@ export interface Resolve {
 }
 
 export interface Return {
-  which?: "results" | "exception" | "canceled" | "resultsSentElsewhere" | "takeFromOtherQuestion" | "awaitFromThirdParty";
+  which?:
+    | "results"
+    | "exception"
+    | "canceled"
+    | "resultsSentElsewhere"
+    | "takeFromOtherQuestion"
+    | "awaitFromThirdParty";
   answerId: number;
   releaseParamCaps: boolean;
   noFinishNeeded: boolean;
@@ -484,10 +542,8 @@ export const CallStruct: StructDescriptor<Call> = {
   ],
 };
 export const CallCodec: StructCodec<Call> = {
-  encode: (value: Call): Uint8Array =>
-    encodeStructMessage(CallStruct, value),
-  decode: (bytes: Uint8Array): Call =>
-    decodeStructMessage(CallStruct, bytes),
+  encode: (value: Call): Uint8Array => encodeStructMessage(CallStruct, value),
+  decode: (bytes: Uint8Array): Call => decodeStructMessage(CallStruct, bytes),
 };
 
 const SendResultsToStruct: StructDescriptor<SendResultsTo> = {
@@ -761,7 +817,10 @@ export const ExceptionStruct: StructDescriptor<Exception> = {
       kind: "slot",
       name: "details",
       offset: 2,
-      type: { kind: "list", element: { kind: "struct", get: () => DetailStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => DetailStruct },
+      },
     },
   ],
 };
@@ -867,10 +926,8 @@ export const JoinStruct: StructDescriptor<Join> = {
   ],
 };
 export const JoinCodec: StructCodec<Join> = {
-  encode: (value: Join): Uint8Array =>
-    encodeStructMessage(JoinStruct, value),
-  decode: (bytes: Uint8Array): Join =>
-    decodeStructMessage(JoinStruct, bytes),
+  encode: (value: Join): Uint8Array => encodeStructMessage(JoinStruct, value),
+  decode: (bytes: Uint8Array): Join => decodeStructMessage(JoinStruct, bytes),
 };
 
 export const MessageStruct: StructDescriptor<Message> = {
@@ -1115,7 +1172,10 @@ export const PayloadStruct: StructDescriptor<Payload> = {
       kind: "slot",
       name: "capTable",
       offset: 1,
-      type: { kind: "list", element: { kind: "struct", get: () => CapDescriptorStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => CapDescriptorStruct },
+      },
     },
   ],
 };
@@ -1457,7 +1517,9 @@ export const ThirdPartyAnswerCodec: StructCodec<ThirdPartyAnswer> = {
     decodeStructMessage(ThirdPartyAnswerStruct, bytes),
 };
 
-export const ThirdPartyCapDescriptorStruct: StructDescriptor<ThirdPartyCapDescriptor> = {
+export const ThirdPartyCapDescriptorStruct: StructDescriptor<
+  ThirdPartyCapDescriptor
+> = {
   kind: "struct",
   name: "ThirdPartyCapDescriptor",
   dataWordCount: 1,
@@ -1481,10 +1543,11 @@ export const ThirdPartyCapDescriptorStruct: StructDescriptor<ThirdPartyCapDescri
     },
   ],
 };
-export const ThirdPartyCapDescriptorCodec: StructCodec<ThirdPartyCapDescriptor> = {
+export const ThirdPartyCapDescriptorCodec: StructCodec<
+  ThirdPartyCapDescriptor
+> = {
   encode: (value: ThirdPartyCapDescriptor): Uint8Array =>
     encodeStructMessage(ThirdPartyCapDescriptorStruct, value),
   decode: (bytes: Uint8Array): ThirdPartyCapDescriptor =>
     decodeStructMessage(ThirdPartyCapDescriptorStruct, bytes),
 };
-

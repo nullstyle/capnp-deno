@@ -238,6 +238,29 @@ deno task test:integration
 deno task verify:real
 ```
 
+Run GitHub Actions locally:
+
+```sh
+# List available CI jobs
+just act-list
+
+# Run CI workflow locally (default event: pull_request)
+just act-ci
+
+# Run a single CI job
+just act-ci-job verify
+
+# Optional: run benchmark gate locally
+just act-bench
+```
+
+Notes:
+- `.actrc` pins `act` to `.github/workflows/ci.yml` and maps `ubuntu-latest`
+  to a local Linux container image.
+- `just act-ci` excludes benchmark regression checks by default; run
+  `just act-bench` when you explicitly want that signal.
+- Ensure Docker is running before invoking `act`.
+
 Benchmarks:
 
 ```sh

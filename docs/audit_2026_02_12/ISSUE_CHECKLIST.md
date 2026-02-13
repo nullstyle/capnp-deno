@@ -84,8 +84,8 @@ Legend: `[ ]` not started, `[-]` in progress, `[x]` done
 
 - [x] Add generated RPC wire constants module:
       `src/rpc/gen/capnp/rpc_wire_constants.ts`
-- [x] Teach `capnpc-deno` to emit `rpc_wire_constants.ts` for
-      `rpc.capnp` and include it in generated `mod.ts`
+- [x] Teach `capnpc-deno` to emit `rpc_wire_constants.ts` for `rpc.capnp` and
+      include it in generated `mod.ts`
 - [x] Replace `src/rpc/wire/types.ts` schema introspection helpers with direct
       constant re-export from generated module
 - [x] Re-run `just ci-fast`, `just ci-integration`, and `just ci-real`

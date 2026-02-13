@@ -112,8 +112,8 @@
   codegen + rewrite step succeeded.
 - 2026-02-12T12:01 local: Added generated RPC wire constants pipeline:
   `capnpc-deno` now emits `src/rpc/gen/capnp/rpc_wire_constants.ts` from
-  `rpc.capnp`, and `scripts/generate_rpc_schema_ts.sh` regenerates it as part
-  of standard codegen.
+  `rpc.capnp`, and `scripts/generate_rpc_schema_ts.sh` regenerates it as part of
+  standard codegen.
 - 2026-02-12T12:06 local: Removed runtime schema-derivation helper layer from
   `src/rpc/wire/types.ts`; file now re-exports generated constants from
   `src/rpc/gen/capnp/rpc_wire_constants.ts` while preserving public wire types.

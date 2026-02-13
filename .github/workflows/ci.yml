@@ -20,6 +20,21 @@ jobs:
           cache: true
           github_token: ${{ github.token }}
 
+      - name: Install Cap'n Proto compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if command -v capnp >/dev/null 2>&1; then
+            echo "capnp already installed: $(capnp --version)"
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y capnproto libcapnp-dev
+          else
+            apt-get update
+            apt-get install -y capnproto libcapnp-dev
+          fi
+
       - name: Format, lint, type-check, unit tests
         run: deno task verify
 
@@ -32,6 +47,7 @@ jobs:
           deno coverage coverage/ --lcov > coverage/lcov.info
 
       - name: Upload coverage report
+        if: env.ACT != 'true'
         uses: actions/upload-artifact@v4.6.2  # actions/upload-artifact v4
         with:
           name: coverage-report
@@ -52,6 +68,21 @@ jobs:
           cache: true
           github_token: ${{ github.token }}
 
+      - name: Install Cap'n Proto compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if command -v capnp >/dev/null 2>&1; then
+            echo "capnp already installed: $(capnp --version)"
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y capnproto libcapnp-dev
+          else
+            apt-get update
+            apt-get install -y capnproto libcapnp-dev
+          fi
+
       - name: Socket integration tests
         run: deno task test:integration
 
@@ -70,6 +101,21 @@ jobs:
           install: true
           cache: true
           github_token: ${{ github.token }}
+
+      - name: Install Cap'n Proto compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if command -v capnp >/dev/null 2>&1; then
+            echo "capnp already installed: $(capnp --version)"
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y capnproto libcapnp-dev
+          else
+            apt-get update
+            apt-get install -y capnproto libcapnp-dev
+          fi
 
       - name: Cache zig build artifacts
         uses: actions/cache@v4.3.0  # actions/cache v4
@@ -106,6 +152,21 @@ jobs:
           cache: true
           github_token: ${{ github.token }}
 
+      - name: Install Cap'n Proto compiler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if command -v capnp >/dev/null 2>&1; then
+            echo "capnp already installed: $(capnp --version)"
+            exit 0
+          fi
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y capnproto libcapnp-dev
+          else
+            apt-get update
+            apt-get install -y capnproto libcapnp-dev
+          fi
+
       - name: Restore previous benchmark results
         uses: actions/cache/restore@v4.3.0  # actions/cache v4
         with:
@@ -132,7 +193,7 @@ jobs:
         run: deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts
 
       - name: Upload benchmark results artifact
-        if: always()
+        if: always() && env.ACT != 'true'
         uses: actions/upload-artifact@v4.6.2  # actions/upload-artifact v4
         with:
           name: bench-results

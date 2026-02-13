@@ -61,21 +61,30 @@ import {
 
 const RPC_STUB_CAPABILITY = Symbol.for("@nullstyle/capnp/rpcStubCapability");
 
-interface RpcClientTransportWithCapabilityExport
-  extends RpcClientTransport {
-  exportCapability?(dispatch: RpcServerDispatch, options?: RpcExportCapabilityOptions): CapabilityPointer;
+interface RpcClientTransportWithCapabilityExport extends RpcClientTransport {
+  exportCapability?(
+    dispatch: RpcServerDispatch,
+    options?: RpcExportCapabilityOptions,
+  ): CapabilityPointer;
 }
 
 function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
   if (!value || typeof value !== "object") return null;
   const direct = value as { capabilityIndex?: unknown };
-  if (typeof direct.capabilityIndex === "number" && Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0) {
+  if (
+    typeof direct.capabilityIndex === "number" &&
+    Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: direct.capabilityIndex };
   }
   const tagged = (value as Record<PropertyKey, unknown>)[RPC_STUB_CAPABILITY];
   if (!tagged || typeof tagged !== "object") return null;
   const taggedPointer = tagged as { capabilityIndex?: unknown };
-  if (typeof taggedPointer.capabilityIndex === "number" && Number.isInteger(taggedPointer.capabilityIndex) && taggedPointer.capabilityIndex >= 0) {
+  if (
+    typeof taggedPointer.capabilityIndex === "number" &&
+    Number.isInteger(taggedPointer.capabilityIndex) &&
+    taggedPointer.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: taggedPointer.capabilityIndex };
   }
   return null;
@@ -116,20 +125,32 @@ function withCapabilityStubLifecycle<TClient extends object>(
 function capabilityToServiceStub<TClient extends object>(
   value: unknown,
   transport: RpcClientTransport,
-  createClient: (transport: RpcClientTransport, capability: CapabilityPointer) => TClient,
+  createClient: (
+    transport: RpcClientTransport,
+    capability: CapabilityPointer,
+  ) => TClient,
 ): RpcStub<TClient> {
   const capability = requireRpcStubCapability(value);
-  return withCapabilityStubLifecycle(createClient(transport, capability), capability, transport);
+  return withCapabilityStubLifecycle(
+    createClient(transport, capability),
+    capability,
+    transport,
+  );
 }
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error("rpc outbound client is unavailable for capability callbacks");
+    throw new Error(
+      "rpc outbound client is unavailable for capability callbacks",
+    );
   }
   return ctx.outboundClient;
 }
 
-function exportCapabilityFromTransport<TClient extends object, TServer extends object>(
+function exportCapabilityFromTransport<
+  TClient extends object,
+  TServer extends object,
+>(
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -151,7 +172,10 @@ function exportCapabilityFromTransport<TClient extends object, TServer extends o
   );
 }
 
-function exportCapabilityFromContext<TClient extends object, TServer extends object>(
+function exportCapabilityFromContext<
+  TClient extends object,
+  TServer extends object,
+>(
   ctx: RpcCallContext,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -159,7 +183,9 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error("rpc call context does not support exporting local capabilities");
+    throw new Error(
+      "rpc call context does not support exporting local capabilities",
+    );
   }
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
@@ -235,38 +261,78 @@ export interface PersistentClient {
 }
 
 export interface PersistentServer {
-  save(params: SaveParams, ctx: RpcCallContext): Promise<SaveResults> | SaveResults;
+  save(
+    params: SaveParams,
+    ctx: RpcCallContext,
+  ): Promise<SaveResults> | SaveResults;
 }
 
-export function createPersistentClient(transport: RpcClientTransport, capability: CapabilityPointer): PersistentClient {
+export function createPersistentClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): PersistentClient {
   return {
-    save: async (params: SaveParams, options?: RpcCallOptions): Promise<SaveResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(SaveParamsStruct, params);
+    save: async (
+      params: SaveParams,
+      options?: RpcCallOptions,
+    ): Promise<SaveResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        SaveParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc8cb212fcd9f5691n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PersistentMethodOrdinals["save"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PersistentMethodOrdinals["save"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(SaveResultsStruct, raw.contentBytes, raw.capTable) as SaveResults;
+          return decodeStructMessageWithCaps(
+            SaveResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as SaveResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PersistentMethodOrdinals["save"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PersistentMethodOrdinals["save"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(SaveResultsStruct, response, []) as SaveResults;
+        return decodeStructMessageWithCaps(
+          SaveResultsStruct,
+          response,
+          [],
+        ) as SaveResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
@@ -282,15 +348,28 @@ export async function bootstrapPersistentClient(
   return createPersistentClient(transport, capability);
 }
 
-export function createPersistentServer(server: PersistentServer): RpcServerDispatch {
+export function createPersistentServer(
+  server: PersistentServer,
+): RpcServerDispatch {
   return {
     interfaceId: PersistentInterfaceId,
-    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(SaveParamsStruct, params, ctx.paramsCapTable ?? []) as SaveParams;
+          const decoded = decodeStructMessageWithCaps(
+            SaveParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as SaveParams;
           const result = await server["save"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(SaveResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            SaveResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -312,7 +391,10 @@ export function registerPersistentServer(
 }
 
 export interface Persistent {
-  save(value: SaveParams["sealFor"], options?: RpcCallOptions): Promise<SaveResults["sturdyRef"]>;
+  save(
+    value: SaveParams["sealFor"],
+    options?: RpcCallOptions,
+  ): Promise<SaveResults["sturdyRef"]>;
 }
 
 function createPersistentServiceClient(
@@ -341,9 +423,22 @@ function createPersistentServiceServer(
 export const Persistent: RpcServiceToken<Persistent> = Object.freeze({
   interfaceId: PersistentInterfaceId,
   interfaceName: "Persistent",
-  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>
-    createPersistentServiceClient(await bootstrapPersistentClient(transport, options), transport),
-  registerServer: (registry: RpcServerRegistry, server: Persistent, options?: RpcExportCapabilityOptions) =>
-    registerPersistentServer(registry, createPersistentServiceServer(server), options),
+  bootstrapClient: async (
+    transport: RpcBootstrapClientTransport,
+    options?: RpcCallOptions,
+  ) =>
+    createPersistentServiceClient(
+      await bootstrapPersistentClient(transport, options),
+      transport,
+    ),
+  registerServer: (
+    registry: RpcServerRegistry,
+    server: Persistent,
+    options?: RpcExportCapabilityOptions,
+  ) =>
+    registerPersistentServer(
+      registry,
+      createPersistentServiceServer(server),
+      options,
+    ),
 });
-

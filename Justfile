@@ -83,6 +83,25 @@ ci-real:
 ci:
     just ci-integration
 
+# List CI workflow jobs as seen by `act`
+act-list:
+    act -l
+
+# Run local CI-equivalent jobs with `act` (single runner profile, sequential)
+# Excludes benchmark regression job by default since host/container timing is not comparable to CI baseline.
+act-ci event="pull_request":
+    act {{ event }} -j verify
+    act {{ event }} -j integration
+    act {{ event }} -j real-wasm
+
+# Run a single CI job locally with `act` (example: `just act-ci-job verify`)
+act-ci-job job event="pull_request":
+    act {{ event }} -j {{ job }}
+
+# Run benchmark regression check locally under `act` (optional; often noisy on laptops/containers)
+act-bench event="pull_request":
+    act {{ event }} -j bench
+
 vendor-test:
     cd vendor/capnp-zig && just test
 

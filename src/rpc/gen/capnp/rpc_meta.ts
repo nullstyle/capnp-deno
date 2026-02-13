@@ -153,10 +153,10 @@ export const schemaNodes = [
   {
     id: 0xd37007fde1f0027dn,
     kind: "struct",
-    displayName: "vendor/capnp-zig/src/rpc/capnp/rpc.capnp:ThirdPartyCapDescriptor",
+    displayName:
+      "vendor/capnp-zig/src/rpc/capnp/rpc.capnp:ThirdPartyCapDescriptor",
     scopeId: 0xb312981b2552a250n,
   },
 ] as const;
 
-export const interfaceMethods = [
-] as const;
+export const interfaceMethods = [] as const;
