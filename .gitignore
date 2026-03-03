@@ -2,3 +2,7 @@ coverage
 bench/results.json
 bench/previous/
 dist/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
