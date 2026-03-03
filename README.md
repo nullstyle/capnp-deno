@@ -255,8 +255,9 @@ just act-bench
 ```
 
 Notes:
-- `.actrc` pins `act` to `.github/workflows/ci.yml` and maps `ubuntu-latest`
-  to a local Linux container image.
+
+- `.actrc` pins `act` to `.github/workflows/ci.yml` and maps `ubuntu-latest` to
+  a local Linux container image.
 - `just act-ci` excludes benchmark regression checks by default; run
   `just act-bench` when you explicitly want that signal.
 - Ensure Docker is running before invoking `act`.
