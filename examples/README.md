@@ -30,6 +30,10 @@ Each example is nested in its own directory and has a colocated `.capnp` schema.
 - `examples/smoke_real_wasm/`
   - `smoke_real_wasm.ts`
   - `smoke_real_wasm.capnp`
+- `examples/kvstore_stress_2/`
+  - `kvstore_stress_client.ts`
+  - `kvstore.capnp`
+  - `gen/*`
 
 ## Task Runner
 
@@ -55,5 +59,6 @@ just --justfile examples/Justfile run-tcp-echo-server
 just --justfile examples/Justfile run-tcp-echo-client
 just --justfile examples/Justfile run-bidirectional-capability
 just --justfile examples/Justfile run-warmup-stats
+just --justfile examples/Justfile run-kvstore-stress-2
 just --justfile examples/Justfile run-smoke-real-wasm
 ```

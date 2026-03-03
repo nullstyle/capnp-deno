@@ -32,6 +32,17 @@ run-warmup-stats:
 run-smoke-real-wasm:
     deno run --allow-read smoke_real_wasm/smoke_real_wasm.ts
 
+run-kvstore-stress-2 host="127.0.0.1" port="9000" key_space="16384" active_keys="1024" concurrency="32" min_batch="8" max_batch="64" duration_seconds="0":
+    deno run --allow-net --allow-sys kvstore_stress_2/kvstore_stress_client.ts \
+        --host={{ host }} \
+        --port={{ port }} \
+        --key-space={{ key_space }} \
+        --active-keys={{ active_keys }} \
+        --concurrency={{ concurrency }} \
+        --min-batch={{ min_batch }} \
+        --max-batch={{ max_batch }} \
+        --duration-seconds={{ duration_seconds }}
+
 # Generate RPC stubs for schema-driven examples
 
 gen-getting-started:
@@ -48,7 +59,13 @@ gen-tcp-echo-server:
     mkdir -p tcp_echo_server/generated
     PATH="$HOME/.bin:$PATH" capnp compile -I .. -odeno:tcp_echo_server/generated tcp_echo_server/tcp_echo_server.capnp
 
+gen-kvstore-stress-2:
+    rm -rf kvstore_stress_2/gen
+    mkdir -p kvstore_stress_2/gen
+    deno task codegen --schema kvstore_stress_2/kvstore.capnp --out kvstore_stress_2/gen --layout flat
+
 gen-rpc:
     just gen-getting-started
     just gen-tcp-golden-path
     just gen-tcp-echo-server
+    just gen-kvstore-stress-2
