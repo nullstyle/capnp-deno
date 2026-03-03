@@ -109,6 +109,8 @@ export interface CapnpWasmExports {
     out_msg_ptr_ptr: number,
     out_msg_len_ptr: number,
   ): number;
+
+  capnp_shutdown?(): void;
 }
 
 /**
@@ -139,6 +141,7 @@ export interface WasmAbiCapabilities {
   hasSchemaManifest: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
+  hasShutdown: boolean;
   hasAbiVersion: boolean;
   hasAbiVersionRange: boolean;
   hasFeatureFlags: boolean;
@@ -330,6 +333,7 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     hasSchemaManifest: typeof exports.capnp_schema_manifest_json === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
+    hasShutdown: typeof exports.capnp_shutdown === "function",
     hasAbiVersion: abiVersion !== null,
     hasAbiVersionRange: hasAbiVersionRange,
     hasFeatureFlags: hasFeatureFlags,
@@ -497,6 +501,12 @@ export function getCapnpWasmExports(
     exports.capnp_error_take = expectFunction(
       raw.capnp_error_take,
       "capnp_error_take",
+    );
+  }
+  if (raw.capnp_shutdown !== undefined) {
+    exports.capnp_shutdown = expectFunction(
+      raw.capnp_shutdown,
+      "capnp_shutdown",
     );
   }
 
@@ -1010,6 +1020,18 @@ export class WasmAbi {
       throw new WasmAbiError(`feature bit must be in [0, 63], got ${bit}`);
     }
     return ((this.capabilities.featureFlags >> BigInt(bit)) & 1n) === 1n;
+  }
+
+  /**
+   * Shuts down the WASM module, releasing any global state.
+   *
+   * This is a no-op if the WASM module does not export `capnp_shutdown`.
+   * All peers should be freed before calling this method.
+   */
+  shutdown(): void {
+    if (this.capabilities.hasShutdown) {
+      this.exports.capnp_shutdown!();
+    }
   }
 
   private checkVersion(options: WasmAbiOptions): void {
