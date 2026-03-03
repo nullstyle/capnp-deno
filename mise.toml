@@ -1,4 +1,4 @@
 [tools]
 deno = "2.6.8"
 just = "1.46.0"
-zig = "0.15.2"
+zig = "master"
