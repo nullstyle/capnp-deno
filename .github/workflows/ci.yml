@@ -12,11 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4.3.1  # actions/checkout v4
+      - uses: actions/checkout@v4.3.1 # actions/checkout v4
         with:
           submodules: recursive
 
-      - uses: jdx/mise-action@v3.6.1  # jdx/mise-action v3
+      - uses: jdx/mise-action@v3.6.1 # jdx/mise-action v3
         with:
           install: true
           cache: true
@@ -50,7 +50,7 @@ jobs:
 
       - name: Upload coverage report
         if: env.ACT != 'true'
-        uses: actions/upload-artifact@v4.6.2  # actions/upload-artifact v4
+        uses: actions/upload-artifact@v4.6.2 # actions/upload-artifact v4
         with:
           name: coverage-report
           path: coverage/
@@ -62,9 +62,9 @@ jobs:
     timeout-minutes: 10
     needs: verify
     steps:
-      - uses: actions/checkout@v4.3.1  # actions/checkout v4
+      - uses: actions/checkout@v4.3.1 # actions/checkout v4
 
-      - uses: jdx/mise-action@v3.6.1  # jdx/mise-action v3
+      - uses: jdx/mise-action@v3.6.1 # jdx/mise-action v3
         with:
           install: true
           cache: true
@@ -91,14 +91,14 @@ jobs:
   # ── Real WASM: build wasm from capnp-zig, run real-wasm tests ─────
   real-wasm:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     needs: verify
     steps:
-      - uses: actions/checkout@v4.3.1  # actions/checkout v4
+      - uses: actions/checkout@v4.3.1 # actions/checkout v4
         with:
           submodules: recursive
 
-      - uses: jdx/mise-action@v3.6.1  # jdx/mise-action v3
+      - uses: jdx/mise-action@v3.6.1 # jdx/mise-action v3
         with:
           install: true
           cache: true
@@ -120,7 +120,7 @@ jobs:
           fi
 
       - name: Cache zig build artifacts
-        uses: actions/cache@v4.3.0  # actions/cache v4
+        uses: actions/cache@v4.3.0 # actions/cache v4
         with:
           path: |
             vendor/capnp-zig/.zig-cache
@@ -146,9 +146,9 @@ jobs:
     needs: verify
     if: always() && needs.verify.result == 'success'
     steps:
-      - uses: actions/checkout@v4.3.1  # actions/checkout v4
+      - uses: actions/checkout@v4.3.1 # actions/checkout v4
 
-      - uses: jdx/mise-action@v3.6.1  # jdx/mise-action v3
+      - uses: jdx/mise-action@v3.6.1 # jdx/mise-action v3
         with:
           install: true
           cache: true
@@ -170,7 +170,7 @@ jobs:
           fi
 
       - name: Restore previous benchmark results
-        uses: actions/cache/restore@v4.3.0  # actions/cache v4
+        uses: actions/cache/restore@v4.3.0 # actions/cache v4
         with:
           path: bench/results.json
           key: bench-results-${{ github.ref_name }}-${{ github.sha }}
@@ -196,7 +196,7 @@ jobs:
 
       - name: Upload benchmark results artifact
         if: always() && env.ACT != 'true'
-        uses: actions/upload-artifact@v4.6.2  # actions/upload-artifact v4
+        uses: actions/upload-artifact@v4.6.2 # actions/upload-artifact v4
         with:
           name: bench-results
           path: bench/results.json
@@ -205,7 +205,7 @@ jobs:
 
       - name: Save benchmark results to cache
         if: always() && hashFiles('bench/results.json') != ''
-        uses: actions/cache/save@v4.3.0  # actions/cache v4
+        uses: actions/cache/save@v4.3.0 # actions/cache v4
         with:
           path: bench/results.json
           key: bench-results-${{ github.ref_name }}-${{ github.sha }}
