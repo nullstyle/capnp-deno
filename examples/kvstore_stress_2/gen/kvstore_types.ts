@@ -61,21 +61,30 @@ import {
 
 const RPC_STUB_CAPABILITY = Symbol.for("@nullstyle/capnp/rpcStubCapability");
 
-interface RpcClientTransportWithCapabilityExport
-  extends RpcClientTransport {
-  exportCapability?(dispatch: RpcServerDispatch, options?: RpcExportCapabilityOptions): CapabilityPointer;
+interface RpcClientTransportWithCapabilityExport extends RpcClientTransport {
+  exportCapability?(
+    dispatch: RpcServerDispatch,
+    options?: RpcExportCapabilityOptions,
+  ): CapabilityPointer;
 }
 
 function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
   if (!value || typeof value !== "object") return null;
   const direct = value as { capabilityIndex?: unknown };
-  if (typeof direct.capabilityIndex === "number" && Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0) {
+  if (
+    typeof direct.capabilityIndex === "number" &&
+    Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: direct.capabilityIndex };
   }
   const tagged = (value as Record<PropertyKey, unknown>)[RPC_STUB_CAPABILITY];
   if (!tagged || typeof tagged !== "object") return null;
   const taggedPointer = tagged as { capabilityIndex?: unknown };
-  if (typeof taggedPointer.capabilityIndex === "number" && Number.isInteger(taggedPointer.capabilityIndex) && taggedPointer.capabilityIndex >= 0) {
+  if (
+    typeof taggedPointer.capabilityIndex === "number" &&
+    Number.isInteger(taggedPointer.capabilityIndex) &&
+    taggedPointer.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: taggedPointer.capabilityIndex };
   }
   return null;
@@ -116,20 +125,32 @@ function withCapabilityStubLifecycle<TClient extends object>(
 function capabilityToServiceStub<TClient extends object>(
   value: unknown,
   transport: RpcClientTransport,
-  createClient: (transport: RpcClientTransport, capability: CapabilityPointer) => TClient,
+  createClient: (
+    transport: RpcClientTransport,
+    capability: CapabilityPointer,
+  ) => TClient,
 ): RpcStub<TClient> {
   const capability = requireRpcStubCapability(value);
-  return withCapabilityStubLifecycle(createClient(transport, capability), capability, transport);
+  return withCapabilityStubLifecycle(
+    createClient(transport, capability),
+    capability,
+    transport,
+  );
 }
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error("rpc outbound client is unavailable for capability callbacks");
+    throw new Error(
+      "rpc outbound client is unavailable for capability callbacks",
+    );
   }
   return ctx.outboundClient;
 }
 
-function exportCapabilityFromTransport<TClient extends object, TServer extends object>(
+function exportCapabilityFromTransport<
+  TClient extends object,
+  TServer extends object,
+>(
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -151,7 +172,10 @@ function exportCapabilityFromTransport<TClient extends object, TServer extends o
   );
 }
 
-function exportCapabilityFromContext<TClient extends object, TServer extends object>(
+function exportCapabilityFromContext<
+  TClient extends object,
+  TServer extends object,
+>(
   ctx: RpcCallContext,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -159,7 +183,9 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error("rpc call context does not support exporting local capabilities");
+    throw new Error(
+      "rpc call context does not support exporting local capabilities",
+    );
   }
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
@@ -355,10 +381,8 @@ export const EntryStruct: StructDescriptor<Entry> = {
   ],
 };
 export const EntryCodec: StructCodec<Entry> = {
-  encode: (value: Entry): Uint8Array =>
-    encodeStructMessage(EntryStruct, value),
-  decode: (bytes: Uint8Array): Entry =>
-    decodeStructMessage(EntryStruct, bytes),
+  encode: (value: Entry): Uint8Array => encodeStructMessage(EntryStruct, value),
+  decode: (bytes: Uint8Array): Entry => decodeStructMessage(EntryStruct, bytes),
 };
 
 export const KeysChangedParamsStruct: StructDescriptor<KeysChangedParams> = {
@@ -374,7 +398,10 @@ export const KeysChangedParamsStruct: StructDescriptor<KeysChangedParams> = {
       kind: "slot",
       name: "changes",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => WriteOpResultStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => WriteOpResultStruct },
+      },
     },
   ],
 };
@@ -390,10 +417,8 @@ export const KeysChangedResultsStruct: StructDescriptor<KeysChangedResults> = {
   name: "KeysChangedResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const KeysChangedResultsCodec: StructCodec<KeysChangedResults> = {
   encode: (value: KeysChangedResults): Uint8Array =>
@@ -402,7 +427,9 @@ export const KeysChangedResultsCodec: StructCodec<KeysChangedResults> = {
     decodeStructMessage(KeysChangedResultsStruct, bytes),
 };
 
-export const StateResetRequiredParamsStruct: StructDescriptor<StateResetRequiredParams> = {
+export const StateResetRequiredParamsStruct: StructDescriptor<
+  StateResetRequiredParams
+> = {
   kind: "struct",
   name: "StateResetRequiredParams",
   dataWordCount: 2,
@@ -426,24 +453,28 @@ export const StateResetRequiredParamsStruct: StructDescriptor<StateResetRequired
     },
   ],
 };
-export const StateResetRequiredParamsCodec: StructCodec<StateResetRequiredParams> = {
+export const StateResetRequiredParamsCodec: StructCodec<
+  StateResetRequiredParams
+> = {
   encode: (value: StateResetRequiredParams): Uint8Array =>
     encodeStructMessage(StateResetRequiredParamsStruct, value),
   decode: (bytes: Uint8Array): StateResetRequiredParams =>
     decodeStructMessage(StateResetRequiredParamsStruct, bytes),
 };
 
-export const StateResetRequiredResultsStruct: StructDescriptor<StateResetRequiredResults> = {
+export const StateResetRequiredResultsStruct: StructDescriptor<
+  StateResetRequiredResults
+> = {
   kind: "struct",
   name: "StateResetRequiredResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
-export const StateResetRequiredResultsCodec: StructCodec<StateResetRequiredResults> = {
+export const StateResetRequiredResultsCodec: StructCodec<
+  StateResetRequiredResults
+> = {
   encode: (value: StateResetRequiredResults): Uint8Array =>
     encodeStructMessage(StateResetRequiredResultsStruct, value),
   decode: (bytes: Uint8Array): StateResetRequiredResults =>
@@ -474,30 +505,31 @@ export const CreateBackupParamsCodec: StructCodec<CreateBackupParams> = {
     decodeStructMessage(CreateBackupParamsStruct, bytes),
 };
 
-export const CreateBackupResultsStruct: StructDescriptor<CreateBackupResults> = {
-  kind: "struct",
-  name: "CreateBackupResults",
-  dataWordCount: 1,
-  pointerCount: 1,
-  createDefault: () => ({
-    backup: BackupInfoStruct.createDefault(),
-    backupCount: 0,
-  }),
-  fields: [
-    {
-      kind: "slot",
-      name: "backup",
-      offset: 0,
-      type: { kind: "struct", get: () => BackupInfoStruct },
-    },
-    {
-      kind: "slot",
-      name: "backupCount",
-      offset: 0,
-      type: TYPE_UINT32,
-    },
-  ],
-};
+export const CreateBackupResultsStruct: StructDescriptor<CreateBackupResults> =
+  {
+    kind: "struct",
+    name: "CreateBackupResults",
+    dataWordCount: 1,
+    pointerCount: 1,
+    createDefault: () => ({
+      backup: BackupInfoStruct.createDefault(),
+      backupCount: 0,
+    }),
+    fields: [
+      {
+        kind: "slot",
+        name: "backup",
+        offset: 0,
+        type: { kind: "struct", get: () => BackupInfoStruct },
+      },
+      {
+        kind: "slot",
+        name: "backupCount",
+        offset: 0,
+        type: TYPE_UINT32,
+      },
+    ],
+  };
 export const CreateBackupResultsCodec: StructCodec<CreateBackupResults> = {
   encode: (value: CreateBackupResults): Uint8Array =>
     encodeStructMessage(CreateBackupResultsStruct, value),
@@ -604,7 +636,10 @@ export const ListResultsStruct: StructDescriptor<ListResults> = {
       kind: "slot",
       name: "entries",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => EntryStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => EntryStruct },
+      },
     },
   ],
 };
@@ -620,10 +655,8 @@ export const ListBackupsParamsStruct: StructDescriptor<ListBackupsParams> = {
   name: "ListBackupsParams",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const ListBackupsParamsCodec: StructCodec<ListBackupsParams> = {
   encode: (value: ListBackupsParams): Uint8Array =>
@@ -645,7 +678,10 @@ export const ListBackupsResultsStruct: StructDescriptor<ListBackupsResults> = {
       kind: "slot",
       name: "backups",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => BackupInfoStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => BackupInfoStruct },
+      },
     },
   ],
 };
@@ -656,7 +692,9 @@ export const ListBackupsResultsCodec: StructCodec<ListBackupsResults> = {
     decodeStructMessage(ListBackupsResultsStruct, bytes),
 };
 
-export const RestoreFromBackupParamsStruct: StructDescriptor<RestoreFromBackupParams> = {
+export const RestoreFromBackupParamsStruct: StructDescriptor<
+  RestoreFromBackupParams
+> = {
   kind: "struct",
   name: "RestoreFromBackupParams",
   dataWordCount: 1,
@@ -680,14 +718,18 @@ export const RestoreFromBackupParamsStruct: StructDescriptor<RestoreFromBackupPa
     },
   ],
 };
-export const RestoreFromBackupParamsCodec: StructCodec<RestoreFromBackupParams> = {
+export const RestoreFromBackupParamsCodec: StructCodec<
+  RestoreFromBackupParams
+> = {
   encode: (value: RestoreFromBackupParams): Uint8Array =>
     encodeStructMessage(RestoreFromBackupParamsStruct, value),
   decode: (bytes: Uint8Array): RestoreFromBackupParams =>
     decodeStructMessage(RestoreFromBackupParamsStruct, bytes),
 };
 
-export const RestoreFromBackupResultsStruct: StructDescriptor<RestoreFromBackupResults> = {
+export const RestoreFromBackupResultsStruct: StructDescriptor<
+  RestoreFromBackupResults
+> = {
   kind: "struct",
   name: "RestoreFromBackupResults",
   dataWordCount: 2,
@@ -711,14 +753,18 @@ export const RestoreFromBackupResultsStruct: StructDescriptor<RestoreFromBackupR
     },
   ],
 };
-export const RestoreFromBackupResultsCodec: StructCodec<RestoreFromBackupResults> = {
+export const RestoreFromBackupResultsCodec: StructCodec<
+  RestoreFromBackupResults
+> = {
   encode: (value: RestoreFromBackupResults): Uint8Array =>
     encodeStructMessage(RestoreFromBackupResultsStruct, value),
   decode: (bytes: Uint8Array): RestoreFromBackupResults =>
     decodeStructMessage(RestoreFromBackupResultsStruct, bytes),
 };
 
-export const SetWatchedKeysParamsStruct: StructDescriptor<SetWatchedKeysParams> = {
+export const SetWatchedKeysParamsStruct: StructDescriptor<
+  SetWatchedKeysParams
+> = {
   kind: "struct",
   name: "SetWatchedKeysParams",
   dataWordCount: 0,
@@ -742,15 +788,15 @@ export const SetWatchedKeysParamsCodec: StructCodec<SetWatchedKeysParams> = {
     decodeStructMessage(SetWatchedKeysParamsStruct, bytes),
 };
 
-export const SetWatchedKeysResultsStruct: StructDescriptor<SetWatchedKeysResults> = {
+export const SetWatchedKeysResultsStruct: StructDescriptor<
+  SetWatchedKeysResults
+> = {
   kind: "struct",
   name: "SetWatchedKeysResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const SetWatchedKeysResultsCodec: StructCodec<SetWatchedKeysResults> = {
   encode: (value: SetWatchedKeysResults): Uint8Array =>
@@ -788,10 +834,8 @@ export const SubscribeResultsStruct: StructDescriptor<SubscribeResults> = {
   name: "SubscribeResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const SubscribeResultsCodec: StructCodec<SubscribeResults> = {
   encode: (value: SubscribeResults): Uint8Array =>
@@ -813,7 +857,10 @@ export const WriteBatchParamsStruct: StructDescriptor<WriteBatchParams> = {
       kind: "slot",
       name: "ops",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => WriteOpStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => WriteOpStruct },
+      },
     },
   ],
 };
@@ -839,7 +886,10 @@ export const WriteBatchResultsStruct: StructDescriptor<WriteBatchResults> = {
       kind: "slot",
       name: "results",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => WriteOpResultStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => WriteOpResultStruct },
+      },
     },
     {
       kind: "slot",
@@ -976,75 +1026,158 @@ export const KvClientNotifierMethodOrdinals = {
 } as const;
 
 export interface KvClientNotifierClient {
-  keysChanged(params: KeysChangedParams, options?: RpcCallOptions): Promise<KeysChangedResults>;
-  stateResetRequired(params: StateResetRequiredParams, options?: RpcCallOptions): Promise<StateResetRequiredResults>;
+  keysChanged(
+    params: KeysChangedParams,
+    options?: RpcCallOptions,
+  ): Promise<KeysChangedResults>;
+  stateResetRequired(
+    params: StateResetRequiredParams,
+    options?: RpcCallOptions,
+  ): Promise<StateResetRequiredResults>;
 }
 
 export interface KvClientNotifierServer {
-  keysChanged(params: KeysChangedParams, ctx: RpcCallContext): Promise<KeysChangedResults> | KeysChangedResults;
-  stateResetRequired(params: StateResetRequiredParams, ctx: RpcCallContext): Promise<StateResetRequiredResults> | StateResetRequiredResults;
+  keysChanged(
+    params: KeysChangedParams,
+    ctx: RpcCallContext,
+  ): Promise<KeysChangedResults> | KeysChangedResults;
+  stateResetRequired(
+    params: StateResetRequiredParams,
+    ctx: RpcCallContext,
+  ): Promise<StateResetRequiredResults> | StateResetRequiredResults;
 }
 
-export function createKvClientNotifierClient(transport: RpcClientTransport, capability: CapabilityPointer): KvClientNotifierClient {
+export function createKvClientNotifierClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): KvClientNotifierClient {
   return {
-    keysChanged: async (params: KeysChangedParams, options?: RpcCallOptions): Promise<KeysChangedResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(KeysChangedParamsStruct, params);
+    keysChanged: async (
+      params: KeysChangedParams,
+      options?: RpcCallOptions,
+    ): Promise<KeysChangedResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        KeysChangedParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvClientNotifierMethodOrdinals["keysChanged"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvClientNotifierMethodOrdinals["keysChanged"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(KeysChangedResultsStruct, raw.contentBytes, raw.capTable) as KeysChangedResults;
+          return decodeStructMessageWithCaps(
+            KeysChangedResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as KeysChangedResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvClientNotifierMethodOrdinals["keysChanged"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvClientNotifierMethodOrdinals["keysChanged"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(KeysChangedResultsStruct, response, []) as KeysChangedResults;
+        return decodeStructMessageWithCaps(
+          KeysChangedResultsStruct,
+          response,
+          [],
+        ) as KeysChangedResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    stateResetRequired: async (params: StateResetRequiredParams, options?: RpcCallOptions): Promise<StateResetRequiredResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(StateResetRequiredParamsStruct, params);
+    stateResetRequired: async (
+      params: StateResetRequiredParams,
+      options?: RpcCallOptions,
+    ): Promise<StateResetRequiredResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        StateResetRequiredParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvClientNotifierMethodOrdinals["stateResetRequired"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvClientNotifierMethodOrdinals["stateResetRequired"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(StateResetRequiredResultsStruct, raw.contentBytes, raw.capTable) as StateResetRequiredResults;
+          return decodeStructMessageWithCaps(
+            StateResetRequiredResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as StateResetRequiredResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvClientNotifierMethodOrdinals["stateResetRequired"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvClientNotifierMethodOrdinals["stateResetRequired"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(StateResetRequiredResultsStruct, response, []) as StateResetRequiredResults;
+        return decodeStructMessageWithCaps(
+          StateResetRequiredResultsStruct,
+          response,
+          [],
+        ) as StateResetRequiredResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
@@ -1060,24 +1193,44 @@ export async function bootstrapKvClientNotifierClient(
   return createKvClientNotifierClient(transport, capability);
 }
 
-export function createKvClientNotifierServer(server: KvClientNotifierServer): RpcServerDispatch {
+export function createKvClientNotifierServer(
+  server: KvClientNotifierServer,
+): RpcServerDispatch {
   return {
     interfaceId: KvClientNotifierInterfaceId,
-    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(KeysChangedParamsStruct, params, ctx.paramsCapTable ?? []) as KeysChangedParams;
+          const decoded = decodeStructMessageWithCaps(
+            KeysChangedParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as KeysChangedParams;
           const result = await server["keysChanged"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(KeysChangedResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            KeysChangedResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 1: {
-          const decoded = decodeStructMessageWithCaps(StateResetRequiredParamsStruct, params, ctx.paramsCapTable ?? []) as StateResetRequiredParams;
+          const decoded = decodeStructMessageWithCaps(
+            StateResetRequiredParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as StateResetRequiredParams;
           const result = await server["stateResetRequired"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(StateResetRequiredResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            StateResetRequiredResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -1095,7 +1248,10 @@ export function registerKvClientNotifierServer(
   server: KvClientNotifierServer,
   options: RpcExportCapabilityOptions = {},
 ): CapabilityPointer {
-  return registry.exportCapability(createKvClientNotifierServer(server), options);
+  return registry.exportCapability(
+    createKvClientNotifierServer(server),
+    options,
+  );
 }
 
 export const KvStoreInterfaceId = 0xdabb8fabf7a284bfn;
@@ -1113,272 +1269,586 @@ export const KvStoreMethodOrdinals = {
 
 export interface KvStoreClient {
   get(params: GetParams, options?: RpcCallOptions): Promise<GetResults>;
-  writeBatch(params: WriteBatchParams, options?: RpcCallOptions): Promise<WriteBatchResults>;
+  writeBatch(
+    params: WriteBatchParams,
+    options?: RpcCallOptions,
+  ): Promise<WriteBatchResults>;
   list(params: ListParams, options?: RpcCallOptions): Promise<ListResults>;
-  subscribe(params: SubscribeParams, options?: RpcCallOptions): Promise<SubscribeResults>;
-  setWatchedKeys(params: SetWatchedKeysParams, options?: RpcCallOptions): Promise<SetWatchedKeysResults>;
-  createBackup(params: CreateBackupParams, options?: RpcCallOptions): Promise<CreateBackupResults>;
-  listBackups(params: ListBackupsParams, options?: RpcCallOptions): Promise<ListBackupsResults>;
-  restoreFromBackup(params: RestoreFromBackupParams, options?: RpcCallOptions): Promise<RestoreFromBackupResults>;
+  subscribe(
+    params: SubscribeParams,
+    options?: RpcCallOptions,
+  ): Promise<SubscribeResults>;
+  setWatchedKeys(
+    params: SetWatchedKeysParams,
+    options?: RpcCallOptions,
+  ): Promise<SetWatchedKeysResults>;
+  createBackup(
+    params: CreateBackupParams,
+    options?: RpcCallOptions,
+  ): Promise<CreateBackupResults>;
+  listBackups(
+    params: ListBackupsParams,
+    options?: RpcCallOptions,
+  ): Promise<ListBackupsResults>;
+  restoreFromBackup(
+    params: RestoreFromBackupParams,
+    options?: RpcCallOptions,
+  ): Promise<RestoreFromBackupResults>;
 }
 
 export interface KvStoreServer {
   get(params: GetParams, ctx: RpcCallContext): Promise<GetResults> | GetResults;
-  writeBatch(params: WriteBatchParams, ctx: RpcCallContext): Promise<WriteBatchResults> | WriteBatchResults;
-  list(params: ListParams, ctx: RpcCallContext): Promise<ListResults> | ListResults;
-  subscribe(params: SubscribeParams, ctx: RpcCallContext): Promise<SubscribeResults> | SubscribeResults;
-  setWatchedKeys(params: SetWatchedKeysParams, ctx: RpcCallContext): Promise<SetWatchedKeysResults> | SetWatchedKeysResults;
-  createBackup(params: CreateBackupParams, ctx: RpcCallContext): Promise<CreateBackupResults> | CreateBackupResults;
-  listBackups(params: ListBackupsParams, ctx: RpcCallContext): Promise<ListBackupsResults> | ListBackupsResults;
-  restoreFromBackup(params: RestoreFromBackupParams, ctx: RpcCallContext): Promise<RestoreFromBackupResults> | RestoreFromBackupResults;
+  writeBatch(
+    params: WriteBatchParams,
+    ctx: RpcCallContext,
+  ): Promise<WriteBatchResults> | WriteBatchResults;
+  list(
+    params: ListParams,
+    ctx: RpcCallContext,
+  ): Promise<ListResults> | ListResults;
+  subscribe(
+    params: SubscribeParams,
+    ctx: RpcCallContext,
+  ): Promise<SubscribeResults> | SubscribeResults;
+  setWatchedKeys(
+    params: SetWatchedKeysParams,
+    ctx: RpcCallContext,
+  ): Promise<SetWatchedKeysResults> | SetWatchedKeysResults;
+  createBackup(
+    params: CreateBackupParams,
+    ctx: RpcCallContext,
+  ): Promise<CreateBackupResults> | CreateBackupResults;
+  listBackups(
+    params: ListBackupsParams,
+    ctx: RpcCallContext,
+  ): Promise<ListBackupsResults> | ListBackupsResults;
+  restoreFromBackup(
+    params: RestoreFromBackupParams,
+    ctx: RpcCallContext,
+  ): Promise<RestoreFromBackupResults> | RestoreFromBackupResults;
 }
 
-export function createKvStoreClient(transport: RpcClientTransport, capability: CapabilityPointer): KvStoreClient {
+export function createKvStoreClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): KvStoreClient {
   return {
-    get: async (params: GetParams, options?: RpcCallOptions): Promise<GetResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(GetParamsStruct, params);
+    get: async (
+      params: GetParams,
+      options?: RpcCallOptions,
+    ): Promise<GetResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        GetParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["get"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["get"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(GetResultsStruct, raw.contentBytes, raw.capTable) as GetResults;
+          return decodeStructMessageWithCaps(
+            GetResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as GetResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["get"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["get"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(GetResultsStruct, response, []) as GetResults;
+        return decodeStructMessageWithCaps(
+          GetResultsStruct,
+          response,
+          [],
+        ) as GetResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    writeBatch: async (params: WriteBatchParams, options?: RpcCallOptions): Promise<WriteBatchResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(WriteBatchParamsStruct, params);
+    writeBatch: async (
+      params: WriteBatchParams,
+      options?: RpcCallOptions,
+    ): Promise<WriteBatchResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        WriteBatchParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["writeBatch"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["writeBatch"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(WriteBatchResultsStruct, raw.contentBytes, raw.capTable) as WriteBatchResults;
+          return decodeStructMessageWithCaps(
+            WriteBatchResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as WriteBatchResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["writeBatch"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["writeBatch"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(WriteBatchResultsStruct, response, []) as WriteBatchResults;
+        return decodeStructMessageWithCaps(
+          WriteBatchResultsStruct,
+          response,
+          [],
+        ) as WriteBatchResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    list: async (params: ListParams, options?: RpcCallOptions): Promise<ListResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(ListParamsStruct, params);
+    list: async (
+      params: ListParams,
+      options?: RpcCallOptions,
+    ): Promise<ListResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        ListParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["list"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["list"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(ListResultsStruct, raw.contentBytes, raw.capTable) as ListResults;
+          return decodeStructMessageWithCaps(
+            ListResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as ListResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["list"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["list"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(ListResultsStruct, response, []) as ListResults;
+        return decodeStructMessageWithCaps(
+          ListResultsStruct,
+          response,
+          [],
+        ) as ListResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    subscribe: async (params: SubscribeParams, options?: RpcCallOptions): Promise<SubscribeResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(SubscribeParamsStruct, params);
+    subscribe: async (
+      params: SubscribeParams,
+      options?: RpcCallOptions,
+    ): Promise<SubscribeResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        SubscribeParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["subscribe"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["subscribe"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(SubscribeResultsStruct, raw.contentBytes, raw.capTable) as SubscribeResults;
+          return decodeStructMessageWithCaps(
+            SubscribeResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as SubscribeResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["subscribe"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["subscribe"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(SubscribeResultsStruct, response, []) as SubscribeResults;
+        return decodeStructMessageWithCaps(
+          SubscribeResultsStruct,
+          response,
+          [],
+        ) as SubscribeResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    setWatchedKeys: async (params: SetWatchedKeysParams, options?: RpcCallOptions): Promise<SetWatchedKeysResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(SetWatchedKeysParamsStruct, params);
+    setWatchedKeys: async (
+      params: SetWatchedKeysParams,
+      options?: RpcCallOptions,
+    ): Promise<SetWatchedKeysResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        SetWatchedKeysParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["setWatchedKeys"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["setWatchedKeys"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(SetWatchedKeysResultsStruct, raw.contentBytes, raw.capTable) as SetWatchedKeysResults;
+          return decodeStructMessageWithCaps(
+            SetWatchedKeysResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as SetWatchedKeysResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["setWatchedKeys"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["setWatchedKeys"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(SetWatchedKeysResultsStruct, response, []) as SetWatchedKeysResults;
+        return decodeStructMessageWithCaps(
+          SetWatchedKeysResultsStruct,
+          response,
+          [],
+        ) as SetWatchedKeysResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    createBackup: async (params: CreateBackupParams, options?: RpcCallOptions): Promise<CreateBackupResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(CreateBackupParamsStruct, params);
+    createBackup: async (
+      params: CreateBackupParams,
+      options?: RpcCallOptions,
+    ): Promise<CreateBackupResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        CreateBackupParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["createBackup"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["createBackup"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(CreateBackupResultsStruct, raw.contentBytes, raw.capTable) as CreateBackupResults;
+          return decodeStructMessageWithCaps(
+            CreateBackupResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as CreateBackupResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["createBackup"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["createBackup"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(CreateBackupResultsStruct, response, []) as CreateBackupResults;
+        return decodeStructMessageWithCaps(
+          CreateBackupResultsStruct,
+          response,
+          [],
+        ) as CreateBackupResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    listBackups: async (params: ListBackupsParams, options?: RpcCallOptions): Promise<ListBackupsResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(ListBackupsParamsStruct, params);
+    listBackups: async (
+      params: ListBackupsParams,
+      options?: RpcCallOptions,
+    ): Promise<ListBackupsResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        ListBackupsParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["listBackups"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["listBackups"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(ListBackupsResultsStruct, raw.contentBytes, raw.capTable) as ListBackupsResults;
+          return decodeStructMessageWithCaps(
+            ListBackupsResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as ListBackupsResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["listBackups"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["listBackups"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(ListBackupsResultsStruct, response, []) as ListBackupsResults;
+        return decodeStructMessageWithCaps(
+          ListBackupsResultsStruct,
+          response,
+          [],
+        ) as ListBackupsResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    restoreFromBackup: async (params: RestoreFromBackupParams, options?: RpcCallOptions): Promise<RestoreFromBackupResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(RestoreFromBackupParamsStruct, params);
+    restoreFromBackup: async (
+      params: RestoreFromBackupParams,
+      options?: RpcCallOptions,
+    ): Promise<RestoreFromBackupResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        RestoreFromBackupParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, KvStoreMethodOrdinals["restoreFromBackup"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          KvStoreMethodOrdinals["restoreFromBackup"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(RestoreFromBackupResultsStruct, raw.contentBytes, raw.capTable) as RestoreFromBackupResults;
+          return decodeStructMessageWithCaps(
+            RestoreFromBackupResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as RestoreFromBackupResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, KvStoreMethodOrdinals["restoreFromBackup"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        KvStoreMethodOrdinals["restoreFromBackup"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(RestoreFromBackupResultsStruct, response, []) as RestoreFromBackupResults;
+        return decodeStructMessageWithCaps(
+          RestoreFromBackupResultsStruct,
+          response,
+          [],
+        ) as RestoreFromBackupResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
@@ -1397,10 +1867,18 @@ export async function bootstrapKvStoreClient(
 export function createKvStoreServer(server: KvStoreServer): RpcServerDispatch {
   return {
     interfaceId: KvStoreInterfaceId,
-    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(GetParamsStruct, params, ctx.paramsCapTable ?? []) as GetParams;
+          const decoded = decodeStructMessageWithCaps(
+            GetParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as GetParams;
           const result = await server["get"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(GetResultsStruct, result);
           if (encoded.capTable.length > 0) {
@@ -1409,63 +1887,112 @@ export function createKvStoreServer(server: KvStoreServer): RpcServerDispatch {
           return encoded.content;
         }
         case 1: {
-          const decoded = decodeStructMessageWithCaps(WriteBatchParamsStruct, params, ctx.paramsCapTable ?? []) as WriteBatchParams;
+          const decoded = decodeStructMessageWithCaps(
+            WriteBatchParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as WriteBatchParams;
           const result = await server["writeBatch"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(WriteBatchResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            WriteBatchResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 2: {
-          const decoded = decodeStructMessageWithCaps(ListParamsStruct, params, ctx.paramsCapTable ?? []) as ListParams;
+          const decoded = decodeStructMessageWithCaps(
+            ListParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as ListParams;
           const result = await server["list"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(ListResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            ListResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 3: {
-          const decoded = decodeStructMessageWithCaps(SubscribeParamsStruct, params, ctx.paramsCapTable ?? []) as SubscribeParams;
+          const decoded = decodeStructMessageWithCaps(
+            SubscribeParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as SubscribeParams;
           const result = await server["subscribe"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(SubscribeResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            SubscribeResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 4: {
-          const decoded = decodeStructMessageWithCaps(SetWatchedKeysParamsStruct, params, ctx.paramsCapTable ?? []) as SetWatchedKeysParams;
+          const decoded = decodeStructMessageWithCaps(
+            SetWatchedKeysParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as SetWatchedKeysParams;
           const result = await server["setWatchedKeys"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(SetWatchedKeysResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            SetWatchedKeysResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 5: {
-          const decoded = decodeStructMessageWithCaps(CreateBackupParamsStruct, params, ctx.paramsCapTable ?? []) as CreateBackupParams;
+          const decoded = decodeStructMessageWithCaps(
+            CreateBackupParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as CreateBackupParams;
           const result = await server["createBackup"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(CreateBackupResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            CreateBackupResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 6: {
-          const decoded = decodeStructMessageWithCaps(ListBackupsParamsStruct, params, ctx.paramsCapTable ?? []) as ListBackupsParams;
+          const decoded = decodeStructMessageWithCaps(
+            ListBackupsParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as ListBackupsParams;
           const result = await server["listBackups"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(ListBackupsResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            ListBackupsResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 7: {
-          const decoded = decodeStructMessageWithCaps(RestoreFromBackupParamsStruct, params, ctx.paramsCapTable ?? []) as RestoreFromBackupParams;
+          const decoded = decodeStructMessageWithCaps(
+            RestoreFromBackupParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as RestoreFromBackupParams;
           const result = await server["restoreFromBackup"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(RestoreFromBackupResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            RestoreFromBackupResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -1487,8 +2014,14 @@ export function registerKvStoreServer(
 }
 
 export interface KvClientNotifier {
-  keysChanged(value: KeysChangedParams["changes"], options?: RpcCallOptions): Promise<void>;
-  stateResetRequired(params: StateResetRequiredParams, options?: RpcCallOptions): Promise<void>;
+  keysChanged(
+    value: KeysChangedParams["changes"],
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  stateResetRequired(
+    params: StateResetRequiredParams,
+    options?: RpcCallOptions,
+  ): Promise<void>;
 }
 
 function createKvClientNotifierServiceClient(
@@ -1496,11 +2029,17 @@ function createKvClientNotifierServiceClient(
   transport: RpcClientTransport,
 ): KvClientNotifier {
   return {
-    keysChanged: async (value: KeysChangedParams["changes"], options?: RpcCallOptions) => {
+    keysChanged: async (
+      value: KeysChangedParams["changes"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.keysChanged({ changes: value }, options);
       return;
     },
-    stateResetRequired: async (params: StateResetRequiredParams, options?: RpcCallOptions) => {
+    stateResetRequired: async (
+      params: StateResetRequiredParams,
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.stateResetRequired(params, options);
       return;
     },
@@ -1515,31 +2054,67 @@ function createKvClientNotifierServiceServer(
       const result = await server.keysChanged(params.changes);
       return {} as KeysChangedResults;
     },
-    stateResetRequired: async (params: StateResetRequiredParams, _ctx: RpcCallContext) => {
+    stateResetRequired: async (
+      params: StateResetRequiredParams,
+      _ctx: RpcCallContext,
+    ) => {
       const result = await server.stateResetRequired(params);
       return {} as StateResetRequiredResults;
     },
   };
 }
 
-export const KvClientNotifier: RpcServiceToken<KvClientNotifier> = Object.freeze({
-  interfaceId: KvClientNotifierInterfaceId,
-  interfaceName: "KvClientNotifier",
-  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>
-    createKvClientNotifierServiceClient(await bootstrapKvClientNotifierClient(transport, options), transport),
-  registerServer: (registry: RpcServerRegistry, server: KvClientNotifier, options?: RpcExportCapabilityOptions) =>
-    registerKvClientNotifierServer(registry, createKvClientNotifierServiceServer(server), options),
-});
+export const KvClientNotifier: RpcServiceToken<KvClientNotifier> = Object
+  .freeze({
+    interfaceId: KvClientNotifierInterfaceId,
+    interfaceName: "KvClientNotifier",
+    bootstrapClient: async (
+      transport: RpcBootstrapClientTransport,
+      options?: RpcCallOptions,
+    ) =>
+      createKvClientNotifierServiceClient(
+        await bootstrapKvClientNotifierClient(transport, options),
+        transport,
+      ),
+    registerServer: (
+      registry: RpcServerRegistry,
+      server: KvClientNotifier,
+      options?: RpcExportCapabilityOptions,
+    ) =>
+      registerKvClientNotifierServer(
+        registry,
+        createKvClientNotifierServiceServer(server),
+        options,
+      ),
+  });
 
 export interface KvStore {
   get(value: GetParams["key"], options?: RpcCallOptions): Promise<GetResults>;
-  writeBatch(value: WriteBatchParams["ops"], options?: RpcCallOptions): Promise<WriteBatchResults>;
-  list(params: ListParams, options?: RpcCallOptions): Promise<ListResults["entries"]>;
-  subscribe(value: KvClientNotifier | RpcStub<KvClientNotifier>, options?: RpcCallOptions): Promise<void>;
-  setWatchedKeys(value: SetWatchedKeysParams["keys"], options?: RpcCallOptions): Promise<void>;
-  createBackup(value: CreateBackupParams["flushBeforeBackup"], options?: RpcCallOptions): Promise<CreateBackupResults>;
+  writeBatch(
+    value: WriteBatchParams["ops"],
+    options?: RpcCallOptions,
+  ): Promise<WriteBatchResults>;
+  list(
+    params: ListParams,
+    options?: RpcCallOptions,
+  ): Promise<ListResults["entries"]>;
+  subscribe(
+    value: KvClientNotifier | RpcStub<KvClientNotifier>,
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  setWatchedKeys(
+    value: SetWatchedKeysParams["keys"],
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  createBackup(
+    value: CreateBackupParams["flushBeforeBackup"],
+    options?: RpcCallOptions,
+  ): Promise<CreateBackupResults>;
   listBackups(options?: RpcCallOptions): Promise<ListBackupsResults["backups"]>;
-  restoreFromBackup(params: RestoreFromBackupParams, options?: RpcCallOptions): Promise<RestoreFromBackupResults>;
+  restoreFromBackup(
+    params: RestoreFromBackupParams,
+    options?: RpcCallOptions,
+  ): Promise<RestoreFromBackupResults>;
 }
 
 function createKvStoreServiceClient(
@@ -1551,7 +2126,10 @@ function createKvStoreServiceClient(
       const result = await client.get({ key: value }, options);
       return result;
     },
-    writeBatch: async (value: WriteBatchParams["ops"], options?: RpcCallOptions) => {
+    writeBatch: async (
+      value: WriteBatchParams["ops"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.writeBatch({ ops: value }, options);
       return result;
     },
@@ -1559,23 +2137,44 @@ function createKvStoreServiceClient(
       const result = await client.list(params, options);
       return result.entries;
     },
-    subscribe: async (value: KvClientNotifier | RpcStub<KvClientNotifier>, options?: RpcCallOptions) => {
-      const result = await client.subscribe({ notifier: exportCapabilityFromTransport(transport, KvClientNotifier, value) }, options);
+    subscribe: async (
+      value: KvClientNotifier | RpcStub<KvClientNotifier>,
+      options?: RpcCallOptions,
+    ) => {
+      const result = await client.subscribe({
+        notifier: exportCapabilityFromTransport(
+          transport,
+          KvClientNotifier,
+          value,
+        ),
+      }, options);
       return;
     },
-    setWatchedKeys: async (value: SetWatchedKeysParams["keys"], options?: RpcCallOptions) => {
+    setWatchedKeys: async (
+      value: SetWatchedKeysParams["keys"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.setWatchedKeys({ keys: value }, options);
       return;
     },
-    createBackup: async (value: CreateBackupParams["flushBeforeBackup"], options?: RpcCallOptions) => {
-      const result = await client.createBackup({ flushBeforeBackup: value }, options);
+    createBackup: async (
+      value: CreateBackupParams["flushBeforeBackup"],
+      options?: RpcCallOptions,
+    ) => {
+      const result = await client.createBackup(
+        { flushBeforeBackup: value },
+        options,
+      );
       return result;
     },
     listBackups: async (options?: RpcCallOptions) => {
       const result = await client.listBackups({} as ListBackupsParams, options);
       return result.backups;
     },
-    restoreFromBackup: async (params: RestoreFromBackupParams, options?: RpcCallOptions) => {
+    restoreFromBackup: async (
+      params: RestoreFromBackupParams,
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.restoreFromBackup(params, options);
       return result;
     },
@@ -1599,10 +2198,23 @@ function createKvStoreServiceServer(
       return { entries: result };
     },
     subscribe: async (params: SubscribeParams, _ctx: RpcCallContext) => {
-      const result = await server.subscribe(capabilityToServiceStub(params.notifier, requireOutboundClient(_ctx), (nextTransport, nextCapability) => createKvClientNotifierServiceClient(createKvClientNotifierClient(nextTransport, nextCapability), nextTransport)));
+      const result = await server.subscribe(
+        capabilityToServiceStub(
+          params.notifier,
+          requireOutboundClient(_ctx),
+          (nextTransport, nextCapability) =>
+            createKvClientNotifierServiceClient(
+              createKvClientNotifierClient(nextTransport, nextCapability),
+              nextTransport,
+            ),
+        ),
+      );
       return {} as SubscribeResults;
     },
-    setWatchedKeys: async (params: SetWatchedKeysParams, _ctx: RpcCallContext) => {
+    setWatchedKeys: async (
+      params: SetWatchedKeysParams,
+      _ctx: RpcCallContext,
+    ) => {
       const result = await server.setWatchedKeys(params.keys);
       return {} as SetWatchedKeysResults;
     },
@@ -1614,7 +2226,10 @@ function createKvStoreServiceServer(
       const result = await server.listBackups();
       return { backups: result };
     },
-    restoreFromBackup: async (params: RestoreFromBackupParams, _ctx: RpcCallContext) => {
+    restoreFromBackup: async (
+      params: RestoreFromBackupParams,
+      _ctx: RpcCallContext,
+    ) => {
       const result = await server.restoreFromBackup(params);
       return result;
     },
@@ -1624,9 +2239,22 @@ function createKvStoreServiceServer(
 export const KvStore: RpcServiceToken<KvStore> = Object.freeze({
   interfaceId: KvStoreInterfaceId,
   interfaceName: "KvStore",
-  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>
-    createKvStoreServiceClient(await bootstrapKvStoreClient(transport, options), transport),
-  registerServer: (registry: RpcServerRegistry, server: KvStore, options?: RpcExportCapabilityOptions) =>
-    registerKvStoreServer(registry, createKvStoreServiceServer(server), options),
+  bootstrapClient: async (
+    transport: RpcBootstrapClientTransport,
+    options?: RpcCallOptions,
+  ) =>
+    createKvStoreServiceClient(
+      await bootstrapKvStoreClient(transport, options),
+      transport,
+    ),
+  registerServer: (
+    registry: RpcServerRegistry,
+    server: KvStore,
+    options?: RpcExportCapabilityOptions,
+  ) =>
+    registerKvStoreServer(
+      registry,
+      createKvStoreServiceServer(server),
+      options,
+    ),
 });
-

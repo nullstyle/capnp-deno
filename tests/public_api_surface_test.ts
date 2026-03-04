@@ -49,6 +49,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "TcpTransport",
   "TransportError",
   "TCP",
+  "WS",
   "WebSocketTransport",
   "assertNonNegativeFinite",
   "assertNonNegativeInteger",

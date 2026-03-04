@@ -1,20 +1,28 @@
 import {
   createRpcServiceToken,
+  EMPTY_STRUCT_MESSAGE,
+  ReconnectingRpcClientTransport,
   type RpcPeer,
   RpcSession,
   type RpcTransport,
   TCP,
+  TcpRpcClientTransport,
   TcpTransport,
+  TransportError,
   WasmPeer,
   WebSocketTransport,
+  WS,
 } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
+  assert,
   assertBytes,
   assertEquals,
   deferred,
   withTimeout,
 } from "../test_utils.ts";
+
+const EMPTY_RPC_PARAMS = EMPTY_STRUCT_MESSAGE;
 
 function buildSingleSegmentFrame(firstByte: number): Uint8Array {
   const frame = new Uint8Array(16);
@@ -207,6 +215,64 @@ function reserveTcpPort(): number {
   }
 }
 
+function waitForWebSocketOpen(socket: WebSocket): Promise<void> {
+  if (socket.readyState === WebSocket.OPEN) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("websocket failed to open"));
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("websocket closed before open"));
+    };
+    const cleanup = () => {
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
+    };
+
+    socket.addEventListener("open", onOpen, { once: true });
+    socket.addEventListener("error", onError, { once: true });
+    socket.addEventListener("close", onClose, { once: true });
+  });
+}
+
+async function waitForPromiseOrTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function immediateReconnectOptions() {
+  return {
+    policy: {
+      shouldRetry: (_ctx: unknown) => true,
+      nextDelayMs: (_ctx: unknown) => 0,
+    },
+    sleep: async (_delayMs: number) => {
+      // no-op for deterministic tests
+    },
+  };
+}
+
 Deno.test("TCP.serve disposes constructor instances on peer disconnect", async () => {
   const connected = deferred<RpcPeer>();
   const disposed = deferred<RpcPeer>();
@@ -257,6 +323,494 @@ Deno.test("TCP.serve disposes constructor instances on peer disconnect", async (
     } catch {
       // no-op
     }
+    await handle.close();
+  }
+});
+
+Deno.test("WS.serve disposes constructor instances on peer disconnect", async () => {
+  const connected = deferred<RpcPeer>();
+  const disposed = deferred<RpcPeer>();
+
+  class DisposableServer {
+    readonly peer: RpcPeer;
+
+    constructor(peer: RpcPeer) {
+      this.peer = peer;
+      connected.resolve(peer);
+    }
+
+    [Symbol.dispose](): void {
+      disposed.resolve(this.peer);
+    }
+  }
+
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    DisposableServer
+  >({
+    interfaceId: 0x88n,
+    interfaceName: "WsDisposeProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, DisposableServer, {
+    path: "/rpc",
+    protocols: ["capnp-rpc"],
+  });
+
+  let socket: WebSocket | null = null;
+  try {
+    socket = new WebSocket(`ws://127.0.0.1:${port}/rpc`, "capnp-rpc");
+    await withTimeout(waitForWebSocketOpen(socket), 2000, "ws connect");
+    await withTimeout(connected.promise, 2000, "ws server connect callback");
+
+    socket.close();
+    socket = null;
+
+    await withTimeout(disposed.promise, 2000, "ws server dispose callback");
+  } finally {
+    try {
+      socket?.close();
+    } catch {
+      // no-op
+    }
+    await handle.close();
+  }
+});
+
+Deno.test("WS.connect forwards sub-protocols for handshake", async () => {
+  class NoopServer {
+    constructor(_peer: RpcPeer) {}
+  }
+
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    NoopServer
+  >({
+    interfaceId: 0x99n,
+    interfaceName: "WsConnectProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, NoopServer, {
+    path: "/rpc",
+    protocols: ["capnp-rpc"],
+  });
+
+  let client: { close(): Promise<void> } | null = null;
+  try {
+    client = await WS.connect(service, `ws://127.0.0.1:${port}/rpc`, {
+      protocols: ["other-rpc", "capnp-rpc"],
+    });
+    await client.close();
+    client = null;
+
+    let handshakeRejected = false;
+    try {
+      const unexpectedClient = await WS.connect(
+        service,
+        `ws://127.0.0.1:${port}/rpc`,
+        {
+          protocols: ["other-rpc"],
+        },
+      );
+      await unexpectedClient.close();
+    } catch {
+      handshakeRejected = true;
+    }
+    assertEquals(
+      handshakeRejected,
+      true,
+      "expected websocket handshake rejection for unsupported protocol",
+    );
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+});
+
+Deno.test("WS.connect bootstraps through WS.serve runtime root wiring", async () => {
+  const service = createRpcServiceToken<
+    { rootCapabilityIndex: number },
+    Record<string, never>
+  >({
+    interfaceId: 0x120n,
+    interfaceName: "WsBootstrapProbe",
+    bootstrapClient: async (transport) => {
+      const capability = await transport.bootstrap();
+      return {
+        rootCapabilityIndex: capability.capabilityIndex,
+      };
+    },
+    registerServer: (registry, _server, options) =>
+      registry.exportCapability({
+        interfaceId: 0x120n,
+        dispatch: () => new Uint8Array(),
+      }, options),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+    path: "/rpc",
+  });
+
+  const client = await withTimeout(
+    WS.connect(service, `ws://127.0.0.1:${port}/rpc`),
+    2000,
+    "ws connect with bootstrap",
+  );
+  try {
+    assertEquals(client.rootCapabilityIndex, 0);
+  } finally {
+    await client.close();
+    await handle.close();
+  }
+});
+
+Deno.test("WS.serve reports websocket upgrade failures via onConnectionError", async () => {
+  const connectionError = deferred<unknown>();
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    Record<string, never>
+  >({
+    interfaceId: 0x121n,
+    interfaceName: "WsInitFailureProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => {
+      throw new Error("register server failure");
+    },
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+    path: "/rpc",
+    onConnectionError: (error) => {
+      connectionError.resolve(error);
+    },
+  });
+
+  let conn: Deno.Conn | null = null;
+  try {
+    conn = await Deno.connect({
+      transport: "tcp",
+      hostname: "127.0.0.1",
+      port,
+    });
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const request = [
+      "GET /rpc HTTP/1.1",
+      `Host: 127.0.0.1:${port}`,
+      "Connection: Upgrade",
+      "Upgrade: websocket",
+      "",
+      "",
+    ].join("\r\n");
+    await conn.write(encoder.encode(request));
+
+    const responseBytes = new Uint8Array(1024);
+    const count = await conn.read(responseBytes);
+    assert(count !== null && count > 0, "expected HTTP response bytes");
+    const response = decoder.decode(responseBytes.subarray(0, count));
+    assert(
+      / 400 /.test(response),
+      `expected 400 response for invalid websocket upgrade, got: ${response}`,
+    );
+
+    const error = await withTimeout(
+      connectionError.promise,
+      2000,
+      "ws upgrade error callback",
+    );
+    assert(
+      error instanceof Error,
+      `expected websocket upgrade error object, got: ${String(error)}`,
+    );
+  } finally {
+    try {
+      conn?.close();
+    } catch {
+      // no-op
+    }
+    await handle.close();
+  }
+});
+
+Deno.test("WS.serve forwards transport frame-limit failures to transport.onError", async () => {
+  const transportError = deferred<unknown>();
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    Record<string, never>
+  >({
+    interfaceId: 0x122n,
+    interfaceName: "WsFrameLimitProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: (registry, _server, options) =>
+      registry.exportCapability({
+        interfaceId: 0x122n,
+        dispatch: () => new Uint8Array(),
+      }, options),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+    path: "/rpc",
+    transport: {
+      frameLimits: {
+        maxFrameBytes: 8,
+      },
+      onError: (error) => {
+        transportError.resolve(error);
+      },
+    },
+  });
+
+  let socket: WebSocket | null = null;
+  try {
+    socket = new WebSocket(`ws://127.0.0.1:${port}/rpc`);
+    await withTimeout(waitForWebSocketOpen(socket), 2000, "ws connect");
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      socket.send(buildSingleSegmentFrame(0x66));
+      const observed = await waitForPromiseOrTimeout(
+        transportError.promise.then(() => true),
+        50,
+      );
+      if (observed) {
+        break;
+      }
+    }
+
+    const error = await withTimeout(
+      transportError.promise,
+      2000,
+      "ws frame-limit transport error callback",
+    );
+    assert(
+      error instanceof Error && /frame size/i.test(error.message),
+      `expected frame size error, got: ${String(error)}`,
+    );
+  } finally {
+    try {
+      socket?.close();
+    } catch {
+      // no-op
+    }
+    await handle.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport retries bootstrap-cap calls over live WebSocket reconnect", async () => {
+  let acceptedConnections = 0;
+
+  class ReconnectRootServer {
+    readonly connectionId: number;
+
+    constructor(_peer: RpcPeer) {
+      acceptedConnections += 1;
+      this.connectionId = acceptedConnections;
+    }
+  }
+
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    ReconnectRootServer
+  >({
+    interfaceId: 0x130n,
+    interfaceName: "WsReconnectBootstrapProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: (registry, _server, options) =>
+      registry.exportCapability({
+        interfaceId: 0x130n,
+        dispatch: () => EMPTY_STRUCT_MESSAGE,
+      }, options),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, ReconnectRootServer, {
+    path: "/rpc",
+  });
+
+  let connectCount = 0;
+  const outboundCapabilityIndexes: number[] = [];
+  const reconnecting = new ReconnectingRpcClientTransport({
+    connect: async () => {
+      connectCount += 1;
+      const ws = await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`);
+      const inner = new TcpRpcClientTransport(ws, {
+        interfaceId: 0x130n,
+        defaultTimeoutMs: 250,
+      });
+      if (connectCount === 1) {
+        return {
+          bootstrap: (options) => inner.bootstrap(options),
+          call: async () => {
+            await inner.close();
+            throw new TransportError("forced websocket reconnect");
+          },
+          close: () => inner.close(),
+        };
+      }
+      return {
+        bootstrap: (options) => inner.bootstrap(options),
+        call: (capability, methodId, params, options) => {
+          outboundCapabilityIndexes.push(capability.capabilityIndex);
+          return inner.call(capability, methodId, params, options);
+        },
+        close: () => inner.close(),
+      };
+    },
+    reconnect: immediateReconnectOptions(),
+    bootstrapOptions: { timeoutMs: 250 },
+  });
+
+  try {
+    const bootstrap = await withTimeout(
+      reconnecting.bootstrap(),
+      2000,
+      "bootstrap capability",
+    );
+    const response = await reconnecting.call(
+      bootstrap,
+      0,
+      EMPTY_RPC_PARAMS,
+      { timeoutMs: 500 },
+    );
+    assertBytes(response, [...EMPTY_STRUCT_MESSAGE]);
+    assertEquals(connectCount, 2);
+    assertEquals(acceptedConnections, 2);
+    assertEquals(outboundCapabilityIndexes.length, 1);
+    assertEquals(outboundCapabilityIndexes[0], bootstrap.capabilityIndex);
+  } finally {
+    await reconnecting.close();
+    await handle.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capabilities over live WebSocket reconnect", async () => {
+  let acceptedConnections = 0;
+
+  class ReconnectRemapServer {
+    constructor(_peer: RpcPeer) {
+      acceptedConnections += 1;
+    }
+  }
+
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    ReconnectRemapServer
+  >({
+    interfaceId: 0x131n,
+    interfaceName: "WsReconnectRemapProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: (registry, _server, options) =>
+      registry.exportCapability({
+        interfaceId: 0x131n,
+        dispatch: () => EMPTY_STRUCT_MESSAGE,
+      }, options),
+  });
+
+  const port = reserveTcpPort();
+  const handle = WS.serve(service, "127.0.0.1", port, ReconnectRemapServer, {
+    path: "/rpc",
+  });
+
+  let connectCount = 0;
+  const outboundCapabilityIndexes: number[] = [];
+  const remapContextHistory: Array<{
+    capabilityIndex: number;
+    previousBootstrapCapabilityIndex: number | null;
+    currentBootstrapCapabilityIndex: number | null;
+  }> = [];
+
+  const reconnecting = new ReconnectingRpcClientTransport({
+    connect: async () => {
+      connectCount += 1;
+      const ws = await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`);
+      const inner = new TcpRpcClientTransport(ws, {
+        interfaceId: 0x131n,
+        defaultTimeoutMs: 250,
+      });
+      if (connectCount === 1) {
+        return {
+          bootstrap: (options) => inner.bootstrap(options),
+          call: async (capability: { capabilityIndex: number }) => {
+            if (capability.capabilityIndex === 5) {
+              await inner.close();
+              throw new TransportError("forced websocket reconnect");
+            }
+            return await inner.call(
+              capability,
+              0,
+              EMPTY_RPC_PARAMS,
+              { timeoutMs: 500 },
+            );
+          },
+          close: () => inner.close(),
+        };
+      }
+      return {
+        bootstrap: (options) => inner.bootstrap(options),
+        call: (capability, methodId, params, options) => {
+          outboundCapabilityIndexes.push(capability.capabilityIndex);
+          // The remap assertion target is the capability index selected for
+          // retry; bootstrap/connect still run over live WebSockets.
+          void methodId;
+          void params;
+          void options;
+          return Promise.resolve(new Uint8Array(EMPTY_STRUCT_MESSAGE));
+        },
+        close: () => inner.close(),
+      };
+    },
+    reconnect: immediateReconnectOptions(),
+    bootstrapOptions: { timeoutMs: 250 },
+    remapCapabilityOnReconnect: (context) => {
+      remapContextHistory.push({
+        capabilityIndex: context.capability.capabilityIndex,
+        previousBootstrapCapabilityIndex:
+          context.previousBootstrapCapability?.capabilityIndex ?? null,
+        currentBootstrapCapabilityIndex:
+          context.currentBootstrapCapability?.capabilityIndex ?? null,
+      });
+      return { capabilityIndex: 6 };
+    },
+  });
+
+  try {
+    await withTimeout(
+      reconnecting.bootstrap(),
+      2000,
+      "bootstrap capability",
+    );
+
+    const response = await reconnecting.call(
+      { capabilityIndex: 5 },
+      0,
+      EMPTY_RPC_PARAMS,
+      { timeoutMs: 500 },
+    );
+    assertBytes(response, [...EMPTY_STRUCT_MESSAGE]);
+    assertEquals(connectCount, 2);
+    assertEquals(acceptedConnections, 2);
+    assertEquals(outboundCapabilityIndexes.length, 1);
+    assertEquals(outboundCapabilityIndexes[0], 6);
+    assertEquals(remapContextHistory.length, 1);
+    assertEquals(remapContextHistory[0].capabilityIndex, 5);
+    assert(
+      remapContextHistory[0].previousBootstrapCapabilityIndex !== null,
+      "expected previous bootstrap capability in remap context",
+    );
+    assert(
+      remapContextHistory[0].currentBootstrapCapabilityIndex !== null,
+      "expected current bootstrap capability in remap context",
+    );
+  } finally {
+    await reconnecting.close();
     await handle.close();
   }
 });

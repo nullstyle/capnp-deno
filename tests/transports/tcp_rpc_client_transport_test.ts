@@ -233,3 +233,32 @@ Deno.test("TcpRpcClientTransport can export a local capability and serve inbound
   assertEquals(releasedResponse.answerId, 12);
   assertEquals(releasedResponse.kind, "exception");
 });
+
+Deno.test("TcpRpcClientTransport callRaw send failures do not leak waiter rejections", async () => {
+  const transport = new MockTransport();
+  const client = new TcpRpcClientTransport(transport, {
+    interfaceId: 0x55n,
+  });
+
+  // Force send() to fail after the pending waiter has been created.
+  transport.close();
+
+  let thrown: unknown;
+  try {
+    await client.callRaw(
+      { capabilityIndex: 2 },
+      1,
+      new Uint8Array(EMPTY_STRUCT_MESSAGE),
+      { timeoutMs: 50 },
+    );
+  } catch (error) {
+    thrown = error;
+  } finally {
+    await client.close();
+  }
+
+  assert(
+    thrown instanceof Error && /closed/i.test(thrown.message),
+    `expected closed transport error, got: ${String(thrown)}`,
+  );
+});

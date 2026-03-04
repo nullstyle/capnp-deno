@@ -89,7 +89,12 @@ import type {
   TcpServeOptions,
   TcpServiceApi,
   TcpTransportOptions,
+  WebSocketConnectOptions,
+  WebSocketServeHandle,
+  WebSocketServeOptions,
+  WebSocketServiceApi,
   WebSocketTransportOptions,
+  WebSocketUrl,
 } from "../src/mod.ts";
 
 type Assert<T extends true> = T;
@@ -198,7 +203,12 @@ type PublicTypeExportSmoke = {
   tcpTransportOptions: TcpTransportOptions;
   tcpRpcClientConnectOptions: TcpRpcClientConnectOptions;
   tcpRpcClientTransportOptions: TcpRpcClientTransportOptions;
+  webSocketConnectOptions: WebSocketConnectOptions;
+  webSocketServeHandle: WebSocketServeHandle;
+  webSocketServeOptions: WebSocketServeOptions;
+  webSocketServiceApi: WebSocketServiceApi;
   webSocketTransportOptions: WebSocketTransportOptions;
+  webSocketUrl: WebSocketUrl;
 };
 
 type AssertTypeExportsExist = Assert<

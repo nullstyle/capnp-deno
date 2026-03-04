@@ -4,6 +4,7 @@ import { assert } from "./test_utils.ts";
 
 Deno.test("rpc entrypoint exposes runtime APIs but not encoding helpers", () => {
   assert("TCP" in rpc, "expected rpc entrypoint to export TCP service helpers");
+  assert("WS" in rpc, "expected rpc entrypoint to export WS service helpers");
   assert(
     !("encodeCallRequestFrame" in rpc),
     "rpc entrypoint should not export wire encode helpers",
@@ -42,6 +43,10 @@ Deno.test("encoding entrypoint exposes serde/runtime APIs but not rpc helpers", 
   assert(
     !("TCP" in encoding),
     "encoding entrypoint should not export TCP runtime helpers",
+  );
+  assert(
+    !("WS" in encoding),
+    "encoding entrypoint should not export WS runtime helpers",
   );
   assert(
     !("RpcSession" in encoding),

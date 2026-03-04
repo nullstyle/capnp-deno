@@ -4,8 +4,7 @@
 export const schemaFileId = 0xebd79e79ca5c0cd6n;
 export const schemaFilename = "examples/kvstore_stress_2/kvstore.capnp";
 
-export const schemaImports = [
-] as const;
+export const schemaImports = [] as const;
 
 export const schemaNodes = [
   {
@@ -35,25 +34,29 @@ export const schemaNodes = [
   {
     id: 0x99c76b7111761fc7n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.keysChanged$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.keysChanged$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xc16b97e8e950b5ffn,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.keysChanged$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.keysChanged$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xc6cd4fca7220955an,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.stateResetRequired$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.stateResetRequired$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xf7492357ba22feabn,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.stateResetRequired$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvClientNotifier.stateResetRequired$Results",
     scopeId: 0x0n,
   },
   {
@@ -65,13 +68,15 @@ export const schemaNodes = [
   {
     id: 0x9b09deda43a146e6n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.createBackup$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.createBackup$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xbeb1e97f36381eedn,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.createBackup$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.createBackup$Results",
     scopeId: 0x0n,
   },
   {
@@ -101,61 +106,71 @@ export const schemaNodes = [
   {
     id: 0xfe18ff52df142101n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.listBackups$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.listBackups$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xeadffde2210b8712n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.listBackups$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.listBackups$Results",
     scopeId: 0x0n,
   },
   {
     id: 0x949d7c35ea0d2ea6n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.restoreFromBackup$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.restoreFromBackup$Params",
     scopeId: 0x0n,
   },
   {
     id: 0x85e57b1e35a4bea8n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.restoreFromBackup$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.restoreFromBackup$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xb43c85f80dd35964n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.setWatchedKeys$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.setWatchedKeys$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xf18714c3d606395dn,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.setWatchedKeys$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.setWatchedKeys$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xe72a0eb625be0064n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.subscribe$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.subscribe$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xa2d66f1c979f79e3n,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.subscribe$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.subscribe$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xa219cc69597d657cn,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.writeBatch$Params",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.writeBatch$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xc364f7f44723a31en,
     kind: "struct",
-    displayName: "examples/kvstore_stress_2/kvstore.capnp:KvStore.writeBatch$Results",
+    displayName:
+      "examples/kvstore_stress_2/kvstore.capnp:KvStore.writeBatch$Results",
     scopeId: 0x0n,
   },
   {

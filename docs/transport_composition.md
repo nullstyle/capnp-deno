@@ -232,6 +232,66 @@ const runtime = await RpcServerRuntime.create(transport, bridge, {
 });
 ```
 
+### High-Level WebSocket Service API (`WS`)
+
+If you are using generated `RpcServiceToken` values, prefer `WS.connect(...)`
+and `WS.serve(...)`:
+
+```ts
+const handle = WS.serve(Pinger, "127.0.0.1", 8080, new PingServer(), {
+  path: "/rpc",
+  protocols: ["capnp-rpc"],
+  transport: {
+    frameLimits: { maxFrameBytes: 64 * 1024 * 1024 },
+  },
+});
+
+using client = await WS.connect(Pinger, "ws://127.0.0.1:8080/rpc", {
+  protocols: ["capnp-rpc"],
+});
+```
+
+#### Browser <-> Deno WebSocket Contract
+
+`WS.serve(...)` defines the server-side contract for browser and Deno clients:
+
+1. Handshake requirements:
+   - Non-upgrade HTTP requests receive `426`.
+   - If `path` is configured and does not match, the request receives `404`.
+   - If `protocols` is configured and no requested protocol matches, the upgrade
+     is rejected with `426`.
+2. Runtime wiring:
+   - Each accepted socket is upgraded via `Deno.upgradeWebSocket(...)`.
+   - The upgraded socket is wrapped in `WebSocketTransport`.
+   - A per-connection `RpcServerRuntime.createWithRoot(...)` is created.
+3. Bootstrap wiring:
+   - `WS.serve(...)` registers a root capability for bootstrap automatically
+     (default index `0`, reference count `1`).
+   - Override with `rootCapabilityIndex` / `rootReferenceCount` if needed.
+   - If you wire WebSocket manually, use `RpcServerRuntime.createWithRoot(...)`
+     (or provide `onBootstrap` on `RpcServerBridge`) so bootstrap requests do
+     not fail.
+4. Frame-limit policy:
+   - Apply WebSocket frame validation using `transport.frameLimits`.
+   - Use `transport.maxInboundFrameBytes` / `transport.maxOutboundFrameBytes`
+     for per-frame byte limits.
+5. Error and close behavior:
+   - Initialization/accept errors (upgrade failure, runtime setup failure) are
+     reported via `onConnectionError`.
+   - Per-connection transport errors are reported via `transport.onError`.
+   - `handle.close()` stops accepting new upgrades and closes active runtimes.
+6. Fallback order and reconnect layering:
+   - Browser clients should prefer `WS.connect(...)` when TCP is unavailable.
+   - For transport-level retry (connect/open failures), layer
+     `connectWebSocketTransportWithReconnect(...)` under your client factory.
+   - For RPC-level retry/remap across reconnects, wrap the client with
+     `ReconnectingRpcClientTransport`.
+7. Capability-scope caveats:
+   - Capability IDs are connection-scoped and are not stable across reconnects.
+   - `finish(questionId)` and `release(capability)` are connection-scoped and
+     are not retried automatically after reconnect.
+   - Non-bootstrap capability retries require `remapCapabilityOnReconnect`.
+
 ### MessagePort (Workers / Iframes)
 
 ```
@@ -267,14 +327,14 @@ const runtime = await RpcServerRuntime.create(serverTransport, bridge, {
 
 ## Decision Guide
 
-| Scenario                     | Transport                            | Client wrapper                       | Server wrapper                    |
-| ---------------------------- | ------------------------------------ | ------------------------------------ | --------------------------------- |
-| Unit/integration tests       | `InMemoryRpcHarnessTransport`        | `SessionRpcClientTransport` (direct) | `RpcServerRuntime`                |
-| TCP client to remote server  | `TcpTransport.connect()`             | `NetworkRpcHarnessTransport`         | --                                |
-| TCP server accepting clients | `TcpServerListener` + `TcpTransport` | --                                   | `RpcServerRuntime` (one per conn) |
-| WebSocket client             | `WebSocketTransport.connect()`       | `NetworkRpcHarnessTransport`         | --                                |
-| WebSocket server             | `new WebSocketTransport(socket)`     | --                                   | `RpcServerRuntime`                |
-| Worker / iframe IPC          | `MessagePortTransport`               | `NetworkRpcHarnessTransport`         | `RpcServerRuntime`                |
+| Scenario                     | Transport                                        | Client wrapper                                              | Server wrapper                    |
+| ---------------------------- | ------------------------------------------------ | ----------------------------------------------------------- | --------------------------------- |
+| Unit/integration tests       | `InMemoryRpcHarnessTransport`                    | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
+| TCP client to remote server  | `TcpTransport.connect()`                         | `NetworkRpcHarnessTransport`                                | --                                |
+| TCP server accepting clients | `TcpServerListener` + `TcpTransport`             | --                                                          | `RpcServerRuntime` (one per conn) |
+| WebSocket client             | `WS.connect()` or `WebSocketTransport.connect()` | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
+| WebSocket server             | `WS.serve()` or `new WebSocketTransport(socket)` | --                                                          | `RpcServerRuntime`                |
+| Worker / iframe IPC          | `MessagePortTransport`                           | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
 
 ## Middleware
 

@@ -41,6 +41,12 @@ export {
   type TcpServeHandle,
   type TcpServeOptions,
   type TcpServiceApi,
+  type WebSocketConnectOptions,
+  type WebSocketServeHandle,
+  type WebSocketServeOptions,
+  type WebSocketServiceApi,
+  type WebSocketUrl,
+  WS,
 } from "./rpc/server/service.ts";
 
 // === Wire Format & Message Routing ===

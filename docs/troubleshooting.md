@@ -254,6 +254,9 @@ const bridge = new RpcServerBridge({
 });
 ```
 
+- If you are using the high-level service API, prefer `WS.serve(...)` /
+  `TCP.serve(...)`, which configures bootstrap root wiring for you.
+
 See [getting_started_rpc.md](getting_started_rpc.md) for a complete example.
 
 #### `rpc bootstrap failed: <reason>`
@@ -379,6 +382,22 @@ or `promisedAnswer` (1).
 
 Transport errors (`TransportError`) cover I/O problems in the underlying network
 or IPC layer.
+
+### WebSocket Service Handshake (`WS.serve`)
+
+When using the high-level `WS.serve(...)` API:
+
+- non-WebSocket HTTP requests to the endpoint receive `426`
+- path mismatches (when `path` is configured) receive `404`
+- subprotocol mismatches (when `protocols` is configured) are rejected with
+  `426`
+
+If browser clients fail to connect, verify that:
+
+1. Client URL path matches `WS.serve(..., { path })`.
+2. Client `protocols` include at least one server-supported protocol.
+3. Server is reachable over `ws://` or `wss://` and reverse proxies preserve
+   upgrade headers.
 
 ### Connection Lifecycle
 

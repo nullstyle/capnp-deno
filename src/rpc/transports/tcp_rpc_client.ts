@@ -390,6 +390,9 @@ export class TcpRpcClientTransport {
       if (pending) {
         this.#settleWaiter(questionId, pending, error);
       }
+      // Ensure the waiter promise does not leak as an unhandled rejection when
+      // send fails before we can await `wait`.
+      await wait.catch(() => {});
       throw error;
     }
     return await wait;
