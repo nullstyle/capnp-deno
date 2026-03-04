@@ -150,6 +150,8 @@ before processing the next.
   code.
 - All public APIs need JSDoc with `@param`, `@returns`, and `@example`.
 - Conventional Commits (`feat(session): ...`, `fix(transport): ...`).
+- Never create `bd:backup` commits. Use intentional, scoped Conventional Commit
+  messages for real code/docs/test changes only.
 - Keep runtime changes and `vendor/capnp-zig` submodule bumps in separate
   commits.
 - PRs should list commands run, permissioned test modes used (`--allow-net`,
