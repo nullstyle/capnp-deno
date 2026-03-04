@@ -32,6 +32,12 @@ run-warmup-stats:
 run-smoke-real-wasm:
     deno run --allow-read smoke_real_wasm/smoke_real_wasm.ts
 
+run-ping-ws-server host="127.0.0.1" port="4001" path="/rpc" protocol="capnp-rpc":
+    deno run --allow-net ping/server_ws.ts {{ host }} {{ port }} {{ path }} {{ protocol }}
+
+run-ping-ws-client url="ws://127.0.0.1:4001/rpc" protocol="capnp-rpc" count="3":
+    deno run --allow-net ping/client_ws.ts {{ url }} {{ protocol }} {{ count }}
+
 run-kvstore-stress-2 host="127.0.0.1" port="9000" key_space="16384" active_keys="1024" concurrency="32" min_batch="8" max_batch="64" duration_seconds="0":
     deno run --allow-net --allow-sys kvstore_stress_2/kvstore_stress_client.ts \
         --host={{ host }} \

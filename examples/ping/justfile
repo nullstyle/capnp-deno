@@ -1,3 +1,9 @@
 gen:
     mkdir -p gen
     deno task codegen --schema schema.capnp --out gen --layout flat
+
+run-ws-server host="127.0.0.1" port="4001" path="/rpc" protocol="capnp-rpc":
+    deno run --allow-net server_ws.ts {{ host }} {{ port }} {{ path }} {{ protocol }}
+
+run-ws-client url="ws://127.0.0.1:4001/rpc" protocol="capnp-rpc" count="3":
+    deno run --allow-net client_ws.ts {{ url }} {{ protocol }} {{ count }}

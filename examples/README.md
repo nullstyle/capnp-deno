@@ -34,6 +34,13 @@ Each example is nested in its own directory and has a colocated `.capnp` schema.
   - `kvstore_stress_client.ts`
   - `kvstore.capnp`
   - `gen/*`
+- `examples/ping/`
+  - `client.ts`
+  - `server.ts`
+  - `client_ws.ts`
+  - `server_ws.ts`
+  - `schema.capnp`
+  - `gen/*`
 
 ## Task Runner
 
@@ -61,4 +68,6 @@ just --justfile examples/Justfile run-bidirectional-capability
 just --justfile examples/Justfile run-warmup-stats
 just --justfile examples/Justfile run-kvstore-stress-2
 just --justfile examples/Justfile run-smoke-real-wasm
+just --justfile examples/Justfile run-ping-ws-server
+just --justfile examples/Justfile run-ping-ws-client
 ```
