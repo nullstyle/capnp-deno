@@ -471,6 +471,106 @@ Deno.test("WS.connect bootstraps through WS.serve runtime root wiring", async ()
   }
 });
 
+Deno.test("WS.handler composes with sibling HTTP routes", async () => {
+  const service = createRpcServiceToken<
+    { rootCapabilityIndex: number },
+    Record<string, never>
+  >({
+    interfaceId: 0x123n,
+    interfaceName: "WsHandlerComposeProbe",
+    bootstrapClient: async (transport) => {
+      const capability = await transport.bootstrap();
+      return {
+        rootCapabilityIndex: capability.capabilityIndex,
+      };
+    },
+    registerServer: (registry, _server, options) =>
+      registry.exportCapability({
+        interfaceId: 0x123n,
+        dispatch: () => new Uint8Array(),
+      }, options),
+  });
+
+  const port = reserveTcpPort();
+  const wsHandler = WS.handler(service, {}, {
+    protocols: ["capnp-rpc"],
+  });
+  const abortController = new AbortController();
+  const server = Deno.serve({
+    hostname: "127.0.0.1",
+    port,
+    signal: abortController.signal,
+    onListen: () => {},
+  }, (request) => {
+    const url = new URL(request.url);
+    if (url.pathname === "/rpc") {
+      return wsHandler.handle(request);
+    }
+    if (url.pathname === "/api") {
+      return new Response("capnweb-route-placeholder");
+    }
+    return new Response("not found", { status: 404 });
+  });
+
+  let client: { rootCapabilityIndex: number; close(): Promise<void> } | null =
+    null;
+  try {
+    const apiResponse = await fetch(`http://127.0.0.1:${port}/api`);
+    assertEquals(apiResponse.status, 200);
+    assertEquals(await apiResponse.text(), "capnweb-route-placeholder");
+
+    client = await withTimeout(
+      WS.connect(service, `ws://127.0.0.1:${port}/rpc`, {
+        protocols: ["capnp-rpc"],
+      }),
+      2000,
+      "ws handler connect with bootstrap",
+    );
+    assertEquals(client.rootCapabilityIndex, 0);
+  } finally {
+    await client?.close().catch(() => {});
+    abortController.abort();
+    await server.finished.catch(() => {});
+    await wsHandler.close();
+  }
+});
+
+Deno.test("WS.handler enforces handshake and path checks", async () => {
+  const service = createRpcServiceToken<
+    Record<string, never>,
+    Record<string, never>
+  >({
+    interfaceId: 0x124n,
+    interfaceName: "WsHandlerValidationProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const wsHandler = WS.handler(service, {}, {
+    path: "/rpc",
+    protocols: ["capnp-rpc"],
+  });
+
+  try {
+    const notUpgrade = await wsHandler.handle(
+      new Request("http://127.0.0.1/rpc"),
+    );
+    assertEquals(notUpgrade.status, 426);
+
+    const pathMismatch = await wsHandler.handle(
+      new Request("http://127.0.0.1/other", {
+        headers: {
+          upgrade: "websocket",
+          "sec-websocket-protocol": "capnp-rpc",
+        },
+      }),
+    );
+    assertEquals(pathMismatch.status, 404);
+  } finally {
+    await wsHandler.close();
+  }
+});
+
 Deno.test("WS.serve reports websocket upgrade failures via onConnectionError", async () => {
   const connectionError = deferred<unknown>();
   const service = createRpcServiceToken<

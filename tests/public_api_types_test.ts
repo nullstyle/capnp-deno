@@ -90,6 +90,7 @@ import type {
   TcpServiceApi,
   TcpTransportOptions,
   WebSocketConnectOptions,
+  WebSocketRequestHandler,
   WebSocketServeHandle,
   WebSocketServeOptions,
   WebSocketServiceApi,
@@ -204,6 +205,7 @@ type PublicTypeExportSmoke = {
   tcpRpcClientConnectOptions: TcpRpcClientConnectOptions;
   tcpRpcClientTransportOptions: TcpRpcClientTransportOptions;
   webSocketConnectOptions: WebSocketConnectOptions;
+  webSocketRequestHandler: WebSocketRequestHandler;
   webSocketServeHandle: WebSocketServeHandle;
   webSocketServeOptions: WebSocketServeOptions;
   webSocketServiceApi: WebSocketServiceApi;

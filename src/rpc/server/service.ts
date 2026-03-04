@@ -272,7 +272,7 @@ export interface TcpServeOptions {
 }
 
 /**
- * Options for {@link WS.serve}.
+ * Options for {@link WS.serve} and {@link WS.handler}.
  */
 export interface WebSocketServeOptions {
   /**
@@ -328,6 +328,17 @@ export interface TcpServeHandle {
 export interface WebSocketServeHandle {
   readonly addr: Deno.Addr;
   readonly closed: boolean;
+  close(): Promise<void>;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+/**
+ * Request-level WebSocket RPC handler for composing inside a custom HTTP router.
+ */
+export interface WebSocketRequestHandler {
+  readonly closed: boolean;
+  handle(request: Request): Promise<Response>;
   close(): Promise<void>;
   [Symbol.dispose](): void;
   [Symbol.asyncDispose](): Promise<void>;
@@ -496,38 +507,22 @@ class TcpServeHandleImpl<TServer extends object> implements TcpServeHandle {
   }
 }
 
-class WebSocketServeHandleImpl<TServer extends object>
-  implements WebSocketServeHandle {
+class WebSocketRequestHandlerImpl<TServer extends object>
+  implements WebSocketRequestHandler {
   readonly #service: RpcServiceToken<object, TServer>;
   readonly #implementation: RpcServiceImplementation<TServer>;
   readonly #options: WebSocketServeOptions;
-  readonly #hostname: string;
-  readonly #port: number;
-  readonly #server: Deno.HttpServer<Deno.NetAddr>;
   #closed = false;
   readonly #active = new Set<ActiveRuntime>();
 
   constructor(
     service: RpcServiceToken<object, TServer>,
-    hostname: string,
-    port: number,
     implementation: RpcServiceImplementation<TServer>,
     options: WebSocketServeOptions,
   ) {
     this.#service = service;
     this.#implementation = implementation;
     this.#options = options;
-    this.#hostname = hostname;
-    this.#port = port;
-    this.#server = requireDenoServe()({
-      hostname,
-      port,
-      onListen: () => {},
-    }, (request) => this.#handleRequest(request));
-  }
-
-  get addr(): Deno.Addr {
-    return this.#server.addr;
   }
 
   get closed(): boolean {
@@ -546,15 +541,11 @@ class WebSocketServeHandleImpl<TServer extends object>
     if (this.#closed) return;
     this.#closed = true;
 
-    await this.#server.shutdown().catch(() => {});
-
     const closeJobs = [...this.#active].map((entry) =>
       this.#closeActive(entry)
     );
     const closeResults = await Promise.allSettled(closeJobs);
     this.#active.clear();
-
-    await this.#server.finished.catch(() => {});
 
     const failure = closeResults.find((result) => result.status === "rejected");
     if (failure && failure.status === "rejected") {
@@ -564,7 +555,7 @@ class WebSocketServeHandleImpl<TServer extends object>
     }
   }
 
-  async #handleRequest(request: Request): Promise<Response> {
+  async handle(request: Request): Promise<Response> {
     if (this.#closed) {
       return new Response("service is closed", { status: 503 });
     }
@@ -636,16 +627,10 @@ class WebSocketServeHandleImpl<TServer extends object>
       },
     });
 
-    const url = new URL(request.url);
     const peer = new RpcPeer({
       role: "server",
       transport,
-      localAddress: {
-        transport: "websocket",
-        hostname: this.#hostname,
-        port: this.#port,
-        path: url.pathname,
-      },
+      localAddress: toWebSocketLocalAddress(request),
       remoteAddress: {
         transport: "websocket",
       },
@@ -702,6 +687,68 @@ class WebSocketServeHandleImpl<TServer extends object>
       await report(error);
     } catch {
       // Errors in the error callback must not destabilize request handling.
+    }
+  }
+}
+
+class WebSocketServeHandleImpl<TServer extends object>
+  implements WebSocketServeHandle {
+  readonly #handler: WebSocketRequestHandlerImpl<TServer>;
+  readonly #server: Deno.HttpServer<Deno.NetAddr>;
+  #closed = false;
+
+  constructor(
+    service: RpcServiceToken<object, TServer>,
+    hostname: string,
+    port: number,
+    implementation: RpcServiceImplementation<TServer>,
+    options: WebSocketServeOptions,
+  ) {
+    this.#handler = new WebSocketRequestHandlerImpl(
+      service,
+      implementation,
+      options,
+    );
+    this.#server = requireDenoServe()({
+      hostname,
+      port,
+      onListen: () => {},
+    }, (request) => this.#handler.handle(request));
+  }
+
+  get addr(): Deno.Addr {
+    return this.#server.addr;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+
+    await this.#server.shutdown().catch(() => {});
+
+    let closeError: unknown;
+    try {
+      await this.#handler.close();
+    } catch (error) {
+      closeError = error;
+    }
+
+    await this.#server.finished.catch(() => {});
+
+    if (closeError !== undefined) {
+      throw closeError;
     }
   }
 }
@@ -802,6 +849,17 @@ function toRpcPeerAddress(input: unknown): RpcPeerAddress | null {
   return address;
 }
 
+function toWebSocketLocalAddress(request: Request): RpcPeerAddress {
+  const url = new URL(request.url);
+  const parsedPort = url.port.length > 0 ? Number(url.port) : undefined;
+  return {
+    transport: "websocket",
+    hostname: url.hostname,
+    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
+    path: url.pathname,
+  };
+}
+
 function requireDenoServe(): typeof Deno.serve {
   const maybeServe = (Deno as unknown as { serve?: typeof Deno.serve }).serve;
   if (typeof maybeServe !== "function") {
@@ -891,6 +949,12 @@ export interface WebSocketServiceApi {
     url: WebSocketUrl,
     options?: WebSocketConnectOptions,
   ): Promise<RpcStub<TClient>>;
+
+  handler<TServer extends object, TClient extends object = TServer>(
+    service: RpcServiceToken<TClient, TServer>,
+    implementation: RpcServiceImplementation<TServer>,
+    options?: WebSocketServeOptions,
+  ): WebSocketRequestHandler;
 
   serve<TServer extends object, TClient extends object = TServer>(
     service: RpcServiceToken<TClient, TServer>,
@@ -1008,6 +1072,21 @@ function wsServe<TServer extends object, TClient extends object = TServer>(
 }
 
 /**
+ * Build a request-level WebSocket RPC handler for custom HTTP routers.
+ */
+function wsHandler<TServer extends object, TClient extends object = TServer>(
+  service: RpcServiceToken<TClient, TServer>,
+  implementation: RpcServiceImplementation<TServer>,
+  options: WebSocketServeOptions = {},
+): WebSocketRequestHandler {
+  return new WebSocketRequestHandlerImpl(
+    service as RpcServiceToken<object, TServer>,
+    implementation,
+    options,
+  );
+}
+
+/**
  * Public high-level TCP API for token-based generated services.
  */
 export const TCP: TcpServiceApi = {
@@ -1020,5 +1099,6 @@ export const TCP: TcpServiceApi = {
  */
 export const WS: WebSocketServiceApi = {
   connect: wsConnect,
+  handler: wsHandler,
   serve: wsServe,
 };

@@ -42,6 +42,7 @@ export {
   type TcpServeOptions,
   type TcpServiceApi,
   type WebSocketConnectOptions,
+  type WebSocketRequestHandler,
   type WebSocketServeHandle,
   type WebSocketServeOptions,
   type WebSocketServiceApi,

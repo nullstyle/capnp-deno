@@ -32,8 +32,8 @@ run-warmup-stats:
 run-smoke-real-wasm:
     deno run --allow-read smoke_real_wasm/smoke_real_wasm.ts
 
-run-ping-ws-server host="127.0.0.1" port="4001" path="/rpc" protocol="capnp-rpc":
-    deno run --allow-net ping/server_ws.ts {{ host }} {{ port }} {{ path }} {{ protocol }}
+run-ping-ws-server host="127.0.0.1" port="4001" path="/rpc" api_path="/api" protocol="capnp-rpc":
+    deno run --allow-net ping/server_ws.ts {{ host }} {{ port }} {{ path }} {{ api_path }} {{ protocol }}
 
 run-ping-ws-client url="ws://127.0.0.1:4001/rpc" protocol="capnp-rpc" count="3":
     deno run --allow-net ping/client_ws.ts {{ url }} {{ protocol }} {{ count }}

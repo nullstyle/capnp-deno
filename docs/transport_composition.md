@@ -235,9 +235,21 @@ const runtime = await RpcServerRuntime.create(transport, bridge, {
 ### High-Level WebSocket Service API (`WS`)
 
 If you are using generated `RpcServiceToken` values, prefer `WS.connect(...)`
-and `WS.serve(...)`:
+and either `WS.serve(...)` or `WS.handler(...)`:
 
 ```ts
+const wsHandler = WS.handler(Pinger, new PingServer(), {
+  protocols: ["capnp-rpc"],
+});
+
+const httpServer = Deno.serve({ hostname: "127.0.0.1", port: 8080 }, (req) => {
+  const url = new URL(req.url);
+  if (url.pathname === "/rpc") return wsHandler.handle(req);
+  if (url.pathname === "/api") return new Response("capnweb route");
+  return new Response("not found", { status: 404 });
+});
+
+// Or let capnp-deno own the HTTP server:
 const handle = WS.serve(Pinger, "127.0.0.1", 8080, new PingServer(), {
   path: "/rpc",
   protocols: ["capnp-rpc"],
@@ -253,7 +265,8 @@ using client = await WS.connect(Pinger, "ws://127.0.0.1:8080/rpc", {
 
 #### Browser <-> Deno WebSocket Contract
 
-`WS.serve(...)` defines the server-side contract for browser and Deno clients:
+`WS.serve(...)` and `WS.handler(...)` define the same server-side contract for
+browser and Deno clients:
 
 1. Handshake requirements:
    - Non-upgrade HTTP requests receive `426`.

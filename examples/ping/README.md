@@ -25,7 +25,7 @@ just --justfile examples/Justfile run-ping-ws-client
 Optional server args:
 
 ```sh
-deno run --allow-net examples/ping/server_ws.ts <host> <port> <path> <protocol>
+deno run --allow-net examples/ping/server_ws.ts <host> <port> <ws-path> <sibling-api-path> <protocol>
 ```
 
 Optional client args:
@@ -35,3 +35,5 @@ deno run --allow-net examples/ping/client_ws.ts <ws-url> <protocol> <ping-count>
 ```
 
 Default WebSocket endpoint: `ws://127.0.0.1:4001/rpc` with protocol `capnp-rpc`.
+The server also exposes a sibling HTTP route (default: `/api`) to demonstrate
+side-by-side routing with another handler.

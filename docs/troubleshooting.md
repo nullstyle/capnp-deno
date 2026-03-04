@@ -383,9 +383,9 @@ or `promisedAnswer` (1).
 Transport errors (`TransportError`) cover I/O problems in the underlying network
 or IPC layer.
 
-### WebSocket Service Handshake (`WS.serve`)
+### WebSocket Service Handshake (`WS.serve` / `WS.handler`)
 
-When using the high-level `WS.serve(...)` API:
+When using high-level `WS.serve(...)` or `WS.handler(...)`:
 
 - non-WebSocket HTTP requests to the endpoint receive `426`
 - path mismatches (when `path` is configured) receive `404`
@@ -394,7 +394,8 @@ When using the high-level `WS.serve(...)` API:
 
 If browser clients fail to connect, verify that:
 
-1. Client URL path matches `WS.serve(..., { path })`.
+1. Client URL path matches your router and any configured
+   `WS.serve(..., { path })` / `WS.handler(..., { path })`.
 2. Client `protocols` include at least one server-supported protocol.
 3. Server is reachable over `ws://` or `wss://` and reverse proxies preserve
    upgrade headers.
