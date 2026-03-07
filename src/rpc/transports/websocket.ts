@@ -13,13 +13,14 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
-import type { RpcTransport } from "./transport.ts";
+import type { RpcTransport } from "./internal/transport.ts";
+import {
+  OutboundFrameQueue,
+  type QueuedOutboundFrame,
+} from "./internal/transport_internal.ts";
 
-interface PendingOutboundFrame {
-  frame: Uint8Array;
+interface PendingOutboundFrame extends QueuedOutboundFrame {
   enqueuedAt: number;
-  resolve: () => void;
-  reject: (error: unknown) => void;
 }
 
 /**
@@ -124,10 +125,7 @@ export class WebSocketTransport implements RpcTransport {
   #inboundChain: Promise<void> = Promise.resolve();
   #listenersAttached = false;
 
-  #outboundQueue: PendingOutboundFrame[] = [];
-  #queuedOutboundBytes = 0;
-  #inflightOutboundFrames = 0;
-  #inflightOutboundBytes = 0;
+  #outbound: OutboundFrameQueue<PendingOutboundFrame>;
   #drainLoop: Promise<void> | null = null;
 
   #onMessage = (event: MessageEvent) => {
@@ -163,7 +161,7 @@ export class WebSocketTransport implements RpcTransport {
     const error = new TransportError(
       `websocket closed (code=${event.code} reason=${event.reason || ""})`,
     );
-    this.#rejectQueuedOutbound(error);
+    this.#outbound.rejectQueued(error);
     if (this.options.onError) {
       void Promise.resolve(this.options.onError(error));
     }
@@ -172,6 +170,7 @@ export class WebSocketTransport implements RpcTransport {
   constructor(socket: WebSocket, options: WebSocketTransportOptions = {}) {
     this.socket = socket;
     this.options = options;
+    this.#outbound = new OutboundFrameQueue("websocket", options);
     this.socket.binaryType = "arraybuffer";
   }
 
@@ -284,16 +283,14 @@ export class WebSocketTransport implements RpcTransport {
 
     this.assertOutboundFrameSize(frame);
     const payload = new Uint8Array(frame);
-    this.assertOutboundQueueCapacity(payload.byteLength);
 
     const completion = new Promise<void>((resolve, reject) => {
-      this.#outboundQueue.push({
+      this.#outbound.enqueue({
         frame: payload,
         enqueuedAt: Date.now(),
         resolve,
         reject,
       });
-      this.#queuedOutboundBytes += payload.byteLength;
     });
 
     this.#ensureDrainLoop();
@@ -304,8 +301,8 @@ export class WebSocketTransport implements RpcTransport {
       attributes: {
         "rpc.outcome": "ok",
         "rpc.outbound.bytes": frame.byteLength,
-        "rpc.outbound.queue.frames": this.#outboundQueue.length,
-        "rpc.outbound.queue.bytes": this.#queuedOutboundBytes,
+        "rpc.outbound.queue.frames": this.#outbound.length,
+        "rpc.outbound.queue.bytes": this.#outbound.queuedBytes,
         "rpc.websocket.buffered_amount": this.socket.bufferedAmount,
       },
       durationMs: performance.now() - startedAt,
@@ -318,7 +315,7 @@ export class WebSocketTransport implements RpcTransport {
     this.#closed = true;
 
     const closeError = new TransportError("WebSocketTransport is closed");
-    this.#rejectQueuedOutbound(closeError);
+    this.#outbound.rejectQueued(closeError);
 
     const closeNeeded = this.socket.readyState === WebSocket.CONNECTING ||
       this.socket.readyState === WebSocket.OPEN;
@@ -365,18 +362,16 @@ export class WebSocketTransport implements RpcTransport {
       })
       .finally(() => {
         this.#drainLoop = null;
-        if (this.#outboundQueue.length > 0 && !this.#closed) {
+        if (this.#outbound.hasQueuedFrames && !this.#closed) {
           this.#ensureDrainLoop();
         }
       });
   }
 
   async #drainOutbound(): Promise<void> {
-    while (!this.#closed && this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      this.#inflightOutboundFrames += 1;
-      this.#inflightOutboundBytes += next.frame.byteLength;
+    while (!this.#closed && this.#outbound.hasQueuedFrames) {
+      const next = this.#outbound.dequeue();
+      if (!next) break;
 
       try {
         await this.#waitForBufferedCapacity(
@@ -391,11 +386,10 @@ export class WebSocketTransport implements RpcTransport {
           "websocket send failed",
         );
         next.reject(normalized);
-        this.#rejectQueuedOutbound(normalized);
+        this.#outbound.rejectQueued(normalized);
         throw normalized;
       } finally {
-        this.#inflightOutboundFrames -= 1;
-        this.#inflightOutboundBytes -= next.frame.byteLength;
+        this.#outbound.settle(next.frame.byteLength);
       }
     }
   }
@@ -462,14 +456,6 @@ export class WebSocketTransport implements RpcTransport {
     });
   }
 
-  #rejectQueuedOutbound(error: unknown): void {
-    while (this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      next.reject(error);
-    }
-  }
-
   private assertInboundFrameSize(frame: Uint8Array): void {
     const max = this.options.maxInboundFrameBytes;
     if (max !== undefined && frame.byteLength > max) {
@@ -485,32 +471,6 @@ export class WebSocketTransport implements RpcTransport {
       throw new TransportError(
         `websocket outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
-    }
-  }
-
-  private assertOutboundQueueCapacity(frameBytes: number): void {
-    const maxFrames = this.options.maxQueuedOutboundFrames;
-    if (maxFrames !== undefined) {
-      const used = this.#inflightOutboundFrames + this.#outboundQueue.length;
-      if (used + 1 > maxFrames) {
-        throw new TransportError(
-          `websocket outbound queue frame limit exceeded: ${
-            used + 1
-          } > ${maxFrames}`,
-        );
-      }
-    }
-
-    const maxBytes = this.options.maxQueuedOutboundBytes;
-    if (maxBytes !== undefined) {
-      const used = this.#inflightOutboundBytes + this.#queuedOutboundBytes;
-      if (used + frameBytes > maxBytes) {
-        throw new TransportError(
-          `websocket outbound queue byte limit exceeded: ${
-            used + frameBytes
-          } > ${maxBytes}`,
-        );
-      }
     }
   }
 }

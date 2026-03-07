@@ -1,4 +1,4 @@
-import { Command } from "jsr:@cliffy/command";
+import { Command } from "@cliffy/command";
 import { PeerRuntime, runInteractiveConsole } from "./runtime.ts";
 import {
   DEFAULT_HOST,

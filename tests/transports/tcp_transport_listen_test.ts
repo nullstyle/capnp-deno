@@ -1,12 +1,17 @@
-import { TcpServerListener, TcpTransport } from "./tcp.ts";
-import {
-  assert,
-  assertEquals,
-  withTimeout,
-} from "../../../tests/test_utils.ts";
+import { TcpTransport } from "../../src/rpc/transports/tcp.ts";
+import { assert, assertEquals, withTimeout } from "../test_utils.ts";
 
-Deno.test("TcpServerListener binds and exposes addr", () => {
-  const listener = new TcpServerListener({ port: 0, hostname: "127.0.0.1" });
+async function hasLoopbackNetPermission(): Promise<boolean> {
+  const status = await Deno.permissions.query({
+    name: "net",
+    host: "127.0.0.1",
+  });
+  return status.state === "granted";
+}
+
+Deno.test("TcpTransport.listen binds and exposes addr", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
+  const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
   try {
     const addr = listener.addr as Deno.NetAddr;
     assertEquals(addr.transport, "tcp");
@@ -17,15 +22,17 @@ Deno.test("TcpServerListener binds and exposes addr", () => {
   }
 });
 
-Deno.test("TcpServerListener.close is idempotent", () => {
-  const listener = new TcpServerListener({ port: 0, hostname: "127.0.0.1" });
+Deno.test("TcpTransport.listen close is idempotent", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
+  const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
   listener.close();
   // Second close should not throw.
   listener.close();
 });
 
-Deno.test("TcpServerListener.accept yields TcpTransport for each connection", async () => {
-  const listener = new TcpServerListener({ port: 0, hostname: "127.0.0.1" });
+Deno.test("TcpTransport.listen yields TcpTransport for each connection", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
+  const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
   const addr = listener.addr as Deno.NetAddr;
 
   const accepted: TcpTransport[] = [];
@@ -56,8 +63,9 @@ Deno.test("TcpServerListener.accept yields TcpTransport for each connection", as
   listener.close();
 });
 
-Deno.test("TcpServerListener.accept terminates when listener is closed", async () => {
-  const listener = new TcpServerListener({ port: 0, hostname: "127.0.0.1" });
+Deno.test("TcpTransport.listen terminates when listener is closed", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
+  const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
 
   const acceptLoop = (async () => {
     const results: TcpTransport[] = [];
@@ -80,9 +88,10 @@ Deno.test("TcpServerListener.accept terminates when listener is closed", async (
   assertEquals(results.length, 0);
 });
 
-Deno.test("TcpServerListener passes transportOptions to accepted transports", async () => {
+Deno.test("TcpTransport.listen passes transportOptions to accepted transports", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
   const transportOptions = { readBufferSize: 1024 };
-  const listener = new TcpServerListener({
+  const listener = TcpTransport.listen({
     port: 0,
     hostname: "127.0.0.1",
     transportOptions,
@@ -107,7 +116,8 @@ Deno.test("TcpServerListener passes transportOptions to accepted transports", as
   listener.close();
 });
 
-Deno.test("TcpServerListener emits observability events", () => {
+Deno.test("TcpTransport.listen emits observability events", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
   const events: string[] = [];
   const observability = {
     onEvent(event: { name: string }) {
@@ -115,7 +125,7 @@ Deno.test("TcpServerListener emits observability events", () => {
     },
   };
 
-  const listener = new TcpServerListener({
+  const listener = TcpTransport.listen({
     port: 0,
     hostname: "127.0.0.1",
     observability,
@@ -131,7 +141,8 @@ Deno.test("TcpServerListener emits observability events", () => {
   );
 });
 
-Deno.test("TcpServerListener emits accept observability event", async () => {
+Deno.test("TcpTransport.listen emits accept observability event", async () => {
+  if (!(await hasLoopbackNetPermission())) return;
   const events: string[] = [];
   const observability = {
     onEvent(event: { name: string }) {
@@ -139,7 +150,7 @@ Deno.test("TcpServerListener emits accept observability event", async () => {
     },
   };
 
-  const listener = new TcpServerListener({
+  const listener = TcpTransport.listen({
     port: 0,
     hostname: "127.0.0.1",
     observability,

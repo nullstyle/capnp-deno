@@ -13,13 +13,15 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
-import type { RpcTransport } from "./transport.ts";
+import type { RpcTransport } from "./internal/transport.ts";
+import {
+  awaitWithTimeout,
+  notifyTransportClose,
+  OutboundFrameQueue,
+  type QueuedOutboundFrame,
+} from "./internal/transport_internal.ts";
 
-interface PendingOutboundFrame {
-  frame: Uint8Array;
-  resolve: () => void;
-  reject: (error: unknown) => void;
-}
+interface PendingOutboundFrame extends QueuedOutboundFrame {}
 
 interface PromiseResolvers<T> {
   promise: Promise<T>;
@@ -100,40 +102,6 @@ function createResolvers<T>(): PromiseResolvers<T> {
 
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
-async function awaitWithTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number | undefined,
-  onTimeout: (timeoutMs: number) => Error,
-): Promise<T> {
-  if (timeoutMs === undefined) {
-    return await promise;
-  }
-
-  return await new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(onTimeout(timeoutMs));
-    }, timeoutMs);
-
-    void promise.then(
-      (value) => {
-        clearTimeout(timer);
-        if (settled) return;
-        settled = true;
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        if (settled) return;
-        settled = true;
-        reject(error);
-      },
-    );
-  });
 }
 
 function requireWebTransportConstructor(): typeof WebTransport {
@@ -233,11 +201,7 @@ export class WebTransportTransport implements RpcTransport {
   #sessionClosedWait = createResolvers<void>();
   #closeNotified = false;
 
-  #outboundQueue: PendingOutboundFrame[] = [];
-  #queuedOutboundBytes = 0;
-  #inflightOutboundFrames = 0;
-  #inflightOutboundBytes = 0;
-  #draining = false;
+  #outbound: OutboundFrameQueue<PendingOutboundFrame>;
   #drainLoop: Promise<void> | null = null;
 
   constructor(
@@ -251,6 +215,7 @@ export class WebTransportTransport implements RpcTransport {
     this.#framer = new CapnpFrameFramer(options.frameLimits);
     this.#reader = this.stream.readable.getReader();
     this.#writer = this.stream.writable.getWriter();
+    this.#outbound = new OutboundFrameQueue("webtransport", options);
 
     void this.webTransport.closed.then(
       () => this.#handleSessionClosed(),
@@ -382,11 +347,9 @@ export class WebTransportTransport implements RpcTransport {
     this.assertOutboundFrameSize(frame);
 
     const payload = new Uint8Array(frame);
-    this.assertOutboundQueueCapacity(payload.byteLength);
 
     const completion = new Promise<void>((resolve, reject) => {
-      this.#outboundQueue.push({ frame: payload, resolve, reject });
-      this.#queuedOutboundBytes += payload.byteLength;
+      this.#outbound.enqueue({ frame: payload, resolve, reject });
     });
 
     this.#ensureDrainLoop();
@@ -397,8 +360,8 @@ export class WebTransportTransport implements RpcTransport {
       attributes: {
         "rpc.outcome": "ok",
         "rpc.outbound.bytes": frame.byteLength,
-        "rpc.outbound.queue.frames": this.#outboundQueue.length,
-        "rpc.outbound.queue.bytes": this.#queuedOutboundBytes,
+        "rpc.outbound.queue.frames": this.#outbound.length,
+        "rpc.outbound.queue.bytes": this.#outbound.queuedBytes,
       },
       durationMs: performance.now() - startedAt,
     });
@@ -410,7 +373,7 @@ export class WebTransportTransport implements RpcTransport {
     this.#closed = true;
 
     const closeError = new TransportError("WebTransportTransport is closed");
-    this.#rejectQueuedOutbound(closeError);
+    this.#outbound.rejectQueued(closeError);
 
     try {
       await this.#writer.abort(closeError);
@@ -523,17 +486,15 @@ export class WebTransportTransport implements RpcTransport {
   }
 
   #ensureDrainLoop(): void {
-    if (this.#draining) return;
-    this.#draining = true;
+    if (this.#drainLoop) return;
     this.#drainLoop = this.#drainOutbound()
       .catch((_error) => {
         // Individual send() callers receive write errors through their own
         // completion promises; suppress unhandled drain-loop rejections here.
       })
       .finally(() => {
-        this.#draining = false;
         this.#drainLoop = null;
-        if (this.#outboundQueue.length > 0 && !this.#closed) {
+        if (this.#outbound.hasQueuedFrames && !this.#closed) {
           this.#ensureDrainLoop();
         }
       });
@@ -541,12 +502,10 @@ export class WebTransportTransport implements RpcTransport {
 
   async #drainOutbound(): Promise<void> {
     while (
-      !this.#closed && !this.#sessionClosed && this.#outboundQueue.length > 0
+      !this.#closed && !this.#sessionClosed && this.#outbound.hasQueuedFrames
     ) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      this.#inflightOutboundFrames += 1;
-      this.#inflightOutboundBytes += next.frame.byteLength;
+      const next = this.#outbound.dequeue();
+      if (!next) break;
 
       try {
         await awaitWithTimeout(
@@ -564,14 +523,13 @@ export class WebTransportTransport implements RpcTransport {
           "webtransport send failed",
         );
         next.reject(normalized);
-        this.#rejectQueuedOutbound(normalized);
+        this.#outbound.rejectQueued(normalized);
         if (this.options.onError) {
           void Promise.resolve(this.options.onError(normalized));
         }
         throw normalized;
       } finally {
-        this.#inflightOutboundFrames -= 1;
-        this.#inflightOutboundBytes -= next.frame.byteLength;
+        this.#outbound.settle(next.frame.byteLength);
       }
     }
   }
@@ -600,7 +558,7 @@ export class WebTransportTransport implements RpcTransport {
     this.#sessionClosed = true;
     this.#sessionClosedWait.resolve();
     const error = new TransportError("webtransport session is closed");
-    this.#rejectQueuedOutbound(error);
+    this.#outbound.rejectQueued(error);
     this.#notifyClose();
   }
 
@@ -627,27 +585,7 @@ export class WebTransportTransport implements RpcTransport {
   #notifyClose(): void {
     if (this.#closeNotified) return;
     this.#closeNotified = true;
-    const onClose = this.options.onClose;
-    if (!onClose) return;
-    void Promise.resolve(onClose()).catch((error) => {
-      const onError = this.options.onError;
-      if (!onError) return;
-      const normalized = normalizeTransportError(
-        error,
-        "webtransport onClose callback failed",
-      );
-      void Promise.resolve(onError(normalized)).catch(() => {
-        // Swallow callback failures to avoid unhandled rejections.
-      });
-    });
-  }
-
-  #rejectQueuedOutbound(error: unknown): void {
-    while (this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      next.reject(error);
-    }
+    notifyTransportClose(this.options, "webtransport onClose callback failed");
   }
 
   private assertOutboundFrameSize(frame: Uint8Array): void {
@@ -656,32 +594,6 @@ export class WebTransportTransport implements RpcTransport {
       throw new TransportError(
         `webtransport outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
-    }
-  }
-
-  private assertOutboundQueueCapacity(frameBytes: number): void {
-    const maxFrames = this.options.maxQueuedOutboundFrames;
-    if (maxFrames !== undefined) {
-      const used = this.#inflightOutboundFrames + this.#outboundQueue.length;
-      if (used + 1 > maxFrames) {
-        throw new TransportError(
-          `webtransport outbound queue frame limit exceeded: ${
-            used + 1
-          } > ${maxFrames}`,
-        );
-      }
-    }
-
-    const maxBytes = this.options.maxQueuedOutboundBytes;
-    if (maxBytes !== undefined) {
-      const used = this.#inflightOutboundBytes + this.#queuedOutboundBytes;
-      if (used + frameBytes > maxBytes) {
-        throw new TransportError(
-          `webtransport outbound queue byte limit exceeded: ${
-            used + frameBytes
-          } > ${maxBytes}`,
-        );
-      }
     }
   }
 }

@@ -8,13 +8,13 @@
  * @module
  */
 
-import { SessionError } from "../../errors.ts";
+import { SessionError } from "../../../errors.ts";
 import type { RpcClientTransportLike } from "./reconnecting_client.ts";
 import {
   assertNonNegativeFinite,
   assertNonNegativeInteger,
   assertPositiveInteger,
-} from "../../validation.ts";
+} from "../../../validation.ts";
 
 /**
  * Configuration options for {@link RpcConnectionPool}.

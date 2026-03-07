@@ -13,13 +13,14 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
-import type { RpcTransport } from "./transport.ts";
+import type { RpcTransport } from "./internal/transport.ts";
+import {
+  OutboundFrameQueue,
+  type QueuedOutboundFrame,
+} from "./internal/transport_internal.ts";
 
-interface PendingOutboundFrame {
-  frame: Uint8Array;
+interface PendingOutboundFrame extends QueuedOutboundFrame {
   enqueuedAt: number;
-  resolve: () => void;
-  reject: (error: unknown) => void;
 }
 
 /**
@@ -105,10 +106,7 @@ export class MessagePortTransport implements RpcTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
   #inboundChain: Promise<void> = Promise.resolve();
 
-  #outboundQueue: PendingOutboundFrame[] = [];
-  #queuedOutboundBytes = 0;
-  #inflightOutboundFrames = 0;
-  #inflightOutboundBytes = 0;
+  #outbound: OutboundFrameQueue<PendingOutboundFrame>;
   #drainLoop: Promise<void> | null = null;
 
   #onMessage = (event: MessageEvent) => {
@@ -143,6 +141,7 @@ export class MessagePortTransport implements RpcTransport {
   constructor(port: MessagePort, options: MessagePortTransportOptions = {}) {
     this.port = port;
     this.options = options;
+    this.#outbound = new OutboundFrameQueue("message port", options);
   }
 
   start(
@@ -184,16 +183,14 @@ export class MessagePortTransport implements RpcTransport {
 
     this.assertOutboundFrameSize(frame);
     const payload = new Uint8Array(frame);
-    this.assertOutboundQueueCapacity(payload.byteLength);
 
     const completion = new Promise<void>((resolve, reject) => {
-      this.#outboundQueue.push({
+      this.#outbound.enqueue({
         frame: payload,
         enqueuedAt: Date.now(),
         resolve,
         reject,
       });
-      this.#queuedOutboundBytes += payload.byteLength;
     });
 
     this.#ensureDrainLoop();
@@ -204,8 +201,8 @@ export class MessagePortTransport implements RpcTransport {
       attributes: {
         "rpc.outcome": "ok",
         "rpc.outbound.bytes": frame.byteLength,
-        "rpc.outbound.queue.frames": this.#outboundQueue.length,
-        "rpc.outbound.queue.bytes": this.#queuedOutboundBytes,
+        "rpc.outbound.queue.frames": this.#outbound.length,
+        "rpc.outbound.queue.bytes": this.#outbound.queuedBytes,
       },
       durationMs: performance.now() - startedAt,
     });
@@ -217,7 +214,7 @@ export class MessagePortTransport implements RpcTransport {
     this.#closed = true;
 
     const closeError = new TransportError("MessagePortTransport is closed");
-    this.#rejectQueuedOutbound(closeError);
+    this.#outbound.rejectQueued(closeError);
 
     if (this.#listenersAttached) {
       this.port.removeEventListener("message", this.#onMessage);
@@ -245,23 +242,21 @@ export class MessagePortTransport implements RpcTransport {
       })
       .finally(() => {
         this.#drainLoop = null;
-        if (this.#outboundQueue.length > 0 && !this.#closed) {
+        if (this.#outbound.hasQueuedFrames && !this.#closed) {
           this.#ensureDrainLoop();
         }
       });
   }
 
   async #drainOutbound(): Promise<void> {
-    while (!this.#closed && this.#outboundQueue.length > 0) {
+    while (!this.#closed && this.#outbound.hasQueuedFrames) {
       // Yield once before each postMessage so bursts of send() calls can be
       // bounded by queue limits instead of draining synchronously inline.
       await Promise.resolve();
-      if (this.#closed || this.#outboundQueue.length === 0) break;
+      if (this.#closed || !this.#outbound.hasQueuedFrames) break;
 
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      this.#inflightOutboundFrames += 1;
-      this.#inflightOutboundBytes += next.frame.byteLength;
+      const next = this.#outbound.dequeue();
+      if (!next) break;
 
       try {
         const timeoutMs = this.options.sendTimeoutMs;
@@ -281,12 +276,11 @@ export class MessagePortTransport implements RpcTransport {
           "message port send failed",
         );
         next.reject(normalized);
-        this.#rejectQueuedOutbound(normalized);
+        this.#outbound.rejectQueued(normalized);
         this.#handleError(normalized);
         throw normalized;
       } finally {
-        this.#inflightOutboundFrames -= 1;
-        this.#inflightOutboundBytes -= next.frame.byteLength;
+        this.#outbound.settle(next.frame.byteLength);
       }
     }
   }
@@ -310,14 +304,6 @@ export class MessagePortTransport implements RpcTransport {
     throw normalized;
   }
 
-  #rejectQueuedOutbound(error: unknown): void {
-    while (this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      next.reject(error);
-    }
-  }
-
   private assertInboundFrameSize(frame: Uint8Array): void {
     const max = this.options.maxInboundFrameBytes;
     if (max !== undefined && frame.byteLength > max) {
@@ -333,32 +319,6 @@ export class MessagePortTransport implements RpcTransport {
       throw new TransportError(
         `message port outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
-    }
-  }
-
-  private assertOutboundQueueCapacity(frameBytes: number): void {
-    const maxFrames = this.options.maxQueuedOutboundFrames;
-    if (maxFrames !== undefined) {
-      const used = this.#inflightOutboundFrames + this.#outboundQueue.length;
-      if (used + 1 > maxFrames) {
-        throw new TransportError(
-          `message port outbound queue frame limit exceeded: ${
-            used + 1
-          } > ${maxFrames}`,
-        );
-      }
-    }
-
-    const maxBytes = this.options.maxQueuedOutboundBytes;
-    if (maxBytes !== undefined) {
-      const used = this.#inflightOutboundBytes + this.#queuedOutboundBytes;
-      if (used + frameBytes > maxBytes) {
-        throw new TransportError(
-          `message port outbound queue byte limit exceeded: ${
-            used + frameBytes
-          } > ${maxBytes}`,
-        );
-      }
     }
   }
 }

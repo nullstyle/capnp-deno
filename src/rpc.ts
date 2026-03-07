@@ -77,7 +77,7 @@ export {
 
 // === Session & Transport ===
 
-export { type RpcTransport } from "./rpc/transports/transport.ts";
+export { type RpcTransport } from "./rpc/transports/internal/transport.ts";
 
 export { type RpcRuntimeModuleOptions } from "./rpc/server/runtime_module.ts";
 
@@ -158,21 +158,16 @@ export {
   type RpcMetricsMiddlewareOptions,
   type RpcMetricsSnapshot,
   type RpcTransportMiddleware,
-} from "./rpc/transports/middleware.ts";
+} from "./rpc/transports/middleware/rpc_middleware.ts";
 
 // === Transports (TCP, WebSocket, MessagePort) ===
 
 export {
-  TcpServerListener,
-  type TcpServerListenerOptions,
   TcpTransport,
+  type TcpTransportListener,
+  type TcpTransportListenOptions,
   type TcpTransportOptions,
 } from "./rpc/transports/tcp.ts";
-export {
-  type TcpRpcClientConnectOptions,
-  TcpRpcClientTransport,
-  type TcpRpcClientTransportOptions,
-} from "./rpc/transports/tcp_rpc_client.ts";
 
 export {
   WebSocketTransport,
@@ -191,6 +186,13 @@ export {
   type WebTransportTransportOptions,
 } from "./rpc/transports/webtransport.ts";
 
+// === Low-Level RPC Clients ===
+
+export {
+  RpcWireClient,
+  type RpcWireClientOptions,
+} from "./rpc/rpc_wire_client.ts";
+
 // === Resilience (Connection Pool, Circuit Breaker, Reconnect) ===
 
 export {
@@ -199,13 +201,13 @@ export {
   type RpcConnectionPoolStats,
   type RpcConnectionPoolWarmupStats,
   withConnection,
-} from "./rpc/transports/connection_pool.ts";
+} from "./rpc/transports/resilience/connection_pool.ts";
 
 export {
   CircuitBreaker,
   type CircuitBreakerOptions,
   type CircuitBreakerState,
-} from "./rpc/transports/circuit_breaker.ts";
+} from "./rpc/transports/resilience/circuit_breaker.ts";
 
 export {
   connectWithReconnect,
@@ -215,7 +217,7 @@ export {
   type ReconnectPolicy,
   type ReconnectPolicyContext,
   type ReconnectRetryInfo,
-} from "./rpc/transports/reconnect.ts";
+} from "./rpc/transports/resilience/reconnect.ts";
 
 export {
   type ReconnectCapabilityRemapContext,
@@ -223,7 +225,7 @@ export {
   type ReconnectingRpcClientTransportOptions,
   type RpcCapabilityPointer,
   type RpcClientTransportLike,
-} from "./rpc/transports/reconnecting_client.ts";
+} from "./rpc/transports/resilience/reconnecting_client.ts";
 
 export {
   connectTcpTransportWithReconnect,
@@ -235,7 +237,7 @@ export {
   type ConnectWebTransportTransportWithReconnectOptions,
   createRpcSessionWithReconnect,
   type CreateRpcSessionWithReconnectOptions,
-} from "./rpc/transports/reconnect_wrappers.ts";
+} from "./rpc/transports/resilience/reconnect_wrappers.ts";
 
 // === Streaming ===
 

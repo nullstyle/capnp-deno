@@ -16,7 +16,6 @@ import {
   instantiatePeer,
   RpcServerBridge,
   RpcServerRuntime,
-  TcpServerListener,
   TcpTransport,
 } from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
@@ -92,7 +91,7 @@ class FrameCollector {
 
 Deno.test("TCP RPC interop: bootstrap + call + response over real TCP", async () => {
   // --- Server setup ---
-  const serverListener = new TcpServerListener({
+  const serverListener = TcpTransport.listen({
     port: 0,
     hostname: "127.0.0.1",
   });

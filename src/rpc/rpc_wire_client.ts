@@ -1,5 +1,5 @@
 /**
- * TCP-backed raw RPC client transport.
+ * Wire-level RPC client over a started transport.
  *
  * Provides a lightweight client-side adapter that speaks Cap'n Proto RPC
  * wire frames directly over a started {@link RpcTransport}. This adapter is
@@ -11,17 +11,17 @@
  * @module
  */
 
-import { ProtocolError, SessionError } from "../../errors.ts";
+import { ProtocolError, SessionError } from "../errors.ts";
 import type {
   RpcClientCallOptions,
   RpcClientCallResult,
   RpcFinishOptions,
-} from "../session/client.ts";
+} from "./session/client.ts";
 import {
   type CapabilityPointer,
   RpcServerBridge,
   type RpcServerDispatch,
-} from "../server/bridge.ts";
+} from "./server/bridge.ts";
 import {
   decodeReturnFrame,
   decodeRpcMessageTag,
@@ -36,9 +36,8 @@ import {
   RPC_MESSAGE_TAG_RELEASE,
   RPC_MESSAGE_TAG_RETURN,
   type RpcReturnMessage,
-} from "../wire.ts";
-import type { RpcTransport } from "./transport.ts";
-import { TcpTransport, type TcpTransportOptions } from "./tcp.ts";
+} from "./wire.ts";
+import type { RpcTransport } from "./transports/internal/transport.ts";
 
 interface PendingReturnWaiter {
   settled: boolean;
@@ -50,9 +49,9 @@ interface PendingReturnWaiter {
 }
 
 /**
- * Options for {@link TcpRpcClientTransport}.
+ * Options for {@link RpcWireClient}.
  */
-export interface TcpRpcClientTransportOptions {
+export interface RpcWireClientOptions {
   /**
    * Default interface ID for call/callRaw when per-call `options.interfaceId`
    * is omitted.
@@ -75,29 +74,19 @@ export interface TcpRpcClientTransportOptions {
 }
 
 /**
- * Options for {@link TcpRpcClientTransport.connect}.
- */
-export interface TcpRpcClientConnectOptions
-  extends TcpRpcClientTransportOptions {
-  /** Low-level TCP transport options forwarded to {@link TcpTransport.connect}. */
-  transport?: TcpTransportOptions;
-}
-
-/**
- * Cap'n Proto RPC client adapter over a network {@link RpcTransport}.
+ * Cap'n Proto RPC client adapter over a started {@link RpcTransport}.
  *
  * This adapter sends Bootstrap/Call/Finish/Release frames directly and waits
  * for matching Return frames by question ID.
  */
-export class TcpRpcClientTransport {
+export class RpcWireClient {
   /** Underlying started network transport. */
   readonly transport: RpcTransport;
 
   readonly #interfaceId: bigint | undefined;
   #nextQuestionId: number;
   readonly #defaultTimeoutMs: number | undefined;
-  readonly #onUnexpectedFrame:
-    TcpRpcClientTransportOptions["onUnexpectedFrame"];
+  readonly #onUnexpectedFrame: RpcWireClientOptions["onUnexpectedFrame"];
 
   #closed = false;
   #startError: unknown = null;
@@ -107,7 +96,7 @@ export class TcpRpcClientTransport {
 
   constructor(
     transport: RpcTransport,
-    options: TcpRpcClientTransportOptions = {},
+    options: RpcWireClientOptions = {},
   ) {
     this.transport = transport;
     this.#interfaceId = options.interfaceId;
@@ -120,24 +109,11 @@ export class TcpRpcClientTransport {
     ).catch((error) => {
       this.#startError = error;
       this.#rejectAllPending(
-        new SessionError("tcp rpc client transport failed to start", {
+        new SessionError("rpc wire client failed to start", {
           cause: error,
         }),
       );
     });
-  }
-
-  /**
-   * Connect to a TCP server and create a started {@link TcpRpcClientTransport}.
-   */
-  static async connect(
-    hostname: string,
-    port: number,
-    options: TcpRpcClientConnectOptions = {},
-  ): Promise<TcpRpcClientTransport> {
-    const { transport, ...clientOptions } = options;
-    const tcp = await TcpTransport.connect(hostname, port, transport);
-    return new TcpRpcClientTransport(tcp, clientOptions);
   }
 
   /**
@@ -200,7 +176,7 @@ export class TcpRpcClientTransport {
     const interfaceId = options.interfaceId ?? this.#interfaceId;
     if (interfaceId === undefined) {
       throw new ProtocolError(
-        "interfaceId is required for tcp rpc calls when no default interfaceId is configured",
+        "interfaceId is required for rpc wire client calls when no default interfaceId is configured",
       );
     }
 
@@ -288,9 +264,7 @@ export class TcpRpcClientTransport {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#rejectAllPending(
-      new SessionError("tcp rpc client transport is closed"),
-    );
+    this.#rejectAllPending(new SessionError("rpc wire client is closed"));
     await this.transport.close();
   }
 
@@ -352,11 +326,11 @@ export class TcpRpcClientTransport {
 
   async #ensureReady(): Promise<void> {
     if (this.#closed) {
-      throw new SessionError("tcp rpc client transport is closed");
+      throw new SessionError("rpc wire client is closed");
     }
     await this.#startPromise;
     if (this.#startError !== null) {
-      throw new SessionError("tcp rpc client transport failed to start", {
+      throw new SessionError("rpc wire client failed to start", {
         cause: this.#startError,
       });
     }

@@ -1,4 +1,4 @@
-import { assert, assertEquals, withTimeout } from "../../tests/test_utils.ts";
+import { assertEquals, withTimeout } from "../../tests/test_utils.ts";
 import { PeerRuntime } from "./runtime.ts";
 import {
   DEMO_CERT_HASH,
@@ -28,7 +28,7 @@ function createRuntime(name: string, port: number): PeerRuntime {
   });
 }
 
-async function getFreePort(): Promise<number> {
+function getFreePort(): number {
   const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
   try {
     return (listener.addr as Deno.NetAddr).port;
@@ -55,8 +55,8 @@ Deno.test("PeerRuntime auto-connects back so both peers can chat", async () => {
     return;
   }
 
-  const alicePort = await getFreePort();
-  const bobPort = await getFreePort();
+  const alicePort = getFreePort();
+  const bobPort = getFreePort();
   const alice = createRuntime("alice", alicePort);
   const bob = createRuntime("bob", bobPort);
   const aliceLogs: string[] = [];

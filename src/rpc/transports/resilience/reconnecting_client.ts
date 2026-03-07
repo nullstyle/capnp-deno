@@ -12,7 +12,7 @@ import {
   normalizeSessionError,
   SessionError,
   TransportError,
-} from "../../errors.ts";
+} from "../../../errors.ts";
 import {
   connectWithReconnect,
   type ConnectWithReconnectOptions,
@@ -20,8 +20,8 @@ import {
 import type {
   RpcClientCallOptions,
   RpcFinishOptions,
-} from "../session/client.ts";
-import type { CapabilityPointer } from "../server/bridge.ts";
+} from "../../session/client.ts";
+import type { CapabilityPointer } from "../../server/bridge.ts";
 
 /**
  * Alias for {@link CapabilityPointer}, used throughout the reconnecting client

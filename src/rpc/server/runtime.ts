@@ -13,7 +13,7 @@ import {
   RpcServerOutboundClient,
 } from "./outbound.ts";
 import { RpcSession, type RpcSessionOptions } from "../session/session.ts";
-import type { RpcTransport } from "../transports/transport.ts";
+import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { WasmPeer } from "../../wasm/peer.ts";
 
 const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;

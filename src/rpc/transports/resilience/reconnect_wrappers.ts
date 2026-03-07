@@ -12,19 +12,19 @@ import {
   connectWithReconnect,
   type ConnectWithReconnectOptions,
 } from "./reconnect.ts";
-import { normalizeSessionError } from "../../errors.ts";
-import { RpcSession, type RpcSessionOptions } from "../session/session.ts";
-import type { RpcRuntimeModuleOptions } from "../server/runtime_module.ts";
-import type { RpcTransport } from "./transport.ts";
-import { TcpTransport, type TcpTransportOptions } from "./tcp.ts";
+import { normalizeSessionError } from "../../../errors.ts";
+import { RpcSession, type RpcSessionOptions } from "../../session/session.ts";
+import type { RpcRuntimeModuleOptions } from "../../server/runtime_module.ts";
+import type { RpcTransport } from "../internal/transport.ts";
+import { TcpTransport, type TcpTransportOptions } from "../tcp.ts";
 import {
   WebSocketTransport,
   type WebSocketTransportOptions,
-} from "./websocket.ts";
+} from "../websocket.ts";
 import {
   WebTransportTransport,
   type WebTransportTransportConnectOptions,
-} from "./webtransport.ts";
+} from "../webtransport.ts";
 
 /**
  * Options for {@link connectTcpTransportWithReconnect}.

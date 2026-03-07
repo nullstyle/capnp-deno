@@ -16,7 +16,7 @@ import {
   createRuntimePeer,
   type RpcRuntimeModuleOptions,
 } from "../server/runtime_module.ts";
-import type { RpcTransport } from "../transports/transport.ts";
+import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { WasmPeer } from "../../wasm/peer.ts";
 
 /**

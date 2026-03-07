@@ -4,8 +4,7 @@
 export const schemaFileId = 0xc3f5a6de215d6b19n;
 export const schemaFilename = "examples/webtransport_p2p/schema.capnp";
 
-export const schemaImports = [
-] as const;
+export const schemaImports = [] as const;
 
 export const schemaNodes = [
   {
@@ -23,13 +22,15 @@ export const schemaNodes = [
   {
     id: 0x9e43a84b349956aen,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerEvents.system$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerEvents.system$Params",
     scopeId: 0x0n,
   },
   {
     id: 0x9830d6ee39eb5161n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerEvents.system$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerEvents.system$Results",
     scopeId: 0x0n,
   },
   {
@@ -41,61 +42,71 @@ export const schemaNodes = [
   {
     id: 0xcc7ba901acdb7140n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.advertise$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.advertise$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xbb815e8cdf4c3ef4n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.advertise$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.advertise$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xda0b4b6d629ac755n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.connect$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.connect$Params",
     scopeId: 0x0n,
   },
   {
     id: 0x95439d6ed04babdbn,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.connect$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.connect$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xf09756f01889c4a2n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.disconnect$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.disconnect$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xd2065224e12eae3an,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.disconnect$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.disconnect$Results",
     scopeId: 0x0n,
   },
   {
     id: 0x809b8f0884fe617cn,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.listPeers$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.listPeers$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xd5b2a76f45cc3948n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.listPeers$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.listPeers$Results",
     scopeId: 0x0n,
   },
   {
     id: 0xb30701e48ef26267n,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.rename$Params",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.rename$Params",
     scopeId: 0x0n,
   },
   {
     id: 0xcf85fbc982c930een,
     kind: "struct",
-    displayName: "examples/webtransport_p2p/schema.capnp:PeerNode.rename$Results",
+    displayName:
+      "examples/webtransport_p2p/schema.capnp:PeerNode.rename$Results",
     scopeId: 0x0n,
   },
   {

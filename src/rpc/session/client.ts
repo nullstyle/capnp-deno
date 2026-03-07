@@ -18,7 +18,7 @@ import {
   type RpcObservability,
 } from "../../observability/observability.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
-import type { RpcTransport } from "../transports/transport.ts";
+import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { RpcRuntimeModuleOptions } from "../server/runtime_module.ts";
 import {
   decodeReturnFrame,
@@ -35,6 +35,8 @@ import {
   type RpcPromisedAnswerOp,
   type RpcReturnMessage,
 } from "../wire.ts";
+import { requireRpcReturnResults, toRpcCallResult } from "../call_result.ts";
+import { HarnessFrameQueue } from "./harness_frame_queue.ts";
 
 /**
  * Context object passed to client middleware hooks.
@@ -378,12 +380,6 @@ interface PendingReturnWaiter {
   settled: boolean;
 }
 
-interface PendingOutboundFrameWaiter {
-  resolve: (frame: Uint8Array) => void;
-  reject: (error: unknown) => void;
-  settled: boolean;
-}
-
 /**
  * An in-memory implementation of {@link RpcSessionHarnessTransport} for testing.
  *
@@ -404,8 +400,7 @@ interface PendingOutboundFrameWaiter {
 export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
   #closed = false;
-  #outboundQueue: Uint8Array[] = [];
-  #waiters: PendingOutboundFrameWaiter[] = [];
+  #outboundFrames = new HarnessFrameQueue();
 
   start(
     onFrame: (frame: Uint8Array) => void | Promise<void>,
@@ -416,23 +411,14 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
 
   send(frame: Uint8Array): void {
     if (this.#closed) throw new SessionError("transport is closed");
-    const copy = new Uint8Array(frame);
-    const waiter = this.#waiters.shift();
-    if (waiter) {
-      waiter.resolve(copy);
-      return;
-    }
-    this.#outboundQueue.push(copy);
+    this.#outboundFrames.enqueue(new Uint8Array(frame));
   }
 
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#onFrame = null;
-    const error = new SessionError("transport is closed");
-    for (const waiter of this.#waiters.splice(0)) {
-      waiter.reject(error);
-    }
+    this.#outboundFrames.close(new SessionError("transport is closed"));
   }
 
   async emitInbound(frame: Uint8Array): Promise<void> {
@@ -444,64 +430,7 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
   async nextOutboundFrame(
     options: RpcClientCallOptions = {},
   ): Promise<Uint8Array> {
-    if (this.#outboundQueue.length > 0) {
-      return this.#outboundQueue.shift()!;
-    }
-    if (this.#closed) {
-      throw new SessionError("transport is closed");
-    }
-
-    return await new Promise<Uint8Array>((resolve, reject) => {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const waiter: PendingOutboundFrameWaiter = {
-        settled: false,
-        resolve: (frame: Uint8Array): void => {
-          if (waiter.settled) return;
-          waiter.settled = true;
-          this.#removeOutboundFrameWaiter(waiter);
-          cleanup();
-          resolve(frame);
-        },
-        reject: (error: unknown): void => {
-          if (waiter.settled) return;
-          waiter.settled = true;
-          this.#removeOutboundFrameWaiter(waiter);
-          cleanup();
-          reject(error);
-        },
-      };
-      const onAbort = (): void => {
-        waiter.reject(new SessionError("rpc wait aborted"));
-      };
-      const cleanup = (): void => {
-        if (timeout !== undefined) clearTimeout(timeout);
-        options.signal?.removeEventListener("abort", onAbort);
-      };
-
-      if (options.signal?.aborted) {
-        waiter.reject(new SessionError("rpc wait aborted"));
-        return;
-      }
-      if (options.timeoutMs !== undefined) {
-        timeout = setTimeout(() => {
-          waiter.reject(
-            new SessionError(`rpc wait timed out after ${options.timeoutMs}ms`),
-          );
-        }, options.timeoutMs);
-      }
-      if (options.signal) {
-        options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      this.#waiters.push(waiter);
-    });
-  }
-
-  #removeOutboundFrameWaiter(waiter: PendingOutboundFrameWaiter): void {
-    const index = this.#waiters.indexOf(waiter);
-    if (index >= 0) {
-      this.#waiters.splice(index, 1);
-    }
+    return await this.#outboundFrames.next(options);
   }
 }
 
@@ -534,8 +463,7 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
 
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
   #closed = false;
-  #inboundQueue: Uint8Array[] = [];
-  #waiters: PendingOutboundFrameWaiter[] = [];
+  #inboundFrames = new HarnessFrameQueue();
 
   constructor(transport: RpcTransport) {
     this.transport = transport;
@@ -552,7 +480,7 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
     // 2. Delivered to onFrame (so the session/WASM peer processes them)
     return this.transport.start(async (frame) => {
       const copy = new Uint8Array(frame);
-      this.#deliverOrQueue(copy);
+      this.#inboundFrames.enqueue(copy);
       if (this.#onFrame) {
         await this.#onFrame(copy);
       }
@@ -569,13 +497,7 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
     if (this.#closed) return;
     this.#closed = true;
     this.#onFrame = null;
-    const error = new SessionError("transport is closed");
-    for (const waiter of this.#waiters.splice(0)) {
-      if (!waiter.settled) {
-        waiter.settled = true;
-        waiter.reject(error);
-      }
-    }
+    this.#inboundFrames.close(new SessionError("transport is closed"));
     await this.transport.close();
   }
 
@@ -590,74 +512,7 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
   async nextOutboundFrame(
     options: RpcClientCallOptions = {},
   ): Promise<Uint8Array> {
-    if (this.#inboundQueue.length > 0) {
-      return this.#inboundQueue.shift()!;
-    }
-    if (this.#closed) {
-      throw new SessionError("transport is closed");
-    }
-
-    return await new Promise<Uint8Array>((resolve, reject) => {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const waiter: PendingOutboundFrameWaiter = {
-        settled: false,
-        resolve: (frame: Uint8Array): void => {
-          if (waiter.settled) return;
-          waiter.settled = true;
-          this.#removeWaiter(waiter);
-          cleanup();
-          resolve(frame);
-        },
-        reject: (error: unknown): void => {
-          if (waiter.settled) return;
-          waiter.settled = true;
-          this.#removeWaiter(waiter);
-          cleanup();
-          reject(error);
-        },
-      };
-      const onAbort = (): void => {
-        waiter.reject(new SessionError("rpc wait aborted"));
-      };
-      const cleanup = (): void => {
-        if (timeout !== undefined) clearTimeout(timeout);
-        options.signal?.removeEventListener("abort", onAbort);
-      };
-
-      if (options.signal?.aborted) {
-        waiter.reject(new SessionError("rpc wait aborted"));
-        return;
-      }
-      if (options.timeoutMs !== undefined) {
-        timeout = setTimeout(() => {
-          waiter.reject(
-            new SessionError(`rpc wait timed out after ${options.timeoutMs}ms`),
-          );
-        }, options.timeoutMs);
-      }
-      if (options.signal) {
-        options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      this.#waiters.push(waiter);
-    });
-  }
-
-  #deliverOrQueue(frame: Uint8Array): void {
-    const waiter = this.#waiters.shift();
-    if (waiter && !waiter.settled) {
-      waiter.settled = true;
-      waiter.resolve(frame);
-    } else {
-      this.#inboundQueue.push(frame);
-    }
-  }
-
-  #removeWaiter(waiter: PendingOutboundFrameWaiter): void {
-    const index = this.#waiters.indexOf(waiter);
-    if (index >= 0) {
-      this.#waiters.splice(index, 1);
-    }
+    return await this.#inboundFrames.next(options);
   }
 }
 
@@ -881,32 +736,25 @@ export class SessionRpcClientTransport {
         throw error;
       }
 
-      if (message.kind === "exception") {
-        const err = new ProtocolError(`rpc call failed: ${message.reason}`);
+      let resultMessage;
+      try {
+        resultMessage = requireRpcReturnResults(message);
+      } catch (error) {
         if (mwCtx) {
-          await this.#runOnError(err, mwCtx);
+          await this.#runOnError(error, mwCtx);
         }
-        throw err;
+        throw error;
       }
 
-      if ((options.autoFinish ?? true) && !message.noFinishNeeded) {
+      if ((options.autoFinish ?? true) && !resultMessage.noFinishNeeded) {
         await this.#sendFinish(questionId, options.finish);
       }
 
       const contentBytes = mwCtx
-        ? await this.#runOnResponse(message.contentBytes, mwCtx)
-        : message.contentBytes;
+        ? await this.#runOnResponse(resultMessage.contentBytes, mwCtx)
+        : resultMessage.contentBytes;
 
-      return {
-        answerId: message.answerId,
-        contentBytes,
-        capTable: message.capTable.map((entry) => ({
-          tag: entry.tag,
-          id: entry.id,
-        })),
-        releaseParamCaps: message.releaseParamCaps,
-        noFinishNeeded: message.noFinishNeeded,
-      };
+      return toRpcCallResult(resultMessage, contentBytes);
     });
   }
 
@@ -1165,28 +1013,21 @@ export class SessionRpcClientTransport {
       throw error;
     }
 
-    if (decoded.kind === "exception") {
-      const err = new ProtocolError(`rpc call failed: ${decoded.reason}`);
+    let resultMessage;
+    try {
+      resultMessage = requireRpcReturnResults(decoded);
+    } catch (error) {
       if (mwCtx) {
-        await this.#runOnError(err, mwCtx);
+        await this.#runOnError(error, mwCtx);
       }
-      throw err;
+      throw error;
     }
 
     const contentBytes = mwCtx
-      ? await this.#runOnResponse(decoded.contentBytes, mwCtx)
-      : decoded.contentBytes;
+      ? await this.#runOnResponse(resultMessage.contentBytes, mwCtx)
+      : resultMessage.contentBytes;
 
-    return {
-      answerId: decoded.answerId,
-      contentBytes,
-      capTable: decoded.capTable.map((entry) => ({
-        tag: entry.tag,
-        id: entry.id,
-      })),
-      releaseParamCaps: decoded.releaseParamCaps,
-      noFinishNeeded: decoded.noFinishNeeded,
-    };
+    return toRpcCallResult(resultMessage, contentBytes);
   }
 
   async #awaitReturn(

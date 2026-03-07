@@ -8,8 +8,8 @@
  * @module
  */
 
-import { TransportError } from "../../errors.ts";
-import type { RpcTransport } from "./transport.ts";
+import { TransportError } from "../../../errors.ts";
+import type { RpcTransport } from "../internal/transport.ts";
 import {
   decodeRpcMessageTag,
   RPC_MESSAGE_TAG_BOOTSTRAP,
@@ -17,7 +17,7 @@ import {
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
   RPC_MESSAGE_TAG_RETURN,
-} from "../wire.ts";
+} from "../../wire.ts";
 
 /**
  * Result of a middleware hook. Middleware can:

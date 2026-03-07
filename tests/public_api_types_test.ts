@@ -80,15 +80,16 @@ import type {
   RpcStubLifecycle,
   RpcTransport,
   RpcTransportMiddleware,
+  RpcWireClientOptions,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
   TcpConnectOptions,
   TcpPort,
-  TcpRpcClientConnectOptions,
-  TcpRpcClientTransportOptions,
   TcpServeHandle,
   TcpServeOptions,
   TcpServiceApi,
+  TcpTransportListener,
+  TcpTransportListenOptions,
   TcpTransportOptions,
   WebSocketConnectOptions,
   WebSocketRequestHandler,
@@ -120,6 +121,7 @@ type PublicTypeExportSmoke = {
   loggingMiddlewareOptions: LoggingMiddlewareOptions;
   middlewareResult: MiddlewareResult;
   rpcTransportMiddleware: RpcTransportMiddleware;
+  rpcWireClientOptions: RpcWireClientOptions;
   rpcFrameDirection: RpcFrameDirection;
   rpcIntrospectionCallbacks: RpcIntrospectionCallbacks;
   rpcMetricsFramesByType: RpcMetricsFramesByType;
@@ -212,9 +214,9 @@ type PublicTypeExportSmoke = {
   tcpServeHandle: TcpServeHandle;
   tcpServeOptions: TcpServeOptions;
   tcpServiceApi: TcpServiceApi;
+  tcpTransportListenOptions: TcpTransportListenOptions;
+  tcpTransportListener: TcpTransportListener;
   tcpTransportOptions: TcpTransportOptions;
-  tcpRpcClientConnectOptions: TcpRpcClientConnectOptions;
-  tcpRpcClientTransportOptions: TcpRpcClientTransportOptions;
   webSocketConnectOptions: WebSocketConnectOptions;
   webSocketRequestHandler: WebSocketRequestHandler;
   webSocketServeHandle: WebSocketServeHandle;

@@ -52,14 +52,8 @@ unless you are adding a new wire protocol.
 
 Communicates over a Deno `Deno.Conn` TCP socket. Uses `CapnpFrameFramer` to
 reassemble Cap'n Proto frames from the byte stream. Use the static
-`TcpTransport.connect(hostname, port)` factory for clients or accept connections
-from `TcpServerListener` for servers.
-
-### `TcpServerListener`
-
-Binds a TCP port and yields a `TcpTransport` for each accepted connection via
-`accept()`. Each yielded transport should be handed to its own
-`RpcServerRuntime`.
+`TcpTransport.connect(hostname, port)` factory for clients or
+`TcpTransport.listen({ ... })` for servers.
 
 ### `WebSocketTransport`
 
@@ -110,11 +104,11 @@ Adapts a real `RpcTransport` (TCP, WebSocket, etc.) to the
 `RpcSessionHarnessTransport` interface required by `SessionRpcClientTransport`.
 Use this when connecting to a remote server from client code.
 
-### `TcpRpcClientTransport`
+### `RpcWireClient`
 
 Raw RPC client adapter that sends Bootstrap/Call/Finish/Release wire frames
 directly over a started transport. Use this when you want generated stubs over
-TCP without running a local client-side WASM peer.
+TCP, WebSocket, or WebTransport without running a local client-side WASM peer.
 
 ### `RpcServerRuntime`
 
@@ -180,7 +174,7 @@ const cap = await client.bootstrap();
 ### TCP Server Accepting Connections
 
 ```
-TcpServerListener
+TcpTransport.listen()
      |
      | accept() yields TcpTransport per connection
      v
@@ -192,7 +186,7 @@ TcpTransport
 ```
 
 ```ts
-const listener = new TcpServerListener({ port: 4000 });
+const listener = TcpTransport.listen({ port: 4000 });
 
 for await (const tcpTransport of listener.accept()) {
   const bridge = new RpcServerBridge();
@@ -388,10 +382,10 @@ const runtime = await RpcServerRuntime.create(serverTransport, bridge, {
 | ---------------------------- | --------------------------------------------------- | ----------------------------------------------------------- | --------------------------------- |
 | Unit/integration tests       | `InMemoryRpcHarnessTransport`                       | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
 | TCP client to remote server  | `TcpTransport.connect()`                            | `NetworkRpcHarnessTransport`                                | --                                |
-| TCP server accepting clients | `TcpServerListener` + `TcpTransport`                | --                                                          | `RpcServerRuntime` (one per conn) |
+| TCP server accepting clients | `TcpTransport.listen()`                             | --                                                          | `RpcServerRuntime` (one per conn) |
 | WebSocket client             | `WS.connect()` or `WebSocketTransport.connect()`    | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
 | WebSocket server             | `WS.serve()` or `new WebSocketTransport(socket)`    | --                                                          | `RpcServerRuntime`                |
-| WebTransport client          | `WT.connect()` or `WebTransportTransport.connect()` | `TcpRpcClientTransport` or `NetworkRpcHarnessTransport`     | --                                |
+| WebTransport client          | `WT.connect()` or `WebTransportTransport.connect()` | `RpcWireClient` or `NetworkRpcHarnessTransport`             | --                                |
 | WebTransport server          | `WT.serve()` or `WebTransportTransport.accept()`    | --                                                          | `RpcServerRuntime`                |
 | Worker / iframe IPC          | `MessagePortTransport`                              | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
 

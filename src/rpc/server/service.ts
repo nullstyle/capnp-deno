@@ -18,20 +18,16 @@ import type {
   RpcExportCapabilityOptions,
   RpcServerRegistry,
 } from "./rpc_runtime.ts";
-import { SessionError } from "../../errors.ts";
+import { normalizeTcpPort } from "./service_net.ts";
+import type { RpcServerRuntimeCreateWithRootOptions } from "./runtime.ts";
 import {
-  RpcServerRuntime,
-  type RpcServerRuntimeCreateWithRootOptions,
-} from "./runtime.ts";
-import type { RpcTransport } from "../transports/transport.ts";
-import {
-  TcpRpcClientTransport,
-  type TcpRpcClientTransportOptions,
-} from "../transports/tcp_rpc_client.ts";
-import {
-  TcpServerListener,
-  type TcpTransport,
-  type TcpTransportOptions,
+  RpcWireClient,
+  type RpcWireClientOptions,
+} from "../rpc_wire_client.ts";
+import { TcpTransport } from "../transports/tcp.ts";
+import type {
+  TcpTransportListener,
+  TcpTransportOptions,
 } from "../transports/tcp.ts";
 import {
   WebSocketTransport,
@@ -42,9 +38,17 @@ import {
   type WebTransportTransportAcceptOptions,
   type WebTransportTransportConnectOptions,
 } from "../transports/webtransport.ts";
-
-const MIN_TCP_PORT = 1;
-const MAX_TCP_PORT = 65_535;
+import { createTcpServeHandle } from "./service_tcp.ts";
+import {
+  createWebSocketRequestHandler,
+  createWebSocketServeHandle,
+} from "./service_websocket.ts";
+import { createWebTransportServeHandle } from "./service_webtransport.ts";
+import type {
+  RpcServiceImplementation,
+  RpcStub,
+  TcpPort,
+} from "./service_types.ts";
 
 declare const RPC_SERVICE_TOKEN_TYPE: unique symbol;
 
@@ -116,85 +120,19 @@ export function createRpcServiceToken<
   });
 }
 
-/**
- * Small peer descriptor passed to per-connection server constructors.
- */
-export interface RpcPeerOptions {
-  role: "client" | "server";
-  transport: RpcTransport;
-  localAddress?: RpcPeerAddress | null;
-  remoteAddress?: RpcPeerAddress | null;
-  id?: string;
-}
-
-/**
- * Normalized address metadata for a connected peer.
- */
-export interface RpcPeerAddress {
-  transport?: string;
-  hostname?: string;
-  port?: number;
-  path?: string;
-}
-
-/**
- * Connection-scoped peer handle for high-level server constructors.
- */
-export class RpcPeer {
-  readonly role: RpcPeerOptions["role"];
-  readonly transport: RpcTransport;
-  readonly localAddress: RpcPeerAddress | null;
-  readonly remoteAddress: RpcPeerAddress | null;
-  readonly id: string;
-
-  constructor(options: RpcPeerOptions) {
-    this.role = options.role;
-    this.transport = options.transport;
-    this.localAddress = options.localAddress ?? null;
-    this.remoteAddress = options.remoteAddress ?? null;
-    this.id = options.id ??
-      `${options.role}:${formatPeerAddress(options.remoteAddress ?? null)}`;
-  }
-
-  async close(): Promise<void> {
-    await this.transport.close();
-  }
-
-  [Symbol.dispose](): void {
-    void this.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
-  }
-
-  toString(): string {
-    return `[RpcPeer ${this.id}]`;
-  }
-}
-
-/**
- * Common lifecycle contract mixed into returned client stubs.
- */
-export interface RpcStubLifecycle {
-  close(): Promise<void>;
-  [Symbol.dispose](): void;
-  [Symbol.asyncDispose](): Promise<void>;
-}
-
-/**
- * Typed RPC client stub + disposal lifecycle.
- */
-export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
-
-/**
- * TCP port input accepted by {@link TCP.connect} / {@link TCP.serve} and
- * {@link WS.serve}.
- */
-export type TcpPort = number | string;
+export {
+  RpcPeer,
+  type RpcPeerAddress,
+  type RpcPeerOptions,
+  type RpcServiceConstructor,
+  type RpcServiceImplementation,
+  type RpcStub,
+  type RpcStubLifecycle,
+  type TcpPort,
+} from "./service_types.ts";
 
 interface RpcConnectOptionsBase
-  extends Omit<TcpRpcClientTransportOptions, "interfaceId"> {
+  extends Omit<RpcWireClientOptions, "interfaceId"> {
   /**
    * Bootstrap call options forwarded to the generated bootstrap helper.
    */
@@ -206,7 +144,7 @@ interface RpcConnectOptionsBase
  */
 export interface TcpConnectOptions extends RpcConnectOptionsBase {
   /**
-   * Low-level TCP transport options forwarded to {@link TcpRpcClientTransport.connect}.
+   * Low-level TCP transport options forwarded to {@link TcpTransport.connect}.
    */
   transport?: TcpTransportOptions;
 }
@@ -244,22 +182,6 @@ export interface WebTransportConnectOptions extends RpcConnectOptionsBase {
    */
   transport?: WebTransportTransportConnectOptions;
 }
-
-/**
- * Constructable server implementation type.
- *
- * A new instance is created per accepted connection.
- */
-export type RpcServiceConstructor<TServer extends object> = new (
-  peer: RpcPeer,
-) => TServer;
-
-/**
- * Accepted server implementation input for {@link TCP.serve}.
- */
-export type RpcServiceImplementation<TServer extends object> =
-  | TServer
-  | RpcServiceConstructor<TServer>;
 
 /**
  * Options for {@link TCP.serve}.
@@ -388,7 +310,7 @@ export interface WebTransportServeOptions {
  * Handle returned by {@link TCP.serve}.
  */
 export interface TcpServeHandle {
-  readonly listener: TcpServerListener;
+  readonly listener: TcpTransportListener;
   readonly closed: boolean;
   close(): Promise<void>;
   [Symbol.dispose](): void;
@@ -428,732 +350,6 @@ export interface WebSocketRequestHandler {
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-interface ActiveRuntime {
-  runtime: RpcServerRuntime;
-  disposeInstance: (() => Promise<void>) | null;
-}
-
-class TcpServeHandleImpl<TServer extends object> implements TcpServeHandle {
-  readonly listener: TcpServerListener;
-
-  readonly #service: RpcServiceToken<object, TServer>;
-  readonly #implementation: RpcServiceImplementation<TServer>;
-  readonly #options: TcpServeOptions;
-  #closed = false;
-  #acceptLoop: Promise<void>;
-  readonly #active = new Set<ActiveRuntime>();
-
-  constructor(
-    service: RpcServiceToken<object, TServer>,
-    hostname: string,
-    port: number,
-    implementation: RpcServiceImplementation<TServer>,
-    options: TcpServeOptions,
-  ) {
-    this.#service = service;
-    this.#implementation = implementation;
-    this.#options = options;
-    this.listener = new TcpServerListener({
-      hostname,
-      port,
-      transportOptions: options.transport,
-    });
-    this.#acceptLoop = this.#runAcceptLoop();
-  }
-
-  get closed(): boolean {
-    return this.#closed;
-  }
-
-  [Symbol.dispose](): void {
-    void this.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.listener.close();
-
-    const closeJobs = [...this.#active].map((entry) =>
-      this.#closeActive(entry)
-    );
-    const closeResults = await Promise.allSettled(closeJobs);
-    this.#active.clear();
-
-    await this.#acceptLoop;
-
-    const failure = closeResults.find((result) => result.status === "rejected");
-    if (failure && failure.status === "rejected") {
-      throw new SessionError("tcp service close failed", {
-        cause: failure.reason,
-      });
-    }
-  }
-
-  async #runAcceptLoop(): Promise<void> {
-    try {
-      for await (const transport of this.listener.accept()) {
-        if (this.#closed) {
-          await transport.close().catch(() => {});
-          continue;
-        }
-        await this.#acceptTransport(transport);
-      }
-    } catch (error) {
-      if (this.#closed) return;
-      await this.#reportConnectionError(error);
-    }
-  }
-
-  async #acceptTransport(
-    transport: TcpTransport,
-  ): Promise<void> {
-    const previousOnClose = transport.options.onClose;
-    let activeEntry: ActiveRuntime | null = null;
-    let closedBeforeActive = false;
-    transport.options.onClose = () => {
-      if (previousOnClose) {
-        void Promise.resolve(previousOnClose()).catch((error) => {
-          void this.#reportConnectionError(error);
-        });
-      }
-      if (!activeEntry) {
-        closedBeforeActive = true;
-        return;
-      }
-      void this.#closeActive(activeEntry).catch((error) => {
-        void this.#reportConnectionError(error);
-      });
-    };
-
-    const peer = new RpcPeer({
-      role: "server",
-      transport,
-      localAddress: toRpcPeerAddress(transport.conn.localAddr),
-      remoteAddress: toRpcPeerAddress(transport.conn.remoteAddr),
-    });
-    const resolved = resolveImplementationForConnection(
-      this.#implementation,
-      peer,
-    );
-
-    try {
-      const runtime = await RpcServerRuntime.createWithRoot(
-        transport,
-        (registry, server, rootOptions) =>
-          this.#service.registerServer(registry, server, rootOptions),
-        resolved.server,
-        {
-          ...(this.#options.runtime ?? {}),
-          rootCapabilityIndex: this.#options.rootCapabilityIndex,
-          rootReferenceCount: this.#options.rootReferenceCount,
-        },
-      );
-      activeEntry = {
-        runtime,
-        disposeInstance: resolved.disposeInstance,
-      };
-      this.#active.add(activeEntry);
-      if (closedBeforeActive) {
-        void this.#closeActive(activeEntry).catch((error) => {
-          void this.#reportConnectionError(error);
-        });
-      }
-    } catch (error) {
-      await transport.close().catch(() => {});
-      await resolved.disposeInstance?.().catch(() => {});
-      await this.#reportConnectionError(error);
-    }
-  }
-
-  async #closeActive(entry: ActiveRuntime): Promise<void> {
-    if (!this.#active.has(entry)) return;
-    this.#active.delete(entry);
-    try {
-      await entry.runtime.close();
-    } finally {
-      await entry.disposeInstance?.();
-    }
-  }
-
-  async #reportConnectionError(error: unknown): Promise<void> {
-    const report = this.#options.onConnectionError;
-    if (!report) return;
-    try {
-      await report(error);
-    } catch {
-      // Errors in the error callback must not destabilize the accept loop.
-    }
-  }
-}
-
-class WebSocketRequestHandlerImpl<TServer extends object>
-  implements WebSocketRequestHandler {
-  readonly #service: RpcServiceToken<object, TServer>;
-  readonly #implementation: RpcServiceImplementation<TServer>;
-  readonly #options: WebSocketServeOptions;
-  #closed = false;
-  readonly #active = new Set<ActiveRuntime>();
-
-  constructor(
-    service: RpcServiceToken<object, TServer>,
-    implementation: RpcServiceImplementation<TServer>,
-    options: WebSocketServeOptions,
-  ) {
-    this.#service = service;
-    this.#implementation = implementation;
-    this.#options = options;
-  }
-
-  get closed(): boolean {
-    return this.#closed;
-  }
-
-  [Symbol.dispose](): void {
-    void this.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-
-    const closeJobs = [...this.#active].map((entry) =>
-      this.#closeActive(entry)
-    );
-    const closeResults = await Promise.allSettled(closeJobs);
-    this.#active.clear();
-
-    const failure = closeResults.find((result) => result.status === "rejected");
-    if (failure && failure.status === "rejected") {
-      throw new SessionError("websocket service close failed", {
-        cause: failure.reason,
-      });
-    }
-  }
-
-  async handle(request: Request): Promise<Response> {
-    if (this.#closed) {
-      return new Response("service is closed", { status: 503 });
-    }
-
-    if (!isWebSocketUpgradeRequest(request)) {
-      return new Response("websocket upgrade required", { status: 426 });
-    }
-
-    if (this.#options.path) {
-      const url = new URL(request.url);
-      if (url.pathname !== this.#options.path) {
-        return new Response("not found", { status: 404 });
-      }
-    }
-
-    const selectedProtocol = resolveWebSocketProtocol(
-      request,
-      this.#options.protocols,
-    );
-    if (selectedProtocol === null) {
-      return new Response("websocket protocol mismatch", { status: 426 });
-    }
-
-    let socket: WebSocket;
-    let response: Response;
-    try {
-      ({ socket, response } = selectedProtocol === undefined
-        ? Deno.upgradeWebSocket(request)
-        : Deno.upgradeWebSocket(request, { protocol: selectedProtocol }));
-    } catch (error) {
-      await this.#reportConnectionError(error);
-      return new Response("failed to upgrade websocket", { status: 400 });
-    }
-
-    void this.#acceptSocket(socket, request).catch((error) => {
-      void this.#reportConnectionError(error);
-    });
-    return response;
-  }
-
-  async #acceptSocket(socket: WebSocket, request: Request): Promise<void> {
-    if (this.#closed) {
-      try {
-        socket.close();
-      } catch {
-        // no-op
-      }
-      return;
-    }
-
-    const priorOnError = this.#options.transport?.onError;
-    let activeEntry: ActiveRuntime | null = null;
-    let closedBeforeActive = false;
-    const transport = new WebSocketTransport(socket, {
-      ...(this.#options.transport ?? {}),
-      onError: (error) => {
-        if (priorOnError) {
-          void Promise.resolve(priorOnError(error)).catch((callbackError) => {
-            void this.#reportConnectionError(callbackError);
-          });
-        }
-        if (!activeEntry) {
-          closedBeforeActive = true;
-          return;
-        }
-        void this.#closeActive(activeEntry).catch((closeError) => {
-          void this.#reportConnectionError(closeError);
-        });
-      },
-    });
-
-    const peer = new RpcPeer({
-      role: "server",
-      transport,
-      localAddress: toWebSocketLocalAddress(request),
-      remoteAddress: {
-        transport: "websocket",
-      },
-      id: request.headers.get("sec-websocket-key") ?? undefined,
-    });
-    const resolved = resolveImplementationForConnection(
-      this.#implementation,
-      peer,
-    );
-
-    try {
-      const runtime = await RpcServerRuntime.createWithRoot(
-        transport,
-        (registry, server, rootOptions) =>
-          this.#service.registerServer(registry, server, rootOptions),
-        resolved.server,
-        {
-          ...(this.#options.runtime ?? {}),
-          rootCapabilityIndex: this.#options.rootCapabilityIndex,
-          rootReferenceCount: this.#options.rootReferenceCount,
-        },
-      );
-      activeEntry = {
-        runtime,
-        disposeInstance: resolved.disposeInstance,
-      };
-      this.#active.add(activeEntry);
-      if (closedBeforeActive || this.#closed) {
-        void this.#closeActive(activeEntry).catch((error) => {
-          void this.#reportConnectionError(error);
-        });
-      }
-    } catch (error) {
-      await transport.close().catch(() => {});
-      await resolved.disposeInstance?.().catch(() => {});
-      await this.#reportConnectionError(error);
-    }
-  }
-
-  async #closeActive(entry: ActiveRuntime): Promise<void> {
-    if (!this.#active.has(entry)) return;
-    this.#active.delete(entry);
-    try {
-      await entry.runtime.close();
-    } finally {
-      await entry.disposeInstance?.();
-    }
-  }
-
-  async #reportConnectionError(error: unknown): Promise<void> {
-    const report = this.#options.onConnectionError;
-    if (!report) return;
-    try {
-      await report(error);
-    } catch {
-      // Errors in the error callback must not destabilize request handling.
-    }
-  }
-}
-
-class WebSocketServeHandleImpl<TServer extends object>
-  implements WebSocketServeHandle {
-  readonly #handler: WebSocketRequestHandlerImpl<TServer>;
-  readonly #server: Deno.HttpServer<Deno.NetAddr>;
-  #closed = false;
-
-  constructor(
-    service: RpcServiceToken<object, TServer>,
-    hostname: string,
-    port: number,
-    implementation: RpcServiceImplementation<TServer>,
-    options: WebSocketServeOptions,
-  ) {
-    this.#handler = new WebSocketRequestHandlerImpl(
-      service,
-      implementation,
-      options,
-    );
-    this.#server = requireDenoServe()({
-      hostname,
-      port,
-      onListen: () => {},
-    }, (request) => this.#handler.handle(request));
-  }
-
-  get addr(): Deno.Addr {
-    return this.#server.addr;
-  }
-
-  get closed(): boolean {
-    return this.#closed;
-  }
-
-  [Symbol.dispose](): void {
-    void this.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-
-    await this.#server.shutdown().catch(() => {});
-
-    let closeError: unknown;
-    try {
-      await this.#handler.close();
-    } catch (error) {
-      closeError = error;
-    }
-
-    await this.#server.finished.catch(() => {});
-
-    if (closeError !== undefined) {
-      throw closeError;
-    }
-  }
-}
-
-class WebTransportServeHandleImpl<TServer extends object>
-  implements WebTransportServeHandle {
-  readonly #service: RpcServiceToken<object, TServer>;
-  readonly #implementation: RpcServiceImplementation<TServer>;
-  readonly #options: WebTransportServeOptions;
-  readonly #endpoint: Deno.QuicEndpoint;
-  readonly #listener: Deno.QuicListener;
-  readonly #active = new Set<ActiveRuntime>();
-  readonly #accepting = new Set<Promise<void>>();
-  readonly #acceptLoop: Promise<void>;
-  #closed = false;
-
-  constructor(
-    service: RpcServiceToken<object, TServer>,
-    hostname: string,
-    port: number,
-    implementation: RpcServiceImplementation<TServer>,
-    options: WebTransportServeOptions,
-  ) {
-    this.#service = service;
-    this.#implementation = implementation;
-    this.#options = options;
-    const QuicEndpoint = requireDenoQuicEndpoint();
-    this.#endpoint = new QuicEndpoint({ hostname, port });
-    this.#listener = this.#endpoint.listen({
-      ...(options.quic ?? {}),
-      alpnProtocols: ["h3"],
-      cert: options.cert,
-      key: options.key,
-    });
-    this.#acceptLoop = this.#runAcceptLoop();
-  }
-
-  get addr(): Deno.NetAddr {
-    return this.#endpoint.addr;
-  }
-
-  get closed(): boolean {
-    return this.#closed;
-  }
-
-  [Symbol.dispose](): void {
-    void this.close();
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    return this.close();
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-
-    try {
-      this.#listener.stop();
-    } catch {
-      // no-op
-    }
-
-    const closeJobs = [...this.#active].map((entry) =>
-      this.#closeActive(entry)
-    );
-    const closeResults = await Promise.allSettled(closeJobs);
-
-    try {
-      this.#endpoint.close();
-    } catch {
-      // no-op
-    }
-
-    await this.#acceptLoop;
-    const acceptResults = await Promise.allSettled([...this.#accepting]);
-
-    const remainingCloseJobs = [...this.#active].map((entry) =>
-      this.#closeActive(entry)
-    );
-    const remainingCloseResults = await Promise.allSettled(remainingCloseJobs);
-    this.#active.clear();
-
-    const failure = [
-      ...closeResults,
-      ...acceptResults,
-      ...remainingCloseResults,
-    ]
-      .find((result) => result.status === "rejected");
-    if (failure && failure.status === "rejected") {
-      throw new SessionError("webtransport service close failed", {
-        cause: failure.reason,
-      });
-    }
-  }
-
-  async #runAcceptLoop(): Promise<void> {
-    while (!this.#closed) {
-      let incoming: Deno.QuicIncoming;
-      try {
-        incoming = await this.#listener.incoming();
-      } catch (error) {
-        if (this.#closed) return;
-        await this.#reportConnectionError(error);
-        continue;
-      }
-      this.#trackAcceptIncoming(incoming);
-    }
-  }
-
-  #trackAcceptIncoming(incoming: Deno.QuicIncoming): void {
-    let acceptJob: Promise<void>;
-    acceptJob = this.#acceptIncoming(incoming)
-      .catch(async (error) => {
-        if (this.#closed) return;
-        await this.#reportConnectionError(error);
-      })
-      .finally(() => {
-        this.#accepting.delete(acceptJob);
-      });
-    this.#accepting.add(acceptJob);
-  }
-
-  async #acceptIncoming(incoming: Deno.QuicIncoming): Promise<void> {
-    let conn: Deno.QuicConn;
-    try {
-      conn = await incoming.accept(this.#options.accept);
-    } catch (error) {
-      if (this.#closed) return;
-      await this.#reportConnectionError(error);
-      return;
-    }
-
-    const upgradeWebTransport = requireDenoUpgradeWebTransport();
-    let session: WebTransport & { url: string };
-    try {
-      session = await upgradeWebTransport(conn);
-    } catch (error) {
-      try {
-        conn.close();
-      } catch {
-        // no-op
-      }
-      await this.#reportConnectionError(error);
-      return;
-    }
-
-    if (this.#closed) {
-      try {
-        session.close();
-      } catch {
-        // no-op
-      }
-      return;
-    }
-
-    const url = new URL(session.url);
-    if (this.#options.path && url.pathname !== this.#options.path) {
-      try {
-        session.close({ reason: "webtransport path mismatch" });
-      } catch {
-        try {
-          session.close();
-        } catch {
-          // no-op
-        }
-      }
-      return;
-    }
-
-    const priorOnClose = this.#options.transport?.onClose;
-    const priorOnError = this.#options.transport?.onError;
-    let activeEntry: ActiveRuntime | null = null;
-    let closedBeforeActive = false;
-    let transport: WebTransportTransport;
-    try {
-      transport = await WebTransportTransport.accept(session, {
-        ...(this.#options.transport ?? {}),
-        onClose: () => {
-          if (priorOnClose) {
-            void Promise.resolve(priorOnClose()).catch((error) => {
-              void this.#reportConnectionError(error);
-            });
-          }
-          if (!activeEntry) {
-            closedBeforeActive = true;
-            return;
-          }
-          void this.#closeActive(activeEntry).catch((error) => {
-            void this.#reportConnectionError(error);
-          });
-        },
-        onError: (error) => {
-          if (priorOnError) {
-            void Promise.resolve(priorOnError(error)).catch((callbackError) => {
-              void this.#reportConnectionError(callbackError);
-            });
-          }
-          if (!activeEntry) {
-            closedBeforeActive = true;
-            return;
-          }
-          void this.#closeActive(activeEntry).catch((closeError) => {
-            void this.#reportConnectionError(closeError);
-          });
-        },
-      });
-    } catch (error) {
-      try {
-        session.close();
-      } catch {
-        // no-op
-      }
-      await this.#reportConnectionError(error);
-      return;
-    }
-
-    const peer = new RpcPeer({
-      role: "server",
-      transport,
-      localAddress: toWebTransportLocalAddress(url),
-      remoteAddress: toWebTransportRemoteAddress(conn.remoteAddr),
-      id: `${conn.remoteAddr.hostname}:${conn.remoteAddr.port}`,
-    });
-    const resolved = resolveImplementationForConnection(
-      this.#implementation,
-      peer,
-    );
-
-    try {
-      const runtime = await RpcServerRuntime.createWithRoot(
-        transport,
-        (registry, server, rootOptions) =>
-          this.#service.registerServer(registry, server, rootOptions),
-        resolved.server,
-        {
-          ...(this.#options.runtime ?? {}),
-          rootCapabilityIndex: this.#options.rootCapabilityIndex,
-          rootReferenceCount: this.#options.rootReferenceCount,
-        },
-      );
-      activeEntry = {
-        runtime,
-        disposeInstance: resolved.disposeInstance,
-      };
-      this.#active.add(activeEntry);
-      if (closedBeforeActive || this.#closed) {
-        try {
-          await this.#closeActive(activeEntry);
-        } catch (error) {
-          await this.#reportConnectionError(error);
-        }
-      }
-    } catch (error) {
-      await transport.close().catch(() => {});
-      await resolved.disposeInstance?.().catch(() => {});
-      await this.#reportConnectionError(error);
-    }
-  }
-
-  async #closeActive(entry: ActiveRuntime): Promise<void> {
-    if (!this.#active.has(entry)) return;
-    this.#active.delete(entry);
-    try {
-      await entry.runtime.close();
-    } finally {
-      await entry.disposeInstance?.();
-    }
-  }
-
-  async #reportConnectionError(error: unknown): Promise<void> {
-    const report = this.#options.onConnectionError;
-    if (!report) return;
-    try {
-      await report(error);
-    } catch {
-      // Errors in the error callback must not destabilize the accept loop.
-    }
-  }
-}
-
-function resolveImplementationForConnection<TServer extends object>(
-  implementation: RpcServiceImplementation<TServer>,
-  peer: RpcPeer,
-): { server: TServer; disposeInstance: (() => Promise<void>) | null } {
-  if (typeof implementation === "function") {
-    const Ctor = implementation as RpcServiceConstructor<TServer>;
-    const server = new Ctor(peer);
-    return { server, disposeInstance: toDisposer(server) };
-  }
-  return { server: implementation, disposeInstance: null };
-}
-
-function toDisposer(instance: unknown): (() => Promise<void>) | null {
-  if (instance && typeof instance === "object") {
-    if (Symbol.asyncDispose in instance) {
-      const asyncDispose = (instance as AsyncDisposable)[Symbol.asyncDispose];
-      if (typeof asyncDispose === "function") {
-        return async () => {
-          await asyncDispose.call(instance as AsyncDisposable);
-        };
-      }
-    }
-    if (Symbol.dispose in instance) {
-      const dispose = (instance as Disposable)[Symbol.dispose];
-      if (typeof dispose === "function") {
-        return () =>
-          new Promise<void>((resolve, reject) => {
-            try {
-              dispose.call(instance as Disposable);
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          });
-      }
-    }
-  }
-  return null;
-}
-
 function withStubLifecycle<TClient extends object>(
   client: TClient,
   close: () => Promise<void>,
@@ -1170,156 +366,6 @@ function withStubLifecycle<TClient extends object>(
       return Reflect.get(target, prop, receiver);
     },
   }) as RpcStub<TClient>;
-}
-
-function formatPeerAddress(address: RpcPeerAddress | null): string {
-  if (!address) return "unknown";
-  if (address.hostname && address.port !== undefined) {
-    return `${address.hostname}:${address.port}`;
-  }
-  if (address.path) return address.path;
-  return "unknown";
-}
-
-function toRpcPeerAddress(input: unknown): RpcPeerAddress | null {
-  if (!input || typeof input !== "object") return null;
-  const candidate = input as Record<string, unknown>;
-  const address: RpcPeerAddress = {};
-
-  if (typeof candidate.transport === "string") {
-    address.transport = candidate.transport;
-  }
-  if (typeof candidate.hostname === "string") {
-    address.hostname = candidate.hostname;
-  }
-  if (typeof candidate.port === "number" && Number.isFinite(candidate.port)) {
-    address.port = candidate.port;
-  }
-  if (typeof candidate.path === "string") {
-    address.path = candidate.path;
-  }
-
-  if (
-    address.transport === undefined &&
-    address.hostname === undefined &&
-    address.port === undefined &&
-    address.path === undefined
-  ) {
-    return null;
-  }
-  return address;
-}
-
-function toWebSocketLocalAddress(request: Request): RpcPeerAddress {
-  const url = new URL(request.url);
-  const parsedPort = url.port.length > 0 ? Number(url.port) : undefined;
-  return {
-    transport: "websocket",
-    hostname: url.hostname,
-    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
-    path: url.pathname,
-  };
-}
-
-function toWebTransportLocalAddress(url: URL): RpcPeerAddress {
-  const parsedPort = url.port.length > 0 ? Number(url.port) : undefined;
-  return {
-    transport: "webtransport",
-    hostname: url.hostname,
-    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
-    path: url.pathname,
-  };
-}
-
-function toWebTransportRemoteAddress(input: unknown): RpcPeerAddress {
-  return {
-    ...(toRpcPeerAddress(input) ?? {}),
-    transport: "webtransport",
-  };
-}
-
-function requireDenoServe(): typeof Deno.serve {
-  const maybeServe = (Deno as unknown as { serve?: typeof Deno.serve }).serve;
-  if (typeof maybeServe !== "function") {
-    throw new SessionError(
-      "Deno.serve is unavailable; run with a runtime that supports HTTP/WebSocket serve",
-    );
-  }
-  return maybeServe;
-}
-
-function requireDenoQuicEndpoint(): typeof Deno.QuicEndpoint {
-  const maybeQuicEndpoint = (Deno as unknown as {
-    QuicEndpoint?: typeof Deno.QuicEndpoint;
-  }).QuicEndpoint;
-  if (typeof maybeQuicEndpoint !== "function") {
-    throw new SessionError(
-      "Deno.QuicEndpoint is unavailable; run Deno with --unstable-net to serve WebTransport",
-    );
-  }
-  return maybeQuicEndpoint;
-}
-
-function requireDenoUpgradeWebTransport(): typeof Deno.upgradeWebTransport {
-  const maybeUpgrade = (Deno as unknown as {
-    upgradeWebTransport?: typeof Deno.upgradeWebTransport;
-  }).upgradeWebTransport;
-  if (typeof maybeUpgrade !== "function") {
-    throw new SessionError(
-      "Deno.upgradeWebTransport is unavailable; run Deno with --unstable-net to serve WebTransport",
-    );
-  }
-  return maybeUpgrade;
-}
-
-function isWebSocketUpgradeRequest(request: Request): boolean {
-  const upgrade = request.headers.get("upgrade");
-  return typeof upgrade === "string" && upgrade.toLowerCase() === "websocket";
-}
-
-function parseRequestedWebSocketProtocols(request: Request): string[] {
-  const raw = request.headers.get("sec-websocket-protocol");
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
-}
-
-function resolveWebSocketProtocol(
-  request: Request,
-  supported: string | readonly string[] | undefined,
-): string | null | undefined {
-  if (supported === undefined) return undefined;
-  const supportedList = typeof supported === "string" ? [supported] : [
-    ...supported,
-  ];
-  if (supportedList.length === 0) return undefined;
-
-  const requested = parseRequestedWebSocketProtocols(request);
-  if (requested.length === 0) return null;
-  for (const candidate of requested) {
-    if (supportedList.includes(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function normalizeTcpPort(port: TcpPort): number {
-  const resolved = Number(port);
-  if (
-    !Number.isInteger(resolved) ||
-    resolved < MIN_TCP_PORT ||
-    resolved > MAX_TCP_PORT
-  ) {
-    throw new SessionError(
-      `port must be an integer in [${MIN_TCP_PORT}, ${MAX_TCP_PORT}], got ${
-        String(port)
-      }`,
-    );
-  }
-  return resolved;
 }
 
 /**
@@ -1391,7 +437,7 @@ async function bootstrapConnectedClient<
   TServer extends object,
 >(
   service: RpcServiceToken<TClient, TServer>,
-  transport: TcpRpcClientTransport,
+  transport: RpcWireClient,
   bootstrap: RpcCallOptions | undefined,
 ): Promise<RpcStub<TClient>> {
   let closed = false;
@@ -1424,14 +470,8 @@ async function tcpConnect<
 ): Promise<RpcStub<TClient>> {
   const { bootstrap, transport, ...clientOptions } = options;
   const resolvedPort = normalizeTcpPort(port);
-  const clientTransport = await TcpRpcClientTransport.connect(
-    hostname,
-    resolvedPort,
-    {
-      ...clientOptions,
-      transport,
-    },
-  );
+  const tcp = await TcpTransport.connect(hostname, resolvedPort, transport);
+  const clientTransport = new RpcWireClient(tcp, clientOptions);
   return bootstrapConnectedClient(service, clientTransport, bootstrap);
 }
 
@@ -1448,7 +488,7 @@ async function wsConnect<
 ): Promise<RpcStub<TClient>> {
   const { bootstrap, protocols, transport, ...clientOptions } = options;
   const ws = await WebSocketTransport.connect(url, protocols, transport);
-  const clientTransport = new TcpRpcClientTransport(ws, clientOptions);
+  const clientTransport = new RpcWireClient(ws, clientOptions);
   return bootstrapConnectedClient(service, clientTransport, bootstrap);
 }
 
@@ -1465,7 +505,7 @@ async function wtConnect<
 ): Promise<RpcStub<TClient>> {
   const { bootstrap, transport, ...clientOptions } = options;
   const wt = await WebTransportTransport.connect(url, transport);
-  const clientTransport = new TcpRpcClientTransport(wt, clientOptions);
+  const clientTransport = new RpcWireClient(wt, clientOptions);
   return bootstrapConnectedClient(service, clientTransport, bootstrap);
 }
 
@@ -1480,7 +520,7 @@ function tcpServe<TServer extends object, TClient extends object = TServer>(
   options: TcpServeOptions = {},
 ): TcpServeHandle {
   const resolvedPort = normalizeTcpPort(port);
-  return new TcpServeHandleImpl(
+  return createTcpServeHandle(
     service as RpcServiceToken<object, TServer>,
     hostname,
     resolvedPort,
@@ -1500,7 +540,7 @@ function wsServe<TServer extends object, TClient extends object = TServer>(
   options: WebSocketServeOptions = {},
 ): WebSocketServeHandle {
   const resolvedPort = normalizeTcpPort(port);
-  return new WebSocketServeHandleImpl(
+  return createWebSocketServeHandle(
     service as RpcServiceToken<object, TServer>,
     hostname,
     resolvedPort,
@@ -1517,7 +557,7 @@ function wsHandler<TServer extends object, TClient extends object = TServer>(
   implementation: RpcServiceImplementation<TServer>,
   options: WebSocketServeOptions = {},
 ): WebSocketRequestHandler {
-  return new WebSocketRequestHandlerImpl(
+  return createWebSocketRequestHandler(
     service as RpcServiceToken<object, TServer>,
     implementation,
     options,
@@ -1535,7 +575,7 @@ function wtServe<TServer extends object, TClient extends object = TServer>(
   options: WebTransportServeOptions,
 ): WebTransportServeHandle {
   const resolvedPort = normalizeTcpPort(port);
-  return new WebTransportServeHandleImpl(
+  return createWebTransportServeHandle(
     service as RpcServiceToken<object, TServer>,
     hostname,
     resolvedPort,

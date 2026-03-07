@@ -135,29 +135,31 @@ async function withPatchedWebTransportServePrimitives(
       Promise.resolve(fakeSession)) as typeof Deno.upgradeWebTransport;
   (WebTransportTransport as unknown as {
     accept: typeof WebTransportTransport.accept;
-  }).accept = async () =>
-    ({
-      start(): void {
-        // no-op
-      },
-      send(): Promise<void> {
-        return Promise.resolve();
-      },
-      close(): Promise<void> {
-        events.push("transport.close");
-        return Promise.resolve();
-      },
-    }) as unknown as WebTransportTransport;
+  }).accept = () =>
+    Promise.resolve(
+      ({
+        start(): void {
+          // no-op
+        },
+        send(): Promise<void> {
+          return Promise.resolve();
+        },
+        close(): Promise<void> {
+          events.push("transport.close");
+          return Promise.resolve();
+        },
+      }) as unknown as WebTransportTransport,
+    );
   (RpcServerRuntime as unknown as {
     createWithRoot: typeof RpcServerRuntime.createWithRoot;
-  }).createWithRoot = async (transport) => {
+  }).createWithRoot = (transport) => {
     runtimeCreated.resolve();
-    return {
+    return Promise.resolve({
       close: async (): Promise<void> => {
         events.push("runtime.close");
         await transport.close();
       },
-    } as RpcServerRuntime;
+    } as RpcServerRuntime);
   };
 
   try {

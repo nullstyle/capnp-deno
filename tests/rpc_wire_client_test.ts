@@ -10,15 +10,15 @@ import {
   encodeReturnResultsFrame,
   ProtocolError,
   type RpcTransport,
+  RpcWireClient,
   SessionError,
-  TcpRpcClientTransport,
-} from "../../src/advanced.ts";
+} from "../src/advanced.ts";
 import {
   assert,
   assertBytes,
   assertEquals,
   withTimeout,
-} from "../test_utils.ts";
+} from "./test_utils.ts";
 
 class MockTransport implements RpcTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
@@ -62,9 +62,9 @@ async function waitForSentFrames(
   );
 }
 
-Deno.test("TcpRpcClientTransport bootstrap auto-finishes with releaseResultCaps=false", async () => {
+Deno.test("RpcWireClient bootstrap auto-finishes with releaseResultCaps=false", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport);
+  const client = new RpcWireClient(transport);
 
   const bootstrapPromise = client.bootstrap();
   await waitForSentFrames(transport, 1);
@@ -86,9 +86,9 @@ Deno.test("TcpRpcClientTransport bootstrap auto-finishes with releaseResultCaps=
   await client.close();
 });
 
-Deno.test("TcpRpcClientTransport callRaw uses default interfaceId and params cap table", async () => {
+Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport, {
+  const client = new RpcWireClient(transport, {
     interfaceId: 0x1234n,
   });
 
@@ -135,9 +135,9 @@ Deno.test("TcpRpcClientTransport callRaw uses default interfaceId and params cap
   await client.close();
 });
 
-Deno.test("TcpRpcClientTransport callRaw requires interfaceId when no default exists", async () => {
+Deno.test("RpcWireClient callRaw requires interfaceId when no default exists", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport);
+  const client = new RpcWireClient(transport);
 
   let thrown: unknown;
   try {
@@ -150,14 +150,14 @@ Deno.test("TcpRpcClientTransport callRaw requires interfaceId when no default ex
 
   assert(
     thrown instanceof ProtocolError &&
-      /interfaceId is required/i.test(thrown.message),
+      /interfaceId is required for rpc wire client calls/i.test(thrown.message),
     `expected interfaceId-required ProtocolError, got: ${String(thrown)}`,
   );
 });
 
-Deno.test("TcpRpcClientTransport close rejects pending waits", async () => {
+Deno.test("RpcWireClient close rejects pending waits", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport, {
+  const client = new RpcWireClient(transport, {
     interfaceId: 0x55n,
   });
 
@@ -180,14 +180,14 @@ Deno.test("TcpRpcClientTransport close rejects pending waits", async () => {
 
   assert(
     thrown instanceof SessionError &&
-      /tcp rpc client transport is closed/i.test(thrown.message),
+      /rpc wire client is closed/i.test(thrown.message),
     `expected close rejection SessionError, got: ${String(thrown)}`,
   );
 });
 
-Deno.test("TcpRpcClientTransport can export a local capability and serve inbound callback calls", async () => {
+Deno.test("RpcWireClient can export a local capability and serve inbound callback calls", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport);
+  const client = new RpcWireClient(transport);
 
   const exported = client.exportCapability({
     interfaceId: 0x9000n,
@@ -234,9 +234,9 @@ Deno.test("TcpRpcClientTransport can export a local capability and serve inbound
   assertEquals(releasedResponse.kind, "exception");
 });
 
-Deno.test("TcpRpcClientTransport callRaw send failures do not leak waiter rejections", async () => {
+Deno.test("RpcWireClient callRaw send failures do not leak waiter rejections", async () => {
   const transport = new MockTransport();
-  const client = new TcpRpcClientTransport(transport, {
+  const client = new RpcWireClient(transport, {
     interfaceId: 0x55n,
   });
 

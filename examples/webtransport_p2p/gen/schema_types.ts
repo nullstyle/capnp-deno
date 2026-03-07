@@ -61,21 +61,30 @@ import {
 
 const RPC_STUB_CAPABILITY = Symbol.for("@nullstyle/capnp/rpcStubCapability");
 
-interface RpcClientTransportWithCapabilityExport
-  extends RpcClientTransport {
-  exportCapability?(dispatch: RpcServerDispatch, options?: RpcExportCapabilityOptions): CapabilityPointer;
+interface RpcClientTransportWithCapabilityExport extends RpcClientTransport {
+  exportCapability?(
+    dispatch: RpcServerDispatch,
+    options?: RpcExportCapabilityOptions,
+  ): CapabilityPointer;
 }
 
 function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
   if (!value || typeof value !== "object") return null;
   const direct = value as { capabilityIndex?: unknown };
-  if (typeof direct.capabilityIndex === "number" && Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0) {
+  if (
+    typeof direct.capabilityIndex === "number" &&
+    Number.isInteger(direct.capabilityIndex) && direct.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: direct.capabilityIndex };
   }
   const tagged = (value as Record<PropertyKey, unknown>)[RPC_STUB_CAPABILITY];
   if (!tagged || typeof tagged !== "object") return null;
   const taggedPointer = tagged as { capabilityIndex?: unknown };
-  if (typeof taggedPointer.capabilityIndex === "number" && Number.isInteger(taggedPointer.capabilityIndex) && taggedPointer.capabilityIndex >= 0) {
+  if (
+    typeof taggedPointer.capabilityIndex === "number" &&
+    Number.isInteger(taggedPointer.capabilityIndex) &&
+    taggedPointer.capabilityIndex >= 0
+  ) {
     return { capabilityIndex: taggedPointer.capabilityIndex };
   }
   return null;
@@ -116,20 +125,32 @@ function withCapabilityStubLifecycle<TClient extends object>(
 function capabilityToServiceStub<TClient extends object>(
   value: unknown,
   transport: RpcClientTransport,
-  createClient: (transport: RpcClientTransport, capability: CapabilityPointer) => TClient,
+  createClient: (
+    transport: RpcClientTransport,
+    capability: CapabilityPointer,
+  ) => TClient,
 ): RpcStub<TClient> {
   const capability = requireRpcStubCapability(value);
-  return withCapabilityStubLifecycle(createClient(transport, capability), capability, transport);
+  return withCapabilityStubLifecycle(
+    createClient(transport, capability),
+    capability,
+    transport,
+  );
 }
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error("rpc outbound client is unavailable for capability callbacks");
+    throw new Error(
+      "rpc outbound client is unavailable for capability callbacks",
+    );
   }
   return ctx.outboundClient;
 }
 
-function exportCapabilityFromTransport<TClient extends object, TServer extends object>(
+function exportCapabilityFromTransport<
+  TClient extends object,
+  TServer extends object,
+>(
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -151,7 +172,10 @@ function exportCapabilityFromTransport<TClient extends object, TServer extends o
   );
 }
 
-function exportCapabilityFromContext<TClient extends object, TServer extends object>(
+function exportCapabilityFromContext<
+  TClient extends object,
+  TServer extends object,
+>(
   ctx: RpcCallContext,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
@@ -159,7 +183,9 @@ function exportCapabilityFromContext<TClient extends object, TServer extends obj
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error("rpc call context does not support exporting local capabilities");
+    throw new Error(
+      "rpc call context does not support exporting local capabilities",
+    );
   }
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
@@ -254,10 +280,8 @@ export const SystemResultsStruct: StructDescriptor<SystemResults> = {
   name: "SystemResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const SystemResultsCodec: StructCodec<SystemResults> = {
   encode: (value: SystemResults): Uint8Array =>
@@ -295,10 +319,8 @@ export const AdvertiseResultsStruct: StructDescriptor<AdvertiseResults> = {
   name: "AdvertiseResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const AdvertiseResultsCodec: StructCodec<AdvertiseResults> = {
   encode: (value: AdvertiseResults): Uint8Array =>
@@ -351,7 +373,10 @@ export const ConnectResultsStruct: StructDescriptor<ConnectResults> = {
       kind: "slot",
       name: "peers",
       offset: 1,
-      type: { kind: "list", element: { kind: "struct", get: () => PeerSummaryStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => PeerSummaryStruct },
+      },
     },
   ],
 };
@@ -391,10 +416,8 @@ export const DisconnectResultsStruct: StructDescriptor<DisconnectResults> = {
   name: "DisconnectResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const DisconnectResultsCodec: StructCodec<DisconnectResults> = {
   encode: (value: DisconnectResults): Uint8Array =>
@@ -408,10 +431,8 @@ export const ListPeersParamsStruct: StructDescriptor<ListPeersParams> = {
   name: "ListPeersParams",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const ListPeersParamsCodec: StructCodec<ListPeersParams> = {
   encode: (value: ListPeersParams): Uint8Array =>
@@ -433,7 +454,10 @@ export const ListPeersResultsStruct: StructDescriptor<ListPeersResults> = {
       kind: "slot",
       name: "peers",
       offset: 0,
-      type: { kind: "list", element: { kind: "struct", get: () => PeerSummaryStruct } },
+      type: {
+        kind: "list",
+        element: { kind: "struct", get: () => PeerSummaryStruct },
+      },
     },
   ],
 };
@@ -473,10 +497,8 @@ export const RenameResultsStruct: StructDescriptor<RenameResults> = {
   name: "RenameResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const RenameResultsCodec: StructCodec<RenameResults> = {
   encode: (value: RenameResults): Uint8Array =>
@@ -514,10 +536,8 @@ export const SayResultsStruct: StructDescriptor<SayResults> = {
   name: "SayResults",
   dataWordCount: 0,
   pointerCount: 0,
-  createDefault: () => ({
-  }),
-  fields: [
-  ],
+  createDefault: () => ({}),
+  fields: [],
 };
 export const SayResultsCodec: StructCodec<SayResults> = {
   encode: (value: SayResults): Uint8Array =>
@@ -571,42 +591,85 @@ export const PeerEventsMethodOrdinals = {
 } as const;
 
 export interface PeerEventsClient {
-  system(params: SystemParams, options?: RpcCallOptions): Promise<SystemResults>;
+  system(
+    params: SystemParams,
+    options?: RpcCallOptions,
+  ): Promise<SystemResults>;
 }
 
 export interface PeerEventsServer {
-  system(params: SystemParams, ctx: RpcCallContext): Promise<SystemResults> | SystemResults;
+  system(
+    params: SystemParams,
+    ctx: RpcCallContext,
+  ): Promise<SystemResults> | SystemResults;
 }
 
-export function createPeerEventsClient(transport: RpcClientTransport, capability: CapabilityPointer): PeerEventsClient {
+export function createPeerEventsClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): PeerEventsClient {
   return {
-    system: async (params: SystemParams, options?: RpcCallOptions): Promise<SystemResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(SystemParamsStruct, params);
+    system: async (
+      params: SystemParams,
+      options?: RpcCallOptions,
+    ): Promise<SystemResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        SystemParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xf25d0d52ad30289bn,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerEventsMethodOrdinals["system"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerEventsMethodOrdinals["system"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(SystemResultsStruct, raw.contentBytes, raw.capTable) as SystemResults;
+          return decodeStructMessageWithCaps(
+            SystemResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as SystemResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerEventsMethodOrdinals["system"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerEventsMethodOrdinals["system"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(SystemResultsStruct, response, []) as SystemResults;
+        return decodeStructMessageWithCaps(
+          SystemResultsStruct,
+          response,
+          [],
+        ) as SystemResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
@@ -622,15 +685,28 @@ export async function bootstrapPeerEventsClient(
   return createPeerEventsClient(transport, capability);
 }
 
-export function createPeerEventsServer(server: PeerEventsServer): RpcServerDispatch {
+export function createPeerEventsServer(
+  server: PeerEventsServer,
+): RpcServerDispatch {
   return {
     interfaceId: PeerEventsInterfaceId,
-    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(SystemParamsStruct, params, ctx.paramsCapTable ?? []) as SystemParams;
+          const decoded = decodeStructMessageWithCaps(
+            SystemParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as SystemParams;
           const result = await server["system"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(SystemResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            SystemResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -663,207 +739,444 @@ export const PeerNodeMethodOrdinals = {
 } as const;
 
 export interface PeerNodeClient {
-  connect(params: ConnectParams, options?: RpcCallOptions): Promise<ConnectResults>;
+  connect(
+    params: ConnectParams,
+    options?: RpcCallOptions,
+  ): Promise<ConnectResults>;
   say(params: SayParams, options?: RpcCallOptions): Promise<SayResults>;
-  rename(params: RenameParams, options?: RpcCallOptions): Promise<RenameResults>;
-  listPeers(params: ListPeersParams, options?: RpcCallOptions): Promise<ListPeersResults>;
-  disconnect(params: DisconnectParams, options?: RpcCallOptions): Promise<DisconnectResults>;
-  advertise(params: AdvertiseParams, options?: RpcCallOptions): Promise<AdvertiseResults>;
+  rename(
+    params: RenameParams,
+    options?: RpcCallOptions,
+  ): Promise<RenameResults>;
+  listPeers(
+    params: ListPeersParams,
+    options?: RpcCallOptions,
+  ): Promise<ListPeersResults>;
+  disconnect(
+    params: DisconnectParams,
+    options?: RpcCallOptions,
+  ): Promise<DisconnectResults>;
+  advertise(
+    params: AdvertiseParams,
+    options?: RpcCallOptions,
+  ): Promise<AdvertiseResults>;
 }
 
 export interface PeerNodeServer {
-  connect(params: ConnectParams, ctx: RpcCallContext): Promise<ConnectResults> | ConnectResults;
+  connect(
+    params: ConnectParams,
+    ctx: RpcCallContext,
+  ): Promise<ConnectResults> | ConnectResults;
   say(params: SayParams, ctx: RpcCallContext): Promise<SayResults> | SayResults;
-  rename(params: RenameParams, ctx: RpcCallContext): Promise<RenameResults> | RenameResults;
-  listPeers(params: ListPeersParams, ctx: RpcCallContext): Promise<ListPeersResults> | ListPeersResults;
-  disconnect(params: DisconnectParams, ctx: RpcCallContext): Promise<DisconnectResults> | DisconnectResults;
-  advertise(params: AdvertiseParams, ctx: RpcCallContext): Promise<AdvertiseResults> | AdvertiseResults;
+  rename(
+    params: RenameParams,
+    ctx: RpcCallContext,
+  ): Promise<RenameResults> | RenameResults;
+  listPeers(
+    params: ListPeersParams,
+    ctx: RpcCallContext,
+  ): Promise<ListPeersResults> | ListPeersResults;
+  disconnect(
+    params: DisconnectParams,
+    ctx: RpcCallContext,
+  ): Promise<DisconnectResults> | DisconnectResults;
+  advertise(
+    params: AdvertiseParams,
+    ctx: RpcCallContext,
+  ): Promise<AdvertiseResults> | AdvertiseResults;
 }
 
-export function createPeerNodeClient(transport: RpcClientTransport, capability: CapabilityPointer): PeerNodeClient {
+export function createPeerNodeClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): PeerNodeClient {
   return {
-    connect: async (params: ConnectParams, options?: RpcCallOptions): Promise<ConnectResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(ConnectParamsStruct, params);
+    connect: async (
+      params: ConnectParams,
+      options?: RpcCallOptions,
+    ): Promise<ConnectResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        ConnectParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["connect"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["connect"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(ConnectResultsStruct, raw.contentBytes, raw.capTable) as ConnectResults;
+          return decodeStructMessageWithCaps(
+            ConnectResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as ConnectResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["connect"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["connect"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(ConnectResultsStruct, response, []) as ConnectResults;
+        return decodeStructMessageWithCaps(
+          ConnectResultsStruct,
+          response,
+          [],
+        ) as ConnectResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    say: async (params: SayParams, options?: RpcCallOptions): Promise<SayResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(SayParamsStruct, params);
+    say: async (
+      params: SayParams,
+      options?: RpcCallOptions,
+    ): Promise<SayResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        SayParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["say"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["say"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(SayResultsStruct, raw.contentBytes, raw.capTable) as SayResults;
+          return decodeStructMessageWithCaps(
+            SayResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as SayResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["say"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["say"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(SayResultsStruct, response, []) as SayResults;
+        return decodeStructMessageWithCaps(
+          SayResultsStruct,
+          response,
+          [],
+        ) as SayResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    rename: async (params: RenameParams, options?: RpcCallOptions): Promise<RenameResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(RenameParamsStruct, params);
+    rename: async (
+      params: RenameParams,
+      options?: RpcCallOptions,
+    ): Promise<RenameResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        RenameParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["rename"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["rename"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(RenameResultsStruct, raw.contentBytes, raw.capTable) as RenameResults;
+          return decodeStructMessageWithCaps(
+            RenameResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as RenameResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["rename"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["rename"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(RenameResultsStruct, response, []) as RenameResults;
+        return decodeStructMessageWithCaps(
+          RenameResultsStruct,
+          response,
+          [],
+        ) as RenameResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    listPeers: async (params: ListPeersParams, options?: RpcCallOptions): Promise<ListPeersResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(ListPeersParamsStruct, params);
+    listPeers: async (
+      params: ListPeersParams,
+      options?: RpcCallOptions,
+    ): Promise<ListPeersResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        ListPeersParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["listPeers"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["listPeers"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(ListPeersResultsStruct, raw.contentBytes, raw.capTable) as ListPeersResults;
+          return decodeStructMessageWithCaps(
+            ListPeersResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as ListPeersResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["listPeers"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["listPeers"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(ListPeersResultsStruct, response, []) as ListPeersResults;
+        return decodeStructMessageWithCaps(
+          ListPeersResultsStruct,
+          response,
+          [],
+        ) as ListPeersResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    disconnect: async (params: DisconnectParams, options?: RpcCallOptions): Promise<DisconnectResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(DisconnectParamsStruct, params);
+    disconnect: async (
+      params: DisconnectParams,
+      options?: RpcCallOptions,
+    ): Promise<DisconnectResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        DisconnectParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["disconnect"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["disconnect"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(DisconnectResultsStruct, raw.contentBytes, raw.capTable) as DisconnectResults;
+          return decodeStructMessageWithCaps(
+            DisconnectResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as DisconnectResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["disconnect"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["disconnect"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(DisconnectResultsStruct, response, []) as DisconnectResults;
+        return decodeStructMessageWithCaps(
+          DisconnectResultsStruct,
+          response,
+          [],
+        ) as DisconnectResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
     },
-    advertise: async (params: AdvertiseParams, options?: RpcCallOptions): Promise<AdvertiseResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(AdvertiseParamsStruct, params);
+    advertise: async (
+      params: AdvertiseParams,
+      options?: RpcCallOptions,
+    ): Promise<AdvertiseResults> => {
+      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+        AdvertiseParamsStruct,
+        params,
+      );
       let questionId: number | undefined;
-      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {
+      const callOptions: RpcCallOptions & {
+        paramsCapTable?: PreambleCapDescriptor[];
+      } = {
         ...(options ?? {}),
         interfaceId: options?.interfaceId ?? 0xc6833d6865a52f85n,
         onQuestionId: (value: number): void => {
           questionId = value;
           options?.onQuestionId?.(value);
         },
-        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),
+        ...(encoded.capTable.length > 0
+          ? { paramsCapTable: encoded.capTable }
+          : {}),
       };
       if (transport.callRaw) {
-        const raw = await transport.callRaw(capability, PeerNodeMethodOrdinals["advertise"], encoded.content, callOptions);
+        const raw = await transport.callRaw(
+          capability,
+          PeerNodeMethodOrdinals["advertise"],
+          encoded.content,
+          callOptions,
+        );
         try {
-          return decodeStructMessageWithCaps(AdvertiseResultsStruct, raw.contentBytes, raw.capTable) as AdvertiseResults;
+          return decodeStructMessageWithCaps(
+            AdvertiseResultsStruct,
+            raw.contentBytes,
+            raw.capTable,
+          ) as AdvertiseResults;
         } finally {
-          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
             await transport.finish(questionId, options?.finish);
           }
         }
       }
-      const response = await transport.call(capability, PeerNodeMethodOrdinals["advertise"], encoded.content, callOptions);
+      const response = await transport.call(
+        capability,
+        PeerNodeMethodOrdinals["advertise"],
+        encoded.content,
+        callOptions,
+      );
       try {
-        return decodeStructMessageWithCaps(AdvertiseResultsStruct, response, []) as AdvertiseResults;
+        return decodeStructMessageWithCaps(
+          AdvertiseResultsStruct,
+          response,
+          [],
+        ) as AdvertiseResults;
       } finally {
-        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {
+        if (
+          (options?.autoFinish ?? true) && questionId !== undefined &&
+          transport.finish
+        ) {
           await transport.finish(questionId, options?.finish);
         }
       }
@@ -879,22 +1192,39 @@ export async function bootstrapPeerNodeClient(
   return createPeerNodeClient(transport, capability);
 }
 
-export function createPeerNodeServer(server: PeerNodeServer): RpcServerDispatch {
+export function createPeerNodeServer(
+  server: PeerNodeServer,
+): RpcServerDispatch {
   return {
     interfaceId: PeerNodeInterfaceId,
-    dispatch: async (methodId: number, params: Uint8Array, ctx: RpcCallContext): Promise<RpcServerDispatchResult> => {
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(ConnectParamsStruct, params, ctx.paramsCapTable ?? []) as ConnectParams;
+          const decoded = decodeStructMessageWithCaps(
+            ConnectParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as ConnectParams;
           const result = await server["connect"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(ConnectResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            ConnectResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 1: {
-          const decoded = decodeStructMessageWithCaps(SayParamsStruct, params, ctx.paramsCapTable ?? []) as SayParams;
+          const decoded = decodeStructMessageWithCaps(
+            SayParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as SayParams;
           const result = await server["say"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(SayResultsStruct, result);
           if (encoded.capTable.length > 0) {
@@ -903,36 +1233,64 @@ export function createPeerNodeServer(server: PeerNodeServer): RpcServerDispatch 
           return encoded.content;
         }
         case 2: {
-          const decoded = decodeStructMessageWithCaps(RenameParamsStruct, params, ctx.paramsCapTable ?? []) as RenameParams;
+          const decoded = decodeStructMessageWithCaps(
+            RenameParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as RenameParams;
           const result = await server["rename"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(RenameResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            RenameResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 3: {
-          const decoded = decodeStructMessageWithCaps(ListPeersParamsStruct, params, ctx.paramsCapTable ?? []) as ListPeersParams;
+          const decoded = decodeStructMessageWithCaps(
+            ListPeersParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as ListPeersParams;
           const result = await server["listPeers"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(ListPeersResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            ListPeersResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 4: {
-          const decoded = decodeStructMessageWithCaps(DisconnectParamsStruct, params, ctx.paramsCapTable ?? []) as DisconnectParams;
+          const decoded = decodeStructMessageWithCaps(
+            DisconnectParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as DisconnectParams;
           const result = await server["disconnect"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(DisconnectResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            DisconnectResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
           return encoded.content;
         }
         case 5: {
-          const decoded = decodeStructMessageWithCaps(AdvertiseParamsStruct, params, ctx.paramsCapTable ?? []) as AdvertiseParams;
+          const decoded = decodeStructMessageWithCaps(
+            AdvertiseParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as AdvertiseParams;
           const result = await server["advertise"](decoded, ctx);
-          const encoded = encodeStructMessageWithCaps(AdvertiseResultsStruct, result);
+          const encoded = encodeStructMessageWithCaps(
+            AdvertiseResultsStruct,
+            result,
+          );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
           }
@@ -954,7 +1312,10 @@ export function registerPeerNodeServer(
 }
 
 export interface PeerEvents {
-  system(value: SystemParams["message"], options?: RpcCallOptions): Promise<void>;
+  system(
+    value: SystemParams["message"],
+    options?: RpcCallOptions,
+  ): Promise<void>;
 }
 
 function createPeerEventsServiceClient(
@@ -962,7 +1323,10 @@ function createPeerEventsServiceClient(
   transport: RpcClientTransport,
 ): PeerEvents {
   return {
-    system: async (value: SystemParams["message"], options?: RpcCallOptions) => {
+    system: async (
+      value: SystemParams["message"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.system({ message: value }, options);
       return;
     },
@@ -983,19 +1347,42 @@ function createPeerEventsServiceServer(
 export const PeerEvents: RpcServiceToken<PeerEvents> = Object.freeze({
   interfaceId: PeerEventsInterfaceId,
   interfaceName: "PeerEvents",
-  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>
-    createPeerEventsServiceClient(await bootstrapPeerEventsClient(transport, options), transport),
-  registerServer: (registry: RpcServerRegistry, server: PeerEvents, options?: RpcExportCapabilityOptions) =>
-    registerPeerEventsServer(registry, createPeerEventsServiceServer(server), options),
+  bootstrapClient: async (
+    transport: RpcBootstrapClientTransport,
+    options?: RpcCallOptions,
+  ) =>
+    createPeerEventsServiceClient(
+      await bootstrapPeerEventsClient(transport, options),
+      transport,
+    ),
+  registerServer: (
+    registry: RpcServerRegistry,
+    server: PeerEvents,
+    options?: RpcExportCapabilityOptions,
+  ) =>
+    registerPeerEventsServer(
+      registry,
+      createPeerEventsServiceServer(server),
+      options,
+    ),
 });
 
 export interface PeerNode {
-  connect(value: PeerEvents | RpcStub<PeerEvents>, options?: RpcCallOptions): Promise<ConnectResults>;
+  connect(
+    value: PeerEvents | RpcStub<PeerEvents>,
+    options?: RpcCallOptions,
+  ): Promise<ConnectResults>;
   say(value: SayParams["message"], options?: RpcCallOptions): Promise<void>;
   rename(value: RenameParams["name"], options?: RpcCallOptions): Promise<void>;
   listPeers(options?: RpcCallOptions): Promise<ListPeersResults["peers"]>;
-  disconnect(value: DisconnectParams["reason"], options?: RpcCallOptions): Promise<void>;
-  advertise(value: AdvertiseParams["endpoint"], options?: RpcCallOptions): Promise<void>;
+  disconnect(
+    value: DisconnectParams["reason"],
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  advertise(
+    value: AdvertiseParams["endpoint"],
+    options?: RpcCallOptions,
+  ): Promise<void>;
 }
 
 function createPeerNodeServiceClient(
@@ -1003,8 +1390,13 @@ function createPeerNodeServiceClient(
   transport: RpcClientTransport,
 ): PeerNode {
   return {
-    connect: async (value: PeerEvents | RpcStub<PeerEvents>, options?: RpcCallOptions) => {
-      const result = await client.connect({ events: exportCapabilityFromTransport(transport, PeerEvents, value) }, options);
+    connect: async (
+      value: PeerEvents | RpcStub<PeerEvents>,
+      options?: RpcCallOptions,
+    ) => {
+      const result = await client.connect({
+        events: exportCapabilityFromTransport(transport, PeerEvents, value),
+      }, options);
       return result;
     },
     say: async (value: SayParams["message"], options?: RpcCallOptions) => {
@@ -1019,11 +1411,17 @@ function createPeerNodeServiceClient(
       const result = await client.listPeers({} as ListPeersParams, options);
       return result.peers;
     },
-    disconnect: async (value: DisconnectParams["reason"], options?: RpcCallOptions) => {
+    disconnect: async (
+      value: DisconnectParams["reason"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.disconnect({ reason: value }, options);
       return;
     },
-    advertise: async (value: AdvertiseParams["endpoint"], options?: RpcCallOptions) => {
+    advertise: async (
+      value: AdvertiseParams["endpoint"],
+      options?: RpcCallOptions,
+    ) => {
       const result = await client.advertise({ endpoint: value }, options);
       return;
     },
@@ -1035,7 +1433,17 @@ function createPeerNodeServiceServer(
 ): PeerNodeServer {
   return {
     connect: async (params: ConnectParams, _ctx: RpcCallContext) => {
-      const result = await server.connect(capabilityToServiceStub(params.events, requireOutboundClient(_ctx), (nextTransport, nextCapability) => createPeerEventsServiceClient(createPeerEventsClient(nextTransport, nextCapability), nextTransport)));
+      const result = await server.connect(
+        capabilityToServiceStub(
+          params.events,
+          requireOutboundClient(_ctx),
+          (nextTransport, nextCapability) =>
+            createPeerEventsServiceClient(
+              createPeerEventsClient(nextTransport, nextCapability),
+              nextTransport,
+            ),
+        ),
+      );
       return result;
     },
     say: async (params: SayParams, _ctx: RpcCallContext) => {
@@ -1064,9 +1472,22 @@ function createPeerNodeServiceServer(
 export const PeerNode: RpcServiceToken<PeerNode> = Object.freeze({
   interfaceId: PeerNodeInterfaceId,
   interfaceName: "PeerNode",
-  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>
-    createPeerNodeServiceClient(await bootstrapPeerNodeClient(transport, options), transport),
-  registerServer: (registry: RpcServerRegistry, server: PeerNode, options?: RpcExportCapabilityOptions) =>
-    registerPeerNodeServer(registry, createPeerNodeServiceServer(server), options),
+  bootstrapClient: async (
+    transport: RpcBootstrapClientTransport,
+    options?: RpcCallOptions,
+  ) =>
+    createPeerNodeServiceClient(
+      await bootstrapPeerNodeClient(transport, options),
+      transport,
+    ),
+  registerServer: (
+    registry: RpcServerRegistry,
+    server: PeerNode,
+    options?: RpcExportCapabilityOptions,
+  ) =>
+    registerPeerNodeServer(
+      registry,
+      createPeerNodeServiceServer(server),
+      options,
+    ),
 });
-

@@ -8,11 +8,11 @@
  * @module
  */
 
-import { TransportError } from "../../errors.ts";
+import { TransportError } from "../../../errors.ts";
 import {
   assertPositiveFinite,
   assertPositiveInteger,
-} from "../../validation.ts";
+} from "../../../validation.ts";
 
 /**
  * The three states a circuit breaker can be in.

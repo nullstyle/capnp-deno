@@ -1,9 +1,9 @@
-import { normalizeTransportError, TransportError } from "../../errors.ts";
+import { normalizeTransportError, TransportError } from "../../../errors.ts";
 import {
   assertNonNegativeFinite,
   assertNonNegativeInteger,
   assertPositiveFinite,
-} from "../../validation.ts";
+} from "../../../validation.ts";
 
 /**
  * Context passed to a {@link ReconnectPolicy} when deciding whether to retry

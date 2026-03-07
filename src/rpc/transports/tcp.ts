@@ -13,12 +13,18 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
-import type { RpcTransport } from "./transport.ts";
+import type { RpcTransport } from "./internal/transport.ts";
+import {
+  awaitWithTimeout,
+  notifyTransportClose,
+  OutboundFrameQueue,
+  type QueuedOutboundFrame,
+} from "./internal/transport_internal.ts";
 
 /**
- * Configuration options for {@link TcpServerListener}.
+ * Configuration options for {@link TcpTransport.listen}.
  */
-export interface TcpServerListenerOptions {
+export interface TcpTransportListenOptions {
   /** The TCP port to listen on. */
   port: number;
   /** The hostname/address to bind to. Defaults to "0.0.0.0". */
@@ -33,38 +39,38 @@ export interface TcpServerListenerOptions {
 }
 
 /**
- * A TCP server listener that accepts inbound connections and wraps each one
- * in a {@link TcpTransport}.
- *
- * This class binds a TCP socket using `Deno.listen()` and yields a new
- * `TcpTransport` for each accepted connection. Each transport can then be
- * handed to an `RpcServerRuntime` for per-connection RPC handling.
- *
- * @example
- * ```ts
- * const listener = new TcpServerListener({ port: 4000 });
- * for await (const transport of listener.accept()) {
- *   // hand transport to an RpcServerRuntime
- *   runtime.addSession(transport);
- * }
- * ```
+ * Handle returned by {@link TcpTransport.listen}.
  */
-export class TcpServerListener {
-  /** The underlying Deno TCP listener. */
-  readonly listener: Deno.Listener;
-  /** The options this listener was configured with. */
-  readonly options: TcpServerListenerOptions;
+export interface TcpTransportListener {
+  /** Returns the local address the listener is bound to. */
+  readonly addr: Deno.Addr;
+  /**
+   * Returns an async iterable that yields a new {@link TcpTransport} for each
+   * accepted TCP connection. The iterable terminates when the listener is
+   * closed.
+   */
+  accept(): AsyncIterable<TcpTransport>;
+  /**
+   * Stops the listener and prevents any further connections from being
+   * accepted. Calling close on an already-closed listener is a no-op.
+   */
+  close(): void;
+}
+
+class TcpTransportListenerImpl implements TcpTransportListener {
+  readonly #listener: Deno.Listener;
+  readonly #options: TcpTransportListenOptions;
 
   #closed = false;
 
-  constructor(options: TcpServerListenerOptions) {
+  constructor(options: TcpTransportListenOptions) {
     if (!("listen" in Deno) || typeof Deno.listen !== "function") {
       throw new TransportError(
         "Deno.listen is unavailable; run with a runtime that supports TCP listen",
       );
     }
-    this.options = options;
-    this.listener = Deno.listen({
+    this.#options = options;
+    this.#listener = Deno.listen({
       port: options.port,
       hostname: options.hostname ?? "0.0.0.0",
       transport: "tcp",
@@ -83,7 +89,7 @@ export class TcpServerListener {
    * Returns the local address the listener is bound to.
    */
   get addr(): Deno.Addr {
-    return this.listener.addr;
+    return this.#listener.addr;
   }
 
   /**
@@ -97,7 +103,7 @@ export class TcpServerListener {
     while (!this.#closed) {
       let conn: Deno.Conn;
       try {
-        conn = await this.listener.accept();
+        conn = await this.#listener.accept();
       } catch (error) {
         if (this.#closed) {
           // Listener was closed while waiting for a connection; exit cleanly.
@@ -108,12 +114,12 @@ export class TcpServerListener {
 
       const transport = new TcpTransport(
         conn,
-        this.options.transportOptions
-          ? { ...this.options.transportOptions }
+        this.#options.transportOptions
+          ? { ...this.#options.transportOptions }
           : undefined,
       );
 
-      emitObservabilityEvent(this.options.observability, {
+      emitObservabilityEvent(this.#options.observability, {
         name: "rpc.transport.tcp.accept",
         attributes: {
           "rpc.outcome": "ok",
@@ -132,11 +138,11 @@ export class TcpServerListener {
     if (this.#closed) return;
     this.#closed = true;
     try {
-      this.listener.close();
+      this.#listener.close();
     } catch {
       // no-op -- listener may already be closed.
     }
-    emitObservabilityEvent(this.options.observability, {
+    emitObservabilityEvent(this.#options.observability, {
       name: "rpc.transport.tcp.listen_close",
       attributes: {
         "rpc.outcome": "ok",
@@ -145,11 +151,7 @@ export class TcpServerListener {
   }
 }
 
-interface PendingOutboundFrame {
-  frame: Uint8Array;
-  resolve: () => void;
-  reject: (error: unknown) => void;
-}
+interface PendingOutboundFrame extends QueuedOutboundFrame {}
 
 /**
  * Configuration options for {@link TcpTransport}.
@@ -221,8 +223,9 @@ function isPeerDisconnectError(error: unknown): boolean {
  * frames from the TCP byte stream. Outbound frames are queued and written
  * sequentially with full backpressure.
  *
- * Use the static {@link connect} factory method to establish a new TCP connection,
- * or pass an existing `Deno.Conn` directly to the constructor.
+ * Use the static {@link connect} factory method to establish a new TCP
+ * connection, {@link listen} to accept inbound connections, or pass an
+ * existing `Deno.Conn` directly to the constructor.
  *
  * @example
  * ```ts
@@ -244,11 +247,7 @@ export class TcpTransport implements RpcTransport {
   #readLoop: Promise<void> = Promise.resolve();
   #framer: CapnpFrameFramer;
 
-  #outboundQueue: PendingOutboundFrame[] = [];
-  #queuedOutboundBytes = 0;
-  #inflightOutboundFrames = 0;
-  #inflightOutboundBytes = 0;
-  #draining = false;
+  #outbound: OutboundFrameQueue<PendingOutboundFrame>;
   #drainLoop: Promise<void> | null = null;
   #closeNotified = false;
 
@@ -256,6 +255,19 @@ export class TcpTransport implements RpcTransport {
     this.conn = conn;
     this.options = options;
     this.#framer = new CapnpFrameFramer(options.frameLimits);
+    this.#outbound = new OutboundFrameQueue("tcp", options);
+  }
+
+  /**
+   * Bind a TCP listener that yields a {@link TcpTransport} per accepted
+   * connection.
+   *
+   * @param options - Listener bind settings and accepted-connection transport options.
+   * @returns A listener handle that can accept inbound `TcpTransport` instances.
+   * @throws {TransportError} If TCP listen is unavailable.
+   */
+  static listen(options: TcpTransportListenOptions): TcpTransportListener {
+    return new TcpTransportListenerImpl(options);
   }
 
   /**
@@ -367,11 +379,9 @@ export class TcpTransport implements RpcTransport {
     this.assertOutboundFrameSize(frame);
 
     const payload = new Uint8Array(frame);
-    this.assertOutboundQueueCapacity(payload.byteLength);
 
     const completion = new Promise<void>((resolve, reject) => {
-      this.#outboundQueue.push({ frame: payload, resolve, reject });
-      this.#queuedOutboundBytes += payload.byteLength;
+      this.#outbound.enqueue({ frame: payload, resolve, reject });
     });
 
     this.#ensureDrainLoop();
@@ -382,8 +392,8 @@ export class TcpTransport implements RpcTransport {
       attributes: {
         "rpc.outcome": "ok",
         "rpc.outbound.bytes": frame.byteLength,
-        "rpc.outbound.queue.frames": this.#outboundQueue.length,
-        "rpc.outbound.queue.bytes": this.#queuedOutboundBytes,
+        "rpc.outbound.queue.frames": this.#outbound.length,
+        "rpc.outbound.queue.bytes": this.#outbound.queuedBytes,
       },
       durationMs: performance.now() - startedAt,
     });
@@ -395,7 +405,7 @@ export class TcpTransport implements RpcTransport {
     this.#closed = true;
 
     const closeError = new TransportError("TcpTransport is closed");
-    this.#rejectQueuedOutbound(closeError);
+    this.#outbound.rejectQueued(closeError);
 
     try {
       this.conn.close();
@@ -496,28 +506,24 @@ export class TcpTransport implements RpcTransport {
   }
 
   #ensureDrainLoop(): void {
-    if (this.#draining) return;
-    this.#draining = true;
+    if (this.#drainLoop) return;
     this.#drainLoop = this.#drainOutbound()
       .catch((_error) => {
         // Individual send() callers receive write errors through their own
         // completion promises; suppress unhandled drain-loop rejections here.
       })
       .finally(() => {
-        this.#draining = false;
         this.#drainLoop = null;
-        if (this.#outboundQueue.length > 0 && !this.#closed) {
+        if (this.#outbound.hasQueuedFrames && !this.#closed) {
           this.#ensureDrainLoop();
         }
       });
   }
 
   async #drainOutbound(): Promise<void> {
-    while (!this.#closed && this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      this.#inflightOutboundFrames += 1;
-      this.#inflightOutboundBytes += next.frame.byteLength;
+    while (!this.#closed && this.#outbound.hasQueuedFrames) {
+      const next = this.#outbound.dequeue();
+      if (!next) break;
 
       try {
         await this.writeFully(next.frame);
@@ -525,14 +531,13 @@ export class TcpTransport implements RpcTransport {
       } catch (error) {
         const normalized = normalizeTransportError(error, "tcp send failed");
         next.reject(normalized);
-        this.#rejectQueuedOutbound(normalized);
+        this.#outbound.rejectQueued(normalized);
         if (this.options.onError) {
           void Promise.resolve(this.options.onError(normalized));
         }
         throw normalized;
       } finally {
-        this.#inflightOutboundFrames -= 1;
-        this.#inflightOutboundBytes -= next.frame.byteLength;
+        this.#outbound.settle(next.frame.byteLength);
       }
     }
   }
@@ -542,7 +547,7 @@ export class TcpTransport implements RpcTransport {
     while (offset < frame.byteLength) {
       const chunk = frame.subarray(offset);
       const writePromise = this.conn.write(chunk);
-      const written = await this.awaitWithTimeout(
+      const written = await awaitWithTimeout(
         writePromise,
         this.options.sendTimeoutMs,
         (timeoutMs) =>
@@ -556,39 +561,6 @@ export class TcpTransport implements RpcTransport {
       }
       offset += written;
     }
-  }
-
-  private async awaitWithTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number | undefined,
-    onTimeout: (timeoutMs: number) => Error,
-  ): Promise<T> {
-    if (timeoutMs === undefined) {
-      return await promise;
-    }
-
-    return await new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(onTimeout(timeoutMs));
-      }, timeoutMs);
-      void promise.then(
-        (value) => {
-          clearTimeout(timer);
-          if (settled) return;
-          settled = true;
-          resolve(value);
-        },
-        (error) => {
-          clearTimeout(timer);
-          if (settled) return;
-          settled = true;
-          reject(error);
-        },
-      );
-    });
   }
 
   private async handleError(error: unknown): Promise<void> {
@@ -610,27 +582,7 @@ export class TcpTransport implements RpcTransport {
   #notifyClose(): void {
     if (this.#closeNotified) return;
     this.#closeNotified = true;
-    const onClose = this.options.onClose;
-    if (!onClose) return;
-    void Promise.resolve(onClose()).catch((error) => {
-      const onError = this.options.onError;
-      if (!onError) return;
-      const normalized = normalizeTransportError(
-        error,
-        "tcp onClose callback failed",
-      );
-      void Promise.resolve(onError(normalized)).catch(() => {
-        // Swallow callback failures to avoid unhandled rejections.
-      });
-    });
-  }
-
-  #rejectQueuedOutbound(error: unknown): void {
-    while (this.#outboundQueue.length > 0) {
-      const next = this.#outboundQueue.shift()!;
-      this.#queuedOutboundBytes -= next.frame.byteLength;
-      next.reject(error);
-    }
+    notifyTransportClose(this.options, "tcp onClose callback failed");
   }
 
   private assertOutboundFrameSize(frame: Uint8Array): void {
@@ -639,30 +591,6 @@ export class TcpTransport implements RpcTransport {
       throw new TransportError(
         `tcp outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
-    }
-  }
-
-  private assertOutboundQueueCapacity(frameBytes: number): void {
-    const maxFrames = this.options.maxQueuedOutboundFrames;
-    if (maxFrames !== undefined) {
-      const used = this.#inflightOutboundFrames + this.#outboundQueue.length;
-      if (used + 1 > maxFrames) {
-        throw new TransportError(
-          `tcp outbound queue frame limit exceeded: ${used + 1} > ${maxFrames}`,
-        );
-      }
-    }
-
-    const maxBytes = this.options.maxQueuedOutboundBytes;
-    if (maxBytes !== undefined) {
-      const used = this.#inflightOutboundBytes + this.#queuedOutboundBytes;
-      if (used + frameBytes > maxBytes) {
-        throw new TransportError(
-          `tcp outbound queue byte limit exceeded: ${
-            used + frameBytes
-          } > ${maxBytes}`,
-        );
-      }
     }
   }
 }

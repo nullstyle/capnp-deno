@@ -135,11 +135,15 @@ For network clients, use `connectAndBootstrap(...)` with generated
 
 Built-in transports:
 
-- `TcpTransport` + `TcpServerListener`
-- `TcpRpcClientTransport` (raw RPC client adapter over a started transport)
+- `TcpTransport` (`connect(...)` for clients, `listen(...)` for servers)
 - `WebSocketTransport`
 - `WebTransportTransport`
 - `MessagePortTransport`
+
+Low-level client adapters:
+
+- `RpcWireClient` (raw Bootstrap/Call/Finish/Release client over a started
+  transport)
 
 Resilience and runtime helpers:
 

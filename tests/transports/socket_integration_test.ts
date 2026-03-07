@@ -5,8 +5,8 @@ import {
   type RpcPeer,
   RpcSession,
   type RpcTransport,
+  RpcWireClient,
   TCP,
-  TcpRpcClientTransport,
   TcpTransport,
   TransportError,
   WasmPeer,
@@ -851,7 +851,7 @@ Deno.test("ReconnectingRpcClientTransport retries bootstrap-cap calls over live 
     connect: async () => {
       connectCount += 1;
       const ws = await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`);
-      const inner = new TcpRpcClientTransport(ws, {
+      const inner = new RpcWireClient(ws, {
         interfaceId: 0x130n,
         defaultTimeoutMs: 250,
       });
@@ -941,7 +941,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capabilities over
     connect: async () => {
       connectCount += 1;
       const ws = await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`);
-      const inner = new TcpRpcClientTransport(ws, {
+      const inner = new RpcWireClient(ws, {
         interfaceId: 0x131n,
         defaultTimeoutMs: 250,
       });
@@ -1239,7 +1239,7 @@ Deno.test({
     });
 
     let transport: WebTransportTransport | null = null;
-    let client: TcpRpcClientTransport | null = null;
+    let client: RpcWireClient | null = null;
     try {
       transport = await withTimeout(
         WebTransportTransport.connect(
@@ -1249,7 +1249,7 @@ Deno.test({
         4000,
         "direct wt transport connect",
       );
-      client = new TcpRpcClientTransport(transport, {
+      client = new RpcWireClient(transport, {
         interfaceId: 0x143n,
         defaultTimeoutMs: 500,
       });

@@ -7,6 +7,9 @@
     "./encoding": "./src/encoding.ts",
     "./rpc": "./src/rpc.ts"
   },
+  "imports": {
+    "@cliffy/command": "jsr:@cliffy/command@1.0.0"
+  },
   "publish": {
     "include": ["src/**/*.ts", "generated/*.wasm", "README.md"],
     "exclude": [

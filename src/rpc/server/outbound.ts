@@ -17,6 +17,7 @@
  */
 
 import { ProtocolError, SessionError } from "../../errors.ts";
+import { requireRpcReturnResults, toRpcCallResult } from "../call_result.ts";
 import type {
   RpcClientCallOptions,
   RpcClientCallResult,
@@ -32,7 +33,7 @@ import {
   RPC_MESSAGE_TAG_RETURN,
   type RpcReturnMessage,
 } from "../wire.ts";
-import type { RpcTransport } from "../transports/transport.ts";
+import type { RpcTransport } from "../transports/internal/transport.ts";
 
 /**
  * Default starting question ID for server-originated outbound calls.
@@ -240,25 +241,14 @@ export class RpcServerOutboundClient {
       throw error;
     }
 
-    if (message.kind === "exception") {
-      throw new ProtocolError(`rpc call failed: ${message.reason}`);
-    }
+    const resultMessage = requireRpcReturnResults(message);
 
     // Auto-finish unless the server says no finish needed.
-    if ((options.autoFinish ?? true) && !message.noFinishNeeded) {
+    if ((options.autoFinish ?? true) && !resultMessage.noFinishNeeded) {
       await this.#trySendFinish(questionId, options.finish);
     }
 
-    return {
-      answerId: message.answerId,
-      contentBytes: message.contentBytes,
-      capTable: message.capTable.map((entry) => ({
-        tag: entry.tag,
-        id: entry.id,
-      })),
-      releaseParamCaps: message.releaseParamCaps,
-      noFinishNeeded: message.noFinishNeeded,
-    };
+    return toRpcCallResult(resultMessage);
   }
 
   /**
