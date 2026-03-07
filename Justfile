@@ -64,9 +64,6 @@ ci-bench:
 verify:
     deno task verify
 
-verify-integration:
-    deno task verify:integration
-
 verify-real:
     CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task verify:real
 
@@ -88,6 +85,7 @@ act-list:
     act -l
 
 # Run local CI-equivalent jobs with `act` (single runner profile, sequential)
+
 # Excludes benchmark regression job by default since host/container timing is not comparable to CI baseline.
 act-ci event="pull_request":
     act {{ event }} -j verify
@@ -112,13 +110,13 @@ regen-rpc-ts:
     ./scripts/generate_rpc_schema_ts.sh
 
 codegen-schema schema out="generated":
-    deno task codegen generate --schema {{schema}} --out {{out}}
+    deno task codegen generate --schema {{ schema }} --out {{ out }}
 
 codegen-src src out="generated" layout="schema":
-    deno task codegen generate --src {{src}} --out {{out}} --layout {{layout}}
+    deno task codegen generate --src {{ src }} --out {{ out }} --layout {{ layout }}
 
 codegen-request request out="generated":
-    deno task codegen generate --request-bin {{request}} --out {{out}}
+    deno task codegen generate --request-bin {{ request }} --out {{ out }}
 
 install-codegen-plugin:
     deno task codegen:install
@@ -130,10 +128,10 @@ build-codegen-binary:
     deno task codegen:compile
 
 build-codegen-binary-target target out:
-    deno task codegen:compile {{target}} {{out}}
+    deno task codegen:compile {{ target }} {{ out }}
 
 codegen-plugin schema out="generated" import_path=".":
-    capnp compile -I {{import_path}} -odeno:{{out}} {{schema}}
+    capnp compile -I {{ import_path }} -odeno:{{ out }} {{ schema }}
 
 codegen-plugin-local schema out="generated" import_path=".":
-    capnp compile -I {{import_path}} -o ./scripts/capnpc-deno:{{out}} {{schema}}
+    capnp compile -I {{ import_path }} -o ./scripts/capnpc-deno:{{ out }} {{ schema }}
