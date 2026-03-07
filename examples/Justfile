@@ -38,6 +38,12 @@ run-ping-ws-server host="127.0.0.1" port="4001" path="/rpc" api_path="/api" prot
 run-ping-ws-client url="ws://127.0.0.1:4001/rpc" protocol="capnp-rpc" count="3":
     deno run --allow-net ping/client_ws.ts {{ url }} {{ protocol }} {{ count }}
 
+run-webtransport-p2p-a:
+    deno run --unstable-net --allow-net=127.0.0.1 webtransport_p2p/peer.ts --name alice --port 4443
+
+run-webtransport-p2p-b:
+    deno run --unstable-net --allow-net=127.0.0.1 webtransport_p2p/peer.ts --name bob --port 4444 --connect https://127.0.0.1:4443/p2p
+
 run-kvstore-stress-2 host="127.0.0.1" port="9000" key_space="16384" active_keys="1024" concurrency="32" min_batch="8" max_batch="64" duration_seconds="0":
     deno run --allow-net --allow-sys kvstore_stress_2/kvstore_stress_client.ts \
         --host={{ host }} \
@@ -70,8 +76,14 @@ gen-kvstore-stress-2:
     mkdir -p kvstore_stress_2/gen
     deno task codegen --schema kvstore_stress_2/kvstore.capnp --out kvstore_stress_2/gen --layout flat
 
+gen-webtransport-p2p:
+    rm -rf webtransport_p2p/gen
+    mkdir -p webtransport_p2p/gen
+    deno task codegen --schema webtransport_p2p/schema.capnp --out webtransport_p2p/gen --layout flat
+
 gen-rpc:
     just gen-getting-started
     just gen-tcp-golden-path
     just gen-tcp-echo-server
     just gen-kvstore-stress-2
+    just gen-webtransport-p2p

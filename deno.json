@@ -8,11 +8,7 @@
     "./rpc": "./src/rpc.ts"
   },
   "publish": {
-    "include": [
-      "src/**/*.ts",
-      "generated/*.wasm",
-      "README.md"
-    ],
+    "include": ["src/**/*.ts", "generated/*.wasm", "README.md"],
     "exclude": [
       "tests/**",
       "bench/**",
@@ -41,7 +37,7 @@
     "test:codegen": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src tests/codegen/capnpc_deno_codegen_test.ts tests/codegen/capnpc_deno_union_codegen_test.ts tests/codegen/capnpc_deno_interface_codegen_test.ts tests/codegen/capnpc_deno_cli_test.ts tests/codegen/capnpc_deno_golden_codegen_test.ts tests/codegen/capnpc_deno_plugin_response_test.ts",
     "test:unit": "deno test --allow-read=tests/fixtures/codegen_requests/multi_schema_request.b64,src tests --ignore=tests/transports/socket_integration_test.ts,tests/wasm/real_wasm_serde_test.ts,tests/wasm/real_wasm_rpc_flow_test.ts,tests/wasm/real_wasm_service_flow_test.ts,tests/transports/tcp_rpc_interop_test.ts",
     "test:coverage": "deno task test:unit --coverage=coverage/",
-    "test:integration": "deno test tests/transports/socket_integration_test.ts --allow-net=127.0.0.1",
+    "test:integration": "deno test tests/transports/socket_integration_test.ts --allow-net=127.0.0.1 --unstable-net",
     "test:real": "deno test tests/wasm/real_wasm_serde_test.ts tests/wasm/real_wasm_rpc_flow_test.ts tests/wasm/real_wasm_service_flow_test.ts tests/transports/tcp_rpc_interop_test.ts --allow-read --allow-net=127.0.0.1",
     "test": "deno task test:unit",
     "build:wasm": "bash scripts/build_wasm.sh",

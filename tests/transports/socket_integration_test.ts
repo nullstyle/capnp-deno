@@ -11,7 +11,10 @@ import {
   TransportError,
   WasmPeer,
   WebSocketTransport,
+  type WebTransportConnectOptions,
+  WebTransportTransport,
   WS,
+  WT,
 } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
@@ -202,6 +205,88 @@ Deno.test("TcpTransport loopback e2e with RpcSession", async () => {
   }
 });
 
+const TEST_WEBTRANSPORT_CERT_PEM = `-----BEGIN CERTIFICATE-----
+MIICyTCCAbGgAwIBAgIJAPT8CQA2YR2WMA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNV
+BAMMCTEyNy4wLjAuMTAeFw0yNjAzMDYyMDI4MzFaFw0zNjAzMDMyMDI4MzFaMBQx
+EjAQBgNVBAMMCTEyNy4wLjAuMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC
+ggEBALlXSSsKwSGpvQ+SeIKGFMp0jtjOao01JxQ+m7mmWI3GCtzXUkiO9LTViChl
+cguAffMymjvilMTCT4zRvnxeU0iXGl7B334zYSynAjr/xw3bva7XDxEe16OMzAmF
+uaaXBnmL0QYkeMmesQYN/Yjkz+XMnPgKWCHCHkqgym3KNIbpQYeavIkNVukSYsTu
+1R7tgPmLBpytl2NFgl0JDr5JAEep7Y66G+NnnrNl9fRQK+SFGUUHA2Xgojm6WATC
+faZacjNNPneH0wZGSJdyqYgEK7xil2GMVNczpJLuN44jQpEu4KFLiKKovNU+UOKf
+ZWj15mH49IHmq4URaYDsolGBiHMCAwEAAaMeMBwwGgYDVR0RBBMwEYcEfwAAAYIJ
+bG9jYWxob3N0MA0GCSqGSIb3DQEBCwUAA4IBAQA0fRrpIdZrM9DZfoXUBtJum32z
+VwcyUZFDXCQwmnFIOkjJSEH8v6bczVWnQWqBKYUYtYxMb8GDqY5S9BfPLfc7Kbpd
+ovV5PknWxd9aqn0qgPkoKNTCkwW/ZUhN+bG9W19YobTXQifhSjwgwZaFboszEH9h
+BGyzZLNi+bUjTo+LwNhlKMREipnvxCwftBkiKYK0lTPOd6HzEs2XkDu1fX8bo/7C
+xGoI5k5K/huAwQmGl3g89HfqHj2dyIGGHuYn/r0BKzHVgqdVHNKm4XZEnYzDq3qR
+Bwby8pMvIW1OIUxjnQ2BCiqsZXiPvT1uFt3jaIvUSUFwD8iDgWiQcaHO2vGX
+-----END CERTIFICATE-----`;
+
+const TEST_WEBTRANSPORT_KEY_PEM = `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC5V0krCsEhqb0P
+kniChhTKdI7YzmqNNScUPpu5pliNxgrc11JIjvS01YgoZXILgH3zMpo74pTEwk+M
+0b58XlNIlxpewd9+M2EspwI6/8cN272u1w8RHtejjMwJhbmmlwZ5i9EGJHjJnrEG
+Df2I5M/lzJz4Clghwh5KoMptyjSG6UGHmryJDVbpEmLE7tUe7YD5iwacrZdjRYJd
+CQ6+SQBHqe2OuhvjZ56zZfX0UCvkhRlFBwNl4KI5ulgEwn2mWnIzTT53h9MGRkiX
+cqmIBCu8YpdhjFTXM6SS7jeOI0KRLuChS4iiqLzVPlDin2Vo9eZh+PSB5quFEWmA
+7KJRgYhzAgMBAAECggEAMDfPJ02C9VkNgLGgfISZgBpW13zMJ7R+WDv5k5D9VNUD
+GnVCSPI4I5ux8qCBzRA+tDij+5R1E8NhoscmgYCgti/pgmF53YFMdKt2XxcQGEDk
+1knI97FIdJo6sveBVx/PZWvEk46Fhh6s+2BEZ4rvs19KLxWx3AZ+jvfJ8ko65CX1
+rVZppTHr54VI8o2jMyEw5Pw08GH3VsBjbHX4HLLfycHs1jk/aK+LETIiGSUZPoF8
+vgvX2h/kjyhnL9JtkXaEi2HxAx1hBfZxivYlPHETTwOGUiBN4zX7h4drDe4DYSqX
+qTs5HfU7EO/YF2H+KgCi7D2Arse8GRv3HqKzUWk50QKBgQDgPvVHEY08xyZOEsb3
+XwCkzg8iZYWXOD40NEhbJ1I82puI76JzfpHt4zI1kEr2kTfZXHVVnhK46QBl9FT8
+0A4102C1zoMJVIDs2zZGPb2n/pbce81ugW3/LQ1ow5+f1sg9qMvVIuATFBI1XmFy
+H/xMgzyjFBXnZW6EznqZAruazwKBgQDTlgAh9gzsUO4lVagYWv2lZMscJrd0dfxf
+O64qMgzyn2PB65saBp5R/+aWNdjowa23EmQgOQTLc05BVpUAQM9+cNK7kvinaSsD
+2TBX1xQKAExbDJBxtVt7Ns7Xa1XSPzDm1vFbYBkBlnypJX+KiveqUB6118Cv7mMj
+PTay+MLRHQKBgAF258srBi0bb9iarsn2yN5KqjajSxgNufpFTSOrQhI7q0BdsEXo
+0bMoBK/s3VB26lJ1FB8XBTBH9US1L8jm4vDfDIajbp+k+aKSW+xhgteSBhIyjMjn
+93vvI2NHw8cbc/tTGuGtdKErRGMs1p4UL2Wghcja3LnCI9KiNpLBPdBpAoGBAK7f
+7SAkkq3Gfe3Ri+sFWVqXod+UiE/zLDExzFMHpvfokLS4HCs4iSXQ0S4ZNzu4x/Dl
+fGe9eJ8GoAkUnHXnGxev/BwX7ve+zlSR74jKNL/HW1RtX/z7Ha8Kr44QIpBwteQ0
+hqs1E7XiQQoz+ePx05yqN5enyJQf/UQk1c66F5ppAoGBAMOuYpNL9OGnoj/NL3RZ
+/3Z2hq2+SgGNnjhdf9KSApwnjBrzCJLEp3H/otK/ZBmSJMUeKM+EPAEnfo8YsHuP
+PtzWuVYRC9U7/xEE6sg61SJZVdRJoQTBlzg0EcROCv4jiDsVLpYwLZ5TpysOkCiA
+6wigTj6gBUMtoScXH2AKBLuL
+-----END PRIVATE KEY-----`;
+
+const TEST_WEBTRANSPORT_CERT_HASH = new Uint8Array([
+  66,
+  119,
+  121,
+  40,
+  16,
+  62,
+  67,
+  57,
+  166,
+  164,
+  122,
+  15,
+  185,
+  83,
+  56,
+  186,
+  5,
+  233,
+  58,
+  131,
+  178,
+  126,
+  88,
+  58,
+  98,
+  21,
+  151,
+  72,
+  31,
+  103,
+  107,
+  89,
+]);
+
 function reserveTcpPort(): number {
   const listener = Deno.listen({
     transport: "tcp",
@@ -214,6 +299,31 @@ function reserveTcpPort(): number {
     listener.close();
   }
 }
+
+function createWebTransportConnectOptions(): WebTransportConnectOptions {
+  return {
+    transport: {
+      webTransport: {
+        serverCertificateHashes: [{
+          algorithm: "sha-256",
+          value: new Uint8Array(TEST_WEBTRANSPORT_CERT_HASH),
+        }],
+      },
+      connectTimeoutMs: 2000,
+      streamOpenTimeoutMs: 2000,
+    },
+  };
+}
+
+const WEBTRANSPORT_RUNTIME_AVAILABLE =
+  typeof (globalThis as { WebTransport?: typeof WebTransport }).WebTransport ===
+    "function" &&
+  typeof (Deno as unknown as {
+      QuicEndpoint?: typeof Deno.QuicEndpoint;
+    }).QuicEndpoint === "function" &&
+  typeof (Deno as unknown as {
+      upgradeWebTransport?: typeof Deno.upgradeWebTransport;
+    }).upgradeWebTransport === "function";
 
 function waitForWebSocketOpen(socket: WebSocket): Promise<void> {
   if (socket.readyState === WebSocket.OPEN) {
@@ -913,4 +1023,247 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capabilities over
     await reconnecting.close();
     await handle.close();
   }
+});
+
+Deno.test({
+  name: "WT.connect bootstraps through WT.serve runtime root wiring",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const service = createRpcServiceToken<
+      { rootCapabilityIndex: number },
+      Record<string, never>
+    >({
+      interfaceId: 0x140n,
+      interfaceName: "WtBootstrapProbe",
+      bootstrapClient: async (transport, options) => {
+        const capability = await transport.bootstrap(options);
+        return {
+          rootCapabilityIndex: capability.capabilityIndex,
+        };
+      },
+      registerServer: (registry, _server, options) =>
+        registry.exportCapability({
+          interfaceId: 0x140n,
+          dispatch: () => new Uint8Array(),
+        }, options),
+    });
+
+    const port = reserveTcpPort();
+    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+    });
+
+    const client = await withTimeout(
+      WT.connect(
+        service,
+        `https://127.0.0.1:${port}/rpc`,
+        createWebTransportConnectOptions(),
+      ),
+      4000,
+      "wt connect with bootstrap",
+    );
+    try {
+      assertEquals(client.rootCapabilityIndex, 0);
+    } finally {
+      await client.close();
+      await handle.close();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "WT.serve accepts later sessions while an earlier session delays its first stream",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const service = createRpcServiceToken<
+      { rootCapabilityIndex: number },
+      Record<string, never>
+    >({
+      interfaceId: 0x141n,
+      interfaceName: "WtSlowFirstSessionProbe",
+      bootstrapClient: async (transport, options) => {
+        const capability = await transport.bootstrap(options);
+        return {
+          rootCapabilityIndex: capability.capabilityIndex,
+        };
+      },
+      registerServer: (registry, _server, options) =>
+        registry.exportCapability({
+          interfaceId: 0x141n,
+          dispatch: () => new Uint8Array(),
+        }, options),
+    });
+
+    const port = reserveTcpPort();
+    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+    });
+
+    let slowClient: WebTransport | null = null;
+    let client:
+      | { rootCapabilityIndex: number; close: () => Promise<void> }
+      | null = null;
+    try {
+      slowClient = new WebTransport(
+        `https://127.0.0.1:${port}/rpc`,
+        createWebTransportConnectOptions().transport?.webTransport,
+      );
+      await withTimeout(slowClient.ready, 4000, "slow wt ready");
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+      client = await withTimeout(
+        WT.connect(service, `https://127.0.0.1:${port}/rpc`, {
+          ...createWebTransportConnectOptions(),
+          bootstrap: { timeoutMs: 1000 },
+        }),
+        4000,
+        "wt connect while first session has no stream",
+      );
+      assertEquals(client.rootCapabilityIndex, 0);
+    } finally {
+      await client?.close().catch(() => {});
+      try {
+        slowClient?.close();
+      } catch {
+        // no-op
+      }
+      await handle.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "WT.serve disposes constructor instances on peer disconnect",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const connected = deferred<RpcPeer>();
+    const disposed = deferred<RpcPeer>();
+
+    class DisposableServer {
+      readonly peer: RpcPeer;
+
+      constructor(peer: RpcPeer) {
+        this.peer = peer;
+        connected.resolve(peer);
+      }
+
+      [Symbol.dispose](): void {
+        disposed.resolve(this.peer);
+      }
+    }
+
+    const service = createRpcServiceToken<
+      Record<string, never>,
+      DisposableServer
+    >({
+      interfaceId: 0x142n,
+      interfaceName: "WtDisposeProbe",
+      bootstrapClient: () => Promise.resolve({}),
+      registerServer: () => ({ capabilityIndex: 0 }),
+    });
+
+    const port = reserveTcpPort();
+    const handle = WT.serve(service, "127.0.0.1", port, DisposableServer, {
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+    });
+
+    let client: WebTransport | null = null;
+    try {
+      client = new WebTransport(
+        `https://127.0.0.1:${port}/rpc`,
+        createWebTransportConnectOptions().transport?.webTransport,
+      );
+      await withTimeout(client.ready, 4000, "wt ready");
+      const stream = await withTimeout(
+        client.createBidirectionalStream(),
+        4000,
+        "wt open bidi stream",
+      );
+      const writer = stream.writable.getWriter();
+      await writer.write(buildSingleSegmentFrame(0x42));
+      await writer.close();
+      writer.releaseLock();
+
+      await withTimeout(connected.promise, 4000, "wt server connect callback");
+
+      client.close();
+      client = null;
+
+      await withTimeout(disposed.promise, 4000, "wt server dispose callback");
+    } finally {
+      try {
+        client?.close();
+      } catch {
+        // no-op
+      }
+      await handle.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "WT.serve accepts direct WebTransportTransport clients",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const service = createRpcServiceToken<
+      { rootCapabilityIndex: number },
+      Record<string, never>
+    >({
+      interfaceId: 0x143n,
+      interfaceName: "WtDirectTransportProbe",
+      bootstrapClient: async (transport, options) => {
+        const capability = await transport.bootstrap(options);
+        return {
+          rootCapabilityIndex: capability.capabilityIndex,
+        };
+      },
+      registerServer: (registry, _server, options) =>
+        registry.exportCapability({
+          interfaceId: 0x143n,
+          dispatch: () => new Uint8Array(),
+        }, options),
+    });
+
+    const port = reserveTcpPort();
+    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+    });
+
+    let transport: WebTransportTransport | null = null;
+    let client: TcpRpcClientTransport | null = null;
+    try {
+      transport = await withTimeout(
+        WebTransportTransport.connect(
+          `https://127.0.0.1:${port}/rpc`,
+          createWebTransportConnectOptions().transport,
+        ),
+        4000,
+        "direct wt transport connect",
+      );
+      client = new TcpRpcClientTransport(transport, {
+        interfaceId: 0x143n,
+        defaultTimeoutMs: 500,
+      });
+
+      const capability = await withTimeout(
+        client.bootstrap({ timeoutMs: 500 }),
+        4000,
+        "direct wt bootstrap",
+      );
+      assertEquals(capability.capabilityIndex, 0);
+    } finally {
+      await client?.close().catch(() => {});
+      await transport?.close().catch(() => {});
+      await handle.close();
+    }
+  },
 });

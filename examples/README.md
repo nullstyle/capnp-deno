@@ -41,6 +41,12 @@ Each example is nested in its own directory and has a colocated `.capnp` schema.
   - `server_ws.ts`
   - `schema.capnp`
   - `gen/*`
+- `examples/webtransport_p2p/`
+  - `peer.ts`
+  - `runtime.ts`
+  - `shared.ts`
+  - `schema.capnp`
+  - `gen/*`
 
 ## Task Runner
 
@@ -70,4 +76,6 @@ just --justfile examples/Justfile run-kvstore-stress-2
 just --justfile examples/Justfile run-smoke-real-wasm
 just --justfile examples/Justfile run-ping-ws-server
 just --justfile examples/Justfile run-ping-ws-client
+just --justfile examples/Justfile run-webtransport-p2p-a
+just --justfile examples/Justfile run-webtransport-p2p-b
 ```

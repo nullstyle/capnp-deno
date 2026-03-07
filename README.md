@@ -9,7 +9,7 @@ It combines:
 - a WASM-backed RPC session runtime (`RpcSession`, `RpcServerRuntime`),
 - client/server RPC helpers (`SessionRpcClientTransport`, `RpcServerBridge`),
 - schema-first TypeScript codegen (`tools/capnpc-deno`),
-- real transports (TCP, WebSocket, MessagePort),
+- real transports (TCP, WebSocket, WebTransport, MessagePort),
 - resilience/ops helpers (reconnect, connection pool, circuit breaker,
   middleware, streaming, observability).
 
@@ -138,6 +138,7 @@ Built-in transports:
 - `TcpTransport` + `TcpServerListener`
 - `TcpRpcClientTransport` (raw RPC client adapter over a started transport)
 - `WebSocketTransport`
+- `WebTransportTransport`
 - `MessagePortTransport`
 
 Resilience and runtime helpers:
@@ -145,6 +146,7 @@ Resilience and runtime helpers:
 - `createExponentialBackoffReconnectPolicy(...)`
 - `connectTcpTransportWithReconnect(...)`
 - `connectWebSocketTransportWithReconnect(...)`
+- `connectWebTransportTransportWithReconnect(...)`
 - `createRpcSessionWithReconnect(...)`
 - `ReconnectingRpcClientTransport`
 - `RpcConnectionPool` + `withConnection(...)`
@@ -278,7 +280,7 @@ just ci-bench
 - `src/rpc/server_runtime.ts`: session + bridge + host-call pump integration
 - `src/rpc/client.ts`: bootstrap/call/finish/release + pipelining transport
 - `src/rpc/server.ts`: server dispatch bridge + answer table/pipelining
-- `src/rpc/transports/*`: TCP, WebSocket, MessagePort adapters
+- `src/rpc/transports/*`: TCP, WebSocket, WebTransport, MessagePort adapters
 - `src/encoding/*`: frame limits, stream framing, RPC wire encode/decode
 - `tools/capnpc-deno/*`: TypeScript codegen CLI/plugin
 - `tests/*`: fake-wasm unit, integration, and real-wasm tests
@@ -295,6 +297,8 @@ just ci-bench
   `examples/getting-started/getting-started.capnp`
 - Real-wasm smoke example: `examples/smoke_real_wasm/smoke_real_wasm.ts` +
   `examples/smoke_real_wasm/smoke_real_wasm.capnp`
+- Interactive WebTransport peer node example:
+  `examples/webtransport_p2p/peer.ts` + `examples/webtransport_p2p/schema.capnp`
 
 ## Important Notes
 

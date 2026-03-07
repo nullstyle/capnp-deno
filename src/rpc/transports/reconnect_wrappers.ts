@@ -2,8 +2,8 @@
  * Convenience factories for common reconnecting transport patterns.
  *
  * Combines {@link connectWithReconnect} with concrete transport constructors
- * (TCP, WebSocket) and optional {@link RpcSession} wiring to reduce
- * boilerplate for the most common reconnection setups.
+ * (TCP, WebSocket, WebTransport) and optional {@link RpcSession} wiring to
+ * reduce boilerplate for the most common reconnection setups.
  *
  * @module
  */
@@ -21,6 +21,10 @@ import {
   WebSocketTransport,
   type WebSocketTransportOptions,
 } from "./websocket.ts";
+import {
+  WebTransportTransport,
+  type WebTransportTransportConnectOptions,
+} from "./webtransport.ts";
 
 /**
  * Options for {@link connectTcpTransportWithReconnect}.
@@ -40,6 +44,16 @@ export interface ConnectWebSocketTransportWithReconnectOptions {
   protocols?: string | string[];
   /** Options forwarded to each {@link WebSocketTransport.connect} attempt. */
   transport?: WebSocketTransportOptions;
+  /** Reconnection policy and options. */
+  reconnect: ConnectWithReconnectOptions;
+}
+
+/**
+ * Options for {@link connectWebTransportTransportWithReconnect}.
+ */
+export interface ConnectWebTransportTransportWithReconnectOptions {
+  /** Options forwarded to each {@link WebTransportTransport.connect} attempt. */
+  transport?: WebTransportTransportConnectOptions;
   /** Reconnection policy and options. */
   reconnect: ConnectWithReconnectOptions;
 }
@@ -123,6 +137,25 @@ export async function connectWebSocketTransportWithReconnect(
         options.protocols,
         options.transport ?? {},
       ),
+    options.reconnect,
+  );
+}
+
+/**
+ * Connect a {@link WebTransportTransport} to the given URL with automatic
+ * reconnection on failure.
+ *
+ * @param url - The WebTransport URL to connect to.
+ * @param options - Transport and reconnection options.
+ * @returns The connected WebTransport transport.
+ * @throws {TransportError} If all retry attempts are exhausted.
+ */
+export async function connectWebTransportTransportWithReconnect(
+  url: string | URL,
+  options: ConnectWebTransportTransportWithReconnectOptions,
+): Promise<WebTransportTransport> {
+  return await connectTransportWithReconnect(
+    () => WebTransportTransport.connect(url, options.transport ?? {}),
     options.reconnect,
   );
 }

@@ -2,12 +2,14 @@ import {
   connectTcpTransportWithReconnect,
   connectTransportWithReconnect,
   connectWebSocketTransportWithReconnect,
+  connectWebTransportTransportWithReconnect,
   createExponentialBackoffReconnectPolicy,
   createRpcSessionWithReconnect,
   InMemoryRpcHarnessTransport,
   TcpTransport,
   TransportError,
   WebSocketTransport,
+  WebTransportTransport,
 } from "../../src/advanced.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
@@ -81,6 +83,46 @@ class FakeWebSocket extends EventTarget {
       new CloseEvent("close", { code: 1000, reason: "closed" }),
     );
   }
+}
+
+function createFakeWebTransport(): WebTransport {
+  const fakeWriter: WritableStreamDefaultWriter<Uint8Array> = {
+    ready: Promise.resolve(undefined),
+    closed: Promise.resolve(undefined),
+    desiredSize: 1,
+    write: (_chunk: Uint8Array) => Promise.resolve(undefined),
+    close: () => Promise.resolve(undefined),
+    abort: () => Promise.resolve(undefined),
+    releaseLock: () => {},
+  } as WritableStreamDefaultWriter<Uint8Array>;
+  const fakeReader: ReadableStreamDefaultReader<Uint8Array> = {
+    read: () => Promise.resolve({ done: true, value: undefined }),
+    cancel: () => Promise.resolve(undefined),
+    releaseLock: () => {},
+    closed: Promise.resolve(undefined),
+  } as ReadableStreamDefaultReader<Uint8Array>;
+  const stream: WebTransportBidirectionalStream = {
+    readable: {
+      getReader: () => fakeReader,
+    } as ReadableStream<Uint8Array> as WebTransportReceiveStream,
+    writable: {
+      getWriter: () => fakeWriter,
+    } as WritableStream<Uint8Array> as WebTransportSendStream,
+  };
+
+  return {
+    ready: Promise.resolve(undefined),
+    closed: Promise.resolve({ closeCode: 0, reason: "closed" }),
+    createBidirectionalStream: () => Promise.resolve(stream),
+    incomingBidirectionalStreams: new ReadableStream<
+      WebTransportBidirectionalStream
+    >({
+      start(controller) {
+        controller.close();
+      },
+    }),
+    close: () => {},
+  } as WebTransport;
 }
 
 Deno.test("connectTransportWithReconnect retries generic transport connector", async () => {
@@ -315,6 +357,76 @@ Deno.test("connectWebSocketTransportWithReconnect uses default protocols/options
   } finally {
     (WebSocketTransport as unknown as {
       connect: typeof WebSocketTransport.connect;
+    }).connect = original;
+  }
+});
+
+Deno.test("connectWebTransportTransportWithReconnect delegates to WebTransportTransport.connect", async () => {
+  const original = WebTransportTransport.connect;
+  let attempts = 0;
+  let seenUrl = "";
+  let seenTimeout: number | undefined;
+
+  try {
+    (WebTransportTransport as unknown as {
+      connect: typeof WebTransportTransport.connect;
+    }).connect = (
+      url: string | URL,
+      options = {},
+    ): Promise<WebTransportTransport> => {
+      attempts += 1;
+      seenUrl = String(url);
+      seenTimeout = options.connectTimeoutMs;
+      if (attempts < 2) {
+        return Promise.reject(new TransportError("webtransport unavailable"));
+      }
+      return Promise.resolve(
+        new WebTransportTransport(createFakeWebTransport(), {
+          readable: {
+            getReader: () => ({
+              read: () => Promise.resolve({ done: true, value: undefined }),
+              cancel: () => Promise.resolve(undefined),
+              releaseLock: () => {},
+              closed: Promise.resolve(undefined),
+            } as ReadableStreamDefaultReader<Uint8Array>),
+          } as ReadableStream<Uint8Array> as WebTransportReceiveStream,
+          writable: {
+            getWriter: () => ({
+              ready: Promise.resolve(undefined),
+              closed: Promise.resolve(undefined),
+              desiredSize: 1,
+              write: (_chunk: Uint8Array) => Promise.resolve(undefined),
+              close: () => Promise.resolve(undefined),
+              abort: () => Promise.resolve(undefined),
+              releaseLock: () => {},
+            } as WritableStreamDefaultWriter<Uint8Array>),
+          } as WritableStream<Uint8Array> as WebTransportSendStream,
+        }, options),
+      );
+    };
+
+    const transport = await connectWebTransportTransportWithReconnect(
+      "https://127.0.0.1:8443/rpc",
+      {
+        transport: { connectTimeoutMs: 222 },
+        reconnect: reconnectOptions(),
+      },
+    );
+
+    try {
+      assert(
+        transport instanceof WebTransportTransport,
+        "expected WebTransportTransport",
+      );
+      assertEquals(attempts, 2);
+      assertEquals(seenUrl, "https://127.0.0.1:8443/rpc");
+      assertEquals(seenTimeout, 222);
+    } finally {
+      await transport.close();
+    }
+  } finally {
+    (WebTransportTransport as unknown as {
+      connect: typeof WebTransportTransport.connect;
     }).connect = original;
   }
 });

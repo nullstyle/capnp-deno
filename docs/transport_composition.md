@@ -67,6 +67,13 @@ Communicates over a standard `WebSocket` with `binaryType = "arraybuffer"`. Use
 `WebSocketTransport.connect(url)` for clients. For servers, pass an already-open
 `WebSocket` (from your HTTP framework) to the constructor.
 
+### `WebTransportTransport`
+
+Communicates over a WebTransport bidirectional stream running on HTTP/3/QUIC.
+Use `WebTransportTransport.connect(url)` for clients. On the server side, accept
+or upgrade a WebTransport session and wrap it with
+`WebTransportTransport.accept(session)`.
+
 ### `MessagePortTransport`
 
 Communicates over a `MessagePort` (Web Workers, iframes, Deno workers). Pass one
@@ -305,6 +312,43 @@ browser and Deno clients:
      are not retried automatically after reconnect.
    - Non-bootstrap capability retries require `remapCapabilityOnReconnect`.
 
+### High-Level WebTransport Service API (`WT`)
+
+If you are using generated `RpcServiceToken` values, use `WT.connect(...)` and
+`WT.serve(...)` for HTTP/3/QUIC-based RPC:
+
+```ts
+const handle = WT.serve(Presence, "127.0.0.1", 4443, new PresenceServer(), {
+  path: "/p2p",
+  cert: certPem,
+  key: keyPem,
+});
+
+using client = await WT.connect(Presence, "https://127.0.0.1:4443/p2p", {
+  transport: {
+    webTransport: {
+      serverCertificateHashes: [
+        { algorithm: "sha-256", value: certHashBytes },
+      ],
+    },
+  },
+});
+```
+
+WebTransport specifics:
+
+1. `WT.serve(...)` requires Deno's unstable QUIC APIs (`--unstable-net`) plus a
+   TLS certificate and private key.
+2. `WT.connect(...)` uses `WebTransportTransport.connect(...)` under the hood
+   and opens a single bidirectional stream for Cap'n Proto RPC traffic.
+3. `WT.serve(...)` upgrades each accepted QUIC connection with
+   `Deno.upgradeWebTransport(...)`, waits for the first bidirectional stream,
+   and boots a per-connection `RpcServerRuntime.createWithRoot(...)`.
+4. For local development, prefer certificate-hash pinning via
+   `transport.webTransport.serverCertificateHashes`.
+5. For retry-on-connect behavior, layer
+   `connectWebTransportTransportWithReconnect(...)` under your client factory.
+
 ### MessagePort (Workers / Iframes)
 
 ```
@@ -340,14 +384,16 @@ const runtime = await RpcServerRuntime.create(serverTransport, bridge, {
 
 ## Decision Guide
 
-| Scenario                     | Transport                                        | Client wrapper                                              | Server wrapper                    |
-| ---------------------------- | ------------------------------------------------ | ----------------------------------------------------------- | --------------------------------- |
-| Unit/integration tests       | `InMemoryRpcHarnessTransport`                    | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
-| TCP client to remote server  | `TcpTransport.connect()`                         | `NetworkRpcHarnessTransport`                                | --                                |
-| TCP server accepting clients | `TcpServerListener` + `TcpTransport`             | --                                                          | `RpcServerRuntime` (one per conn) |
-| WebSocket client             | `WS.connect()` or `WebSocketTransport.connect()` | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
-| WebSocket server             | `WS.serve()` or `new WebSocketTransport(socket)` | --                                                          | `RpcServerRuntime`                |
-| Worker / iframe IPC          | `MessagePortTransport`                           | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
+| Scenario                     | Transport                                           | Client wrapper                                              | Server wrapper                    |
+| ---------------------------- | --------------------------------------------------- | ----------------------------------------------------------- | --------------------------------- |
+| Unit/integration tests       | `InMemoryRpcHarnessTransport`                       | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
+| TCP client to remote server  | `TcpTransport.connect()`                            | `NetworkRpcHarnessTransport`                                | --                                |
+| TCP server accepting clients | `TcpServerListener` + `TcpTransport`                | --                                                          | `RpcServerRuntime` (one per conn) |
+| WebSocket client             | `WS.connect()` or `WebSocketTransport.connect()`    | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
+| WebSocket server             | `WS.serve()` or `new WebSocketTransport(socket)`    | --                                                          | `RpcServerRuntime`                |
+| WebTransport client          | `WT.connect()` or `WebTransportTransport.connect()` | `TcpRpcClientTransport` or `NetworkRpcHarnessTransport`     | --                                |
+| WebTransport server          | `WT.serve()` or `WebTransportTransport.accept()`    | --                                                          | `RpcServerRuntime`                |
+| Worker / iframe IPC          | `MessagePortTransport`                              | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
 
 ## Middleware
 
@@ -393,8 +439,8 @@ called.
 ## Common Mistakes
 
 **Using `InMemoryRpcHarnessTransport` for real networking.** It has no network
-I/O. Use `TcpTransport`, `WebSocketTransport`, or `MessagePortTransport` for
-anything that crosses a process boundary.
+I/O. Use `TcpTransport`, `WebSocketTransport`, `WebTransportTransport`, or
+`MessagePortTransport` for anything that crosses a process boundary.
 
 **Using `NetworkRpcHarnessTransport` on the server side.**
 `NetworkRpcHarnessTransport` is a client-side adapter. On the server, pass the

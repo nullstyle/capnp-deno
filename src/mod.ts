@@ -47,7 +47,13 @@ export {
   type WebSocketServeOptions,
   type WebSocketServiceApi,
   type WebSocketUrl,
+  type WebTransportConnectOptions,
+  type WebTransportServeHandle,
+  type WebTransportServeOptions,
+  type WebTransportServiceApi,
+  type WebTransportUrl,
   WS,
+  WT,
 } from "./rpc/server/service.ts";
 
 // === Wire Format & Message Routing ===
@@ -237,6 +243,13 @@ export {
   type MessagePortTransportOptions,
 } from "./rpc/transports/message_port.ts";
 
+export {
+  WebTransportTransport,
+  type WebTransportTransportAcceptOptions,
+  type WebTransportTransportConnectOptions,
+  type WebTransportTransportOptions,
+} from "./rpc/transports/webtransport.ts";
+
 // === Resilience (Connection Pool, Circuit Breaker, Reconnect) ===
 
 export {
@@ -277,6 +290,8 @@ export {
   connectTransportWithReconnect,
   connectWebSocketTransportWithReconnect,
   type ConnectWebSocketTransportWithReconnectOptions,
+  connectWebTransportTransportWithReconnect,
+  type ConnectWebTransportTransportWithReconnectOptions,
   createRpcSessionWithReconnect,
   type CreateRpcSessionWithReconnectOptions,
 } from "./rpc/transports/reconnect_wrappers.ts";

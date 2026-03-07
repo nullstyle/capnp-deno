@@ -9,8 +9,8 @@
  *
  * A transport is responsible for delivering serialized Cap'n Proto frames
  * between two RPC peers. The library ships with implementations for TCP
- * ({@link TcpTransport}), WebSocket ({@link WebSocketTransport}), and
- * MessagePort ({@link MessagePortTransport}).
+ * ({@link TcpTransport}), WebSocket ({@link WebSocketTransport}), WebTransport
+ * ({@link WebTransportTransport}), and MessagePort ({@link MessagePortTransport}).
  *
  * @example
  * ```ts

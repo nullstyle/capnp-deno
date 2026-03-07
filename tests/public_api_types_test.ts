@@ -6,6 +6,7 @@ import type {
   CapnpFrameLimitsOptions,
   ConnectTcpTransportWithReconnectOptions,
   ConnectWebSocketTransportWithReconnectOptions,
+  ConnectWebTransportTransportWithReconnectOptions,
   ConnectWithReconnectOptions,
   CreateRpcSessionWithReconnectOptions,
   DenoOtelObservabilityOptions,
@@ -96,6 +97,14 @@ import type {
   WebSocketServiceApi,
   WebSocketTransportOptions,
   WebSocketUrl,
+  WebTransportConnectOptions,
+  WebTransportServeHandle,
+  WebTransportServeOptions,
+  WebTransportServiceApi,
+  WebTransportTransportAcceptOptions,
+  WebTransportTransportConnectOptions,
+  WebTransportTransportOptions,
+  WebTransportUrl,
 } from "../src/mod.ts";
 
 type Assert<T extends true> = T;
@@ -122,6 +131,8 @@ type PublicTypeExportSmoke = {
     ConnectTcpTransportWithReconnectOptions;
   connectWebSocketTransportWithReconnectOptions:
     ConnectWebSocketTransportWithReconnectOptions;
+  connectWebTransportTransportWithReconnectOptions:
+    ConnectWebTransportTransportWithReconnectOptions;
   connectWithReconnectOptions: ConnectWithReconnectOptions;
   createRpcSessionWithReconnectOptions: CreateRpcSessionWithReconnectOptions<
     RpcTransport
@@ -211,6 +222,14 @@ type PublicTypeExportSmoke = {
   webSocketServiceApi: WebSocketServiceApi;
   webSocketTransportOptions: WebSocketTransportOptions;
   webSocketUrl: WebSocketUrl;
+  webTransportConnectOptions: WebTransportConnectOptions;
+  webTransportServeHandle: WebTransportServeHandle;
+  webTransportServeOptions: WebTransportServeOptions;
+  webTransportServiceApi: WebTransportServiceApi;
+  webTransportTransportAcceptOptions: WebTransportTransportAcceptOptions;
+  webTransportTransportConnectOptions: WebTransportTransportConnectOptions;
+  webTransportTransportOptions: WebTransportTransportOptions;
+  webTransportUrl: WebTransportUrl;
 };
 
 type AssertTypeExportsExist = Assert<
