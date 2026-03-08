@@ -84,6 +84,7 @@ export function emitTypesModule(
   out.push("  RpcServiceToken,");
   out.push("  RpcStub,");
   out.push('} from "@nullstyle/capnp/rpc";');
+  out.push('import { createRpcServiceToken } from "@nullstyle/capnp/rpc";');
   out.push("import {");
   out.push("  decodeStructMessage,");
   out.push("  decodeStructMessageWithCaps,");
@@ -480,7 +481,7 @@ function emitServiceToken(
 ): void {
   const typeName = resolved.info.typeName;
   out.push(
-    `export const ${typeName}: RpcServiceToken<${typeName}> = Object.freeze({`,
+    `export const ${typeName}: RpcServiceToken<${typeName}> = createRpcServiceToken({`,
   );
   out.push(`  interfaceId: ${typeName}InterfaceId,`);
   out.push(`  interfaceName: ${JSON.stringify(typeName)},`);

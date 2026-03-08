@@ -6,8 +6,8 @@ configurable concurrency.
 It targets a rotating active key window of size `N` inside a total key space of
 size `M`:
 
-- Total key space `M`: `--key-space` (or `--m`)
-- Active rotating window `N`: `--active-keys` (or `--n`)
+- Total key space `M`: `--key-space`
+- Active rotating window `N`: `--active-keys`
 - Window shift per batch: `--rotation-step`
 
 Each batch chooses random keys from the current window, then randomly applies
@@ -45,8 +45,8 @@ deno run --allow-net --allow-sys examples/kvstore_stress_2/kvstore_stress_client
 
 ## Key Options
 
-- `--key-space` / `--m`: total key set size `M`
-- `--active-keys` / `--n`: rotating active subset size `N`
+- `--key-space`: total key set size `M`
+- `--active-keys`: rotating active subset size `N`
 - `--rotation-step`: keys to advance the active window after each batch
 - `--concurrency`: number of parallel write loops
 - `--min-batch`, `--max-batch`: random batch size bounds

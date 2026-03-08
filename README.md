@@ -131,6 +131,25 @@ await runtime.close();
 For network clients, use `connectAndBootstrap(...)` with generated
 `bootstrap*Client(...)` helpers to create a typed client in one step.
 
+For token-based typed RPC over real transports, prefer the generic service
+helpers:
+
+```ts
+import { connect, serve, TcpTransport } from "@nullstyle/capnp";
+import { Pinger } from "./generated/schema/pinger_types.ts";
+
+using client = await connect(
+  Pinger,
+  await TcpTransport.connect("127.0.0.1", 4000),
+);
+
+serve(
+  Pinger,
+  TcpTransport.listen({ hostname: "127.0.0.1", port: 4000 }),
+  ({ peer }) => new PingServer(peer),
+);
+```
+
 ## Transports, Resilience, and Ops
 
 Built-in transports:
@@ -144,6 +163,12 @@ Low-level client adapters:
 
 - `RpcWireClient` (raw Bootstrap/Call/Finish/Release client over a started
   transport)
+
+Typed service helpers:
+
+- `connect(service, transport, options?)`
+- `serve(service, acceptor, implementation, options?)`
+- `serveConnection(service, accepted, implementation, options?)`
 
 Resilience and runtime helpers:
 

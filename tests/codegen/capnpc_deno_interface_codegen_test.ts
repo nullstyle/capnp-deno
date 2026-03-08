@@ -146,9 +146,15 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   );
   assert(
     source.includes(
-      "export const Pinger: RpcServiceToken<Pinger> = Object.freeze({",
+      "export const Pinger: RpcServiceToken<Pinger> = createRpcServiceToken({",
     ),
     "expected generated service token export",
+  );
+  assert(
+    source.includes(
+      'import { createRpcServiceToken } from "@nullstyle/capnp/rpc";',
+    ),
+    "expected generated service token factory import",
   );
   assert(
     source.includes("export interface Pinger {"),

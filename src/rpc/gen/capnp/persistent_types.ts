@@ -36,6 +36,7 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "../../server/rpc_runtime.ts";
+import { createRpcServiceToken } from "../../server/rpc_runtime.ts";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -420,7 +421,7 @@ function createPersistentServiceServer(
   };
 }
 
-export const Persistent: RpcServiceToken<Persistent> = Object.freeze({
+export const Persistent: RpcServiceToken<Persistent> = createRpcServiceToken({
   interfaceId: PersistentInterfaceId,
   interfaceName: "Persistent",
   bootstrapClient: async (

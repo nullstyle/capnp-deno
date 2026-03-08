@@ -20,6 +20,7 @@ import type {
   ReconnectPolicy,
   ReconnectPolicyContext,
   ReconnectRetryInfo,
+  RpcAcceptedTransport,
   RpcBootstrapRequest,
   RpcCallFrameRequest,
   RpcCallRequest,
@@ -69,8 +70,15 @@ import type {
   RpcServerRuntimeWarning,
   RpcServerRuntimeWarningCode,
   RpcServerWasmHost,
+  RpcServiceBinding,
+  RpcServiceConnectionHandle,
+  RpcServiceConnectOptions,
   RpcServiceConstructor,
+  RpcServiceContext,
+  RpcServiceFactory,
+  RpcServiceHandle,
   RpcServiceImplementation,
+  RpcServiceServeOptions,
   RpcServiceToken,
   RpcServiceTokenCreateOptions,
   RpcSessionCreateOptions,
@@ -79,33 +87,24 @@ import type {
   RpcStub,
   RpcStubLifecycle,
   RpcTransport,
+  RpcTransportAcceptor,
   RpcTransportMiddleware,
   RpcWireClientOptions,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
-  TcpConnectOptions,
-  TcpPort,
-  TcpServeHandle,
-  TcpServeOptions,
-  TcpServiceApi,
   TcpTransportListener,
   TcpTransportListenOptions,
   TcpTransportOptions,
-  WebSocketConnectOptions,
-  WebSocketRequestHandler,
-  WebSocketServeHandle,
-  WebSocketServeOptions,
-  WebSocketServiceApi,
+  WebSocketTransportHandler,
+  WebSocketTransportHandlerOptions,
+  WebSocketTransportListener,
+  WebSocketTransportListenOptions,
   WebSocketTransportOptions,
-  WebSocketUrl,
-  WebTransportConnectOptions,
-  WebTransportServeHandle,
-  WebTransportServeOptions,
-  WebTransportServiceApi,
   WebTransportTransportAcceptOptions,
   WebTransportTransportConnectOptions,
+  WebTransportTransportListener,
+  WebTransportTransportListenOptions,
   WebTransportTransportOptions,
-  WebTransportUrl,
 } from "../src/mod.ts";
 
 type Assert<T extends true> = T;
@@ -167,6 +166,7 @@ type PublicTypeExportSmoke = {
   rpcObservabilityAttributes: RpcObservabilityAttributes;
   rpcObservabilityAttributeValue: RpcObservabilityAttributeValue;
   rpcObservabilityEvent: RpcObservabilityEvent;
+  rpcAcceptedTransport: RpcAcceptedTransport;
   rpcReleaseRequest: RpcReleaseRequest;
   rpcReturnException: RpcReturnException;
   rpcReturnExceptionFrameRequest: RpcReturnExceptionFrameRequest;
@@ -175,8 +175,15 @@ type PublicTypeExportSmoke = {
   rpcReturnResultsFrameRequest: RpcReturnResultsFrameRequest;
   rpcPromisedAnswerOp: RpcPromisedAnswerOp;
   rpcPromisedAnswerTarget: RpcPromisedAnswerTarget;
+  rpcServiceBinding: RpcServiceBinding<{ ping(): Promise<void> }>;
+  rpcServiceConnectOptions: RpcServiceConnectOptions;
+  rpcServiceConnectionHandle: RpcServiceConnectionHandle;
+  rpcServiceContext: RpcServiceContext;
+  rpcServiceFactory: RpcServiceFactory<{ ping(): Promise<void> }>;
+  rpcServiceHandle: RpcServiceHandle;
   rpcServiceConstructor: RpcServiceConstructor<{ ping(): Promise<void> }>;
   rpcServiceImplementation: RpcServiceImplementation<{ ping(): Promise<void> }>;
+  rpcServiceServeOptions: RpcServiceServeOptions;
   rpcServiceToken: RpcServiceToken<{ ping(): Promise<void> }>;
   rpcServiceTokenCreateOptions: RpcServiceTokenCreateOptions<{
     ping(): Promise<void>;
@@ -205,33 +212,24 @@ type PublicTypeExportSmoke = {
   rpcSessionCreateOptions: RpcSessionCreateOptions;
   rpcSessionHarnessTransport: RpcSessionHarnessTransport;
   rpcSessionOptions: RpcSessionOptions;
+  rpcTransportAcceptor: RpcTransportAcceptor;
   rpcTransport: RpcTransport;
-  tcpConnectOptions: TcpConnectOptions;
-  tcpPort: TcpPort;
   sessionRpcClientTransportCreateOptions:
     SessionRpcClientTransportCreateOptions;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
-  tcpServeHandle: TcpServeHandle;
-  tcpServeOptions: TcpServeOptions;
-  tcpServiceApi: TcpServiceApi;
   tcpTransportListenOptions: TcpTransportListenOptions;
   tcpTransportListener: TcpTransportListener;
   tcpTransportOptions: TcpTransportOptions;
-  webSocketConnectOptions: WebSocketConnectOptions;
-  webSocketRequestHandler: WebSocketRequestHandler;
-  webSocketServeHandle: WebSocketServeHandle;
-  webSocketServeOptions: WebSocketServeOptions;
-  webSocketServiceApi: WebSocketServiceApi;
+  webSocketTransportHandler: WebSocketTransportHandler;
+  webSocketTransportHandlerOptions: WebSocketTransportHandlerOptions;
+  webSocketTransportListener: WebSocketTransportListener;
+  webSocketTransportListenOptions: WebSocketTransportListenOptions;
   webSocketTransportOptions: WebSocketTransportOptions;
-  webSocketUrl: WebSocketUrl;
-  webTransportConnectOptions: WebTransportConnectOptions;
-  webTransportServeHandle: WebTransportServeHandle;
-  webTransportServeOptions: WebTransportServeOptions;
-  webTransportServiceApi: WebTransportServiceApi;
   webTransportTransportAcceptOptions: WebTransportTransportAcceptOptions;
+  webTransportTransportListener: WebTransportTransportListener;
+  webTransportTransportListenOptions: WebTransportTransportListenOptions;
   webTransportTransportConnectOptions: WebTransportTransportConnectOptions;
   webTransportTransportOptions: WebTransportTransportOptions;
-  webTransportUrl: WebTransportUrl;
 };
 
 type AssertTypeExportsExist = Assert<

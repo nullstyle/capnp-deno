@@ -1,4 +1,4 @@
-import { TCP } from "@nullstyle/capnp";
+import { serve, TcpTransport } from "@nullstyle/capnp";
 import type { RpcPeer, RpcStub } from "@nullstyle/capnp";
 import { Pinger } from "./gen/types.ts";
 import type { Ponger } from "./gen/types.ts";
@@ -22,4 +22,8 @@ class PingServer implements Pinger {
   }
 }
 
-TCP.serve(Pinger, "127.0.0.1", 4000, PingServer);
+serve(
+  Pinger,
+  TcpTransport.listen({ hostname: "127.0.0.1", port: 4000 }),
+  ({ peer }) => new PingServer(peer),
+);

@@ -1,4 +1,7 @@
-import { TcpTransport } from "../../src/rpc/transports/tcp.ts";
+import {
+  type TcpAcceptedTransport,
+  TcpTransport,
+} from "../../src/rpc/transports/tcp.ts";
 import { assert, assertEquals, withTimeout } from "../test_utils.ts";
 
 async function hasLoopbackNetPermission(): Promise<boolean> {
@@ -35,7 +38,7 @@ Deno.test("TcpTransport.listen yields TcpTransport for each connection", async (
   const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
   const addr = listener.addr as Deno.NetAddr;
 
-  const accepted: TcpTransport[] = [];
+  const accepted: TcpAcceptedTransport[] = [];
   const acceptLoop = (async () => {
     for await (const transport of listener.accept()) {
       accepted.push(transport);
@@ -54,6 +57,10 @@ Deno.test("TcpTransport.listen yields TcpTransport for each connection", async (
   assertEquals(accepted.length, 2);
   assert(accepted[0] instanceof TcpTransport, "expected TcpTransport instance");
   assert(accepted[1] instanceof TcpTransport, "expected TcpTransport instance");
+  assertEquals(accepted[0].transport, accepted[0]);
+  assertEquals(accepted[0].localAddress?.transport, "tcp");
+  assertEquals(accepted[0].remoteAddress?.transport, "tcp");
+  assert(accepted[0].id !== undefined, "expected accepted transport id");
 
   // Clean up all connections.
   await client1.close();

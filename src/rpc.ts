@@ -44,35 +44,28 @@ export {
 // === High-Level Service API (DX V2) ===
 
 export {
+  connect,
   createRpcServiceToken,
+  type RpcAcceptedTransport,
   RpcPeer,
   type RpcPeerAddress,
   type RpcPeerOptions,
+  type RpcServiceBinding,
+  type RpcServiceConnectionHandle,
+  type RpcServiceConnectOptions,
   type RpcServiceConstructor,
+  type RpcServiceContext,
+  type RpcServiceFactory,
+  type RpcServiceHandle,
   type RpcServiceImplementation,
+  type RpcServiceServeOptions,
   type RpcServiceToken,
   type RpcServiceTokenCreateOptions,
   type RpcStub,
   type RpcStubLifecycle,
-  TCP,
-  type TcpConnectOptions,
-  type TcpPort,
-  type TcpServeHandle,
-  type TcpServeOptions,
-  type TcpServiceApi,
-  type WebSocketConnectOptions,
-  type WebSocketRequestHandler,
-  type WebSocketServeHandle,
-  type WebSocketServeOptions,
-  type WebSocketServiceApi,
-  type WebSocketUrl,
-  type WebTransportConnectOptions,
-  type WebTransportServeHandle,
-  type WebTransportServeOptions,
-  type WebTransportServiceApi,
-  type WebTransportUrl,
-  WS,
-  WT,
+  type RpcTransportAcceptor,
+  serve,
+  serveConnection,
 } from "./rpc/server/service.ts";
 
 // === Session & Transport ===
@@ -171,6 +164,10 @@ export {
 
 export {
   WebSocketTransport,
+  type WebSocketTransportHandler,
+  type WebSocketTransportHandlerOptions,
+  type WebSocketTransportListener,
+  type WebSocketTransportListenOptions,
   type WebSocketTransportOptions,
 } from "./rpc/transports/websocket.ts";
 
@@ -183,6 +180,8 @@ export {
   WebTransportTransport,
   type WebTransportTransportAcceptOptions,
   type WebTransportTransportConnectOptions,
+  type WebTransportTransportListener,
+  type WebTransportTransportListenOptions,
   type WebTransportTransportOptions,
 } from "./rpc/transports/webtransport.ts";
 

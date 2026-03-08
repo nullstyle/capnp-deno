@@ -5,6 +5,7 @@
  */
 
 import { normalizeTransportError, TransportError } from "../../errors.ts";
+import { SessionError } from "../../errors.ts";
 import {
   CapnpFrameFramer,
   type CapnpFrameFramerOptions,
@@ -13,6 +14,12 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
+import {
+  type RpcAcceptedTransport,
+  type RpcAcceptedTransportAddress,
+  RpcAcceptedTransportQueue,
+  type RpcTransportAcceptSource,
+} from "./internal/accept.ts";
 import type { RpcTransport } from "./internal/transport.ts";
 import {
   awaitWithTimeout,
@@ -90,6 +97,41 @@ export interface WebTransportTransportAcceptOptions
   streamOpenTimeoutMs?: number;
 }
 
+export interface WebTransportTransportListenOptions {
+  /** The TCP hostname/address to bind the QUIC listener to. */
+  hostname?: string;
+  /** The TCP port to bind the QUIC listener to. */
+  port: number;
+  /** Restrict accepted sessions to this URL path. */
+  path?: string;
+  /** TLS certificate chain in PEM format for the QUIC listener. */
+  cert: string;
+  /** TLS private key in PEM format for the QUIC listener. */
+  key: string;
+  /**
+   * Additional QUIC listener options. `cert`, `key`, and `alpnProtocols` are
+   * managed by the transport.
+   */
+  quic?: Omit<Deno.QuicListenOptions, "cert" | "key" | "alpnProtocols">;
+  /** Additional QUIC accept options applied to each incoming connection. */
+  accept?: Deno.QuicAcceptOptions<boolean>;
+  /** Transport options applied to each accepted WebTransport session. */
+  transport?: WebTransportTransportAcceptOptions;
+  /** Callback invoked when session accept/upgrade logic fails. */
+  onConnectionError?: (error: unknown) => void | Promise<void>;
+  /** Observability provider for emitting listener events. */
+  observability?: RpcObservability;
+}
+
+export interface WebTransportTransportListener
+  extends RpcTransportAcceptSource {
+  readonly addr: Deno.NetAddr;
+  accept(): AsyncIterable<AcceptedWebTransportTransport>;
+  close(): Promise<void>;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
 function createResolvers<T>(): PromiseResolvers<T> {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -102,6 +144,73 @@ function createResolvers<T>(): PromiseResolvers<T> {
 
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function requireDenoQuicEndpoint(): typeof Deno.QuicEndpoint {
+  const maybeQuicEndpoint = (Deno as unknown as {
+    QuicEndpoint?: typeof Deno.QuicEndpoint;
+  }).QuicEndpoint;
+  if (typeof maybeQuicEndpoint !== "function") {
+    throw new SessionError(
+      "Deno.QuicEndpoint is unavailable; run Deno with --unstable-net to serve WebTransport",
+    );
+  }
+  return maybeQuicEndpoint;
+}
+
+function requireDenoUpgradeWebTransport(): typeof Deno.upgradeWebTransport {
+  const maybeUpgrade = (Deno as unknown as {
+    upgradeWebTransport?: typeof Deno.upgradeWebTransport;
+  }).upgradeWebTransport;
+  if (typeof maybeUpgrade !== "function") {
+    throw new SessionError(
+      "Deno.upgradeWebTransport is unavailable; run Deno with --unstable-net to serve WebTransport",
+    );
+  }
+  return maybeUpgrade;
+}
+
+function toWebTransportLocalAddress(url: URL): RpcAcceptedTransportAddress {
+  const parsedPort = url.port.length > 0 ? Number(url.port) : undefined;
+  return {
+    transport: "webtransport",
+    hostname: url.hostname,
+    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
+    path: url.pathname,
+  };
+}
+
+function toWebTransportRemoteAddress(
+  input: unknown,
+): RpcAcceptedTransportAddress {
+  if (!input || typeof input !== "object") {
+    return { transport: "webtransport" };
+  }
+  const candidate = input as Record<string, unknown>;
+  return {
+    transport: "webtransport",
+    hostname: typeof candidate.hostname === "string"
+      ? candidate.hostname
+      : undefined,
+    port: typeof candidate.port === "number" && Number.isFinite(candidate.port)
+      ? candidate.port
+      : undefined,
+    path: typeof candidate.path === "string" ? candidate.path : undefined,
+  };
+}
+
+async function reportConnectionError(
+  callback: ((error: unknown) => void | Promise<void>) | undefined,
+  error: unknown,
+): Promise<void> {
+  if (!callback) {
+    return;
+  }
+  try {
+    await callback(error);
+  } catch {
+    // Error callbacks must not destabilize accept loops.
+  }
 }
 
 function requireWebTransportConstructor(): typeof WebTransport {
@@ -311,6 +420,12 @@ export class WebTransportTransport implements RpcTransport {
       stream,
       acceptTransportOptions(options),
     );
+  }
+
+  static listen(
+    options: WebTransportTransportListenOptions,
+  ): WebTransportTransportListener {
+    return new WebTransportTransportListenerImpl(options);
   }
 
   start(
@@ -594,6 +709,238 @@ export class WebTransportTransport implements RpcTransport {
       throw new TransportError(
         `webtransport outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
+    }
+  }
+}
+
+export class AcceptedWebTransportTransport extends WebTransportTransport
+  implements RpcAcceptedTransport {
+  readonly transport: RpcTransport = this;
+  readonly localAddress: RpcAcceptedTransportAddress | null;
+  readonly remoteAddress: RpcAcceptedTransportAddress | null;
+  readonly id: string | undefined;
+
+  constructor(
+    webTransport: WebTransport,
+    stream: WebTransportBidirectionalStream,
+    metadata: {
+      localAddress?: RpcAcceptedTransportAddress | null;
+      remoteAddress?: RpcAcceptedTransportAddress | null;
+      id?: string;
+    },
+    options: WebTransportTransportOptions = {},
+  ) {
+    super(webTransport, stream, options);
+    this.localAddress = metadata.localAddress ?? null;
+    this.remoteAddress = metadata.remoteAddress ?? null;
+    this.id = metadata.id;
+  }
+
+  static async acceptAccepted(
+    webTransport: WebTransport,
+    metadata: {
+      localAddress?: RpcAcceptedTransportAddress | null;
+      remoteAddress?: RpcAcceptedTransportAddress | null;
+      id?: string;
+    },
+    options: WebTransportTransportAcceptOptions = {},
+  ): Promise<AcceptedWebTransportTransport> {
+    const stream = await readFirstBidirectionalStream(
+      webTransport,
+      options.streamOpenTimeoutMs,
+    );
+    return new AcceptedWebTransportTransport(
+      webTransport,
+      stream,
+      metadata,
+      acceptTransportOptions(options),
+    );
+  }
+}
+
+class WebTransportTransportListenerImpl
+  implements WebTransportTransportListener {
+  readonly #options: WebTransportTransportListenOptions;
+  readonly #endpoint: Deno.QuicEndpoint;
+  readonly #listener: Deno.QuicListener;
+  readonly #accepted = new RpcAcceptedTransportQueue<
+    AcceptedWebTransportTransport
+  >();
+  readonly #accepting = new Set<Promise<void>>();
+  readonly #acceptLoop: Promise<void>;
+
+  #closed = false;
+
+  constructor(options: WebTransportTransportListenOptions) {
+    this.#options = options;
+    const QuicEndpoint = requireDenoQuicEndpoint();
+    this.#endpoint = new QuicEndpoint({
+      hostname: options.hostname ?? "0.0.0.0",
+      port: options.port,
+    });
+    this.#listener = this.#endpoint.listen({
+      ...(options.quic ?? {}),
+      alpnProtocols: ["h3"],
+      cert: options.cert,
+      key: options.key,
+    });
+    this.#acceptLoop = this.#runAcceptLoop();
+  }
+
+  get addr(): Deno.NetAddr {
+    return this.#endpoint.addr;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+
+  accept(): AsyncIterable<AcceptedWebTransportTransport> {
+    return this.#accepted.accept();
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+
+    try {
+      this.#listener.stop();
+    } catch {
+      // no-op
+    }
+
+    await this.#accepted.close();
+    try {
+      this.#endpoint.close();
+    } catch {
+      // no-op
+    }
+
+    await this.#acceptLoop;
+    const acceptResults = await Promise.allSettled([...this.#accepting]);
+
+    const failure = acceptResults.find((result) =>
+      result.status === "rejected"
+    );
+    if (failure && failure.status === "rejected") {
+      throw new TransportError("webtransport listener close failed", {
+        cause: failure.reason,
+      });
+    }
+  }
+
+  async #runAcceptLoop(): Promise<void> {
+    while (!this.#closed) {
+      let incoming: Deno.QuicIncoming;
+      try {
+        incoming = await this.#listener.incoming();
+      } catch (error) {
+        if (this.#closed) {
+          return;
+        }
+        await reportConnectionError(this.#options.onConnectionError, error);
+        continue;
+      }
+      this.#trackAcceptIncoming(incoming);
+    }
+  }
+
+  #trackAcceptIncoming(incoming: Deno.QuicIncoming): void {
+    const acceptJob = this.#acceptIncoming(incoming)
+      .catch(async (error) => {
+        if (this.#closed) {
+          return;
+        }
+        await reportConnectionError(this.#options.onConnectionError, error);
+      })
+      .finally(() => {
+        this.#accepting.delete(acceptJob);
+      });
+    this.#accepting.add(acceptJob);
+  }
+
+  async #acceptIncoming(incoming: Deno.QuicIncoming): Promise<void> {
+    let conn: Deno.QuicConn;
+    try {
+      conn = await incoming.accept(this.#options.accept);
+    } catch (error) {
+      if (this.#closed) {
+        return;
+      }
+      await reportConnectionError(this.#options.onConnectionError, error);
+      return;
+    }
+
+    const upgradeWebTransport = requireDenoUpgradeWebTransport();
+    let session: WebTransport & { url: string };
+    try {
+      session = await upgradeWebTransport(conn);
+    } catch (error) {
+      try {
+        conn.close();
+      } catch {
+        // no-op
+      }
+      await reportConnectionError(this.#options.onConnectionError, error);
+      return;
+    }
+
+    if (this.#closed) {
+      try {
+        session.close();
+      } catch {
+        // no-op
+      }
+      return;
+    }
+
+    const url = new URL(session.url);
+    if (this.#options.path && url.pathname !== this.#options.path) {
+      try {
+        session.close({ reason: "webtransport path mismatch" });
+      } catch {
+        try {
+          session.close();
+        } catch {
+          // no-op
+        }
+      }
+      return;
+    }
+
+    let transport: AcceptedWebTransportTransport;
+    try {
+      transport = await AcceptedWebTransportTransport.acceptAccepted(
+        session,
+        {
+          localAddress: toWebTransportLocalAddress(url),
+          remoteAddress: toWebTransportRemoteAddress(conn.remoteAddr),
+          id: `${conn.remoteAddr.hostname}:${conn.remoteAddr.port}`,
+        },
+        this.#options.transport ?? {},
+      );
+    } catch (error) {
+      try {
+        session.close();
+      } catch {
+        // no-op
+      }
+      await reportConnectionError(this.#options.onConnectionError, error);
+      return;
+    }
+
+    if (!this.#accepted.push(transport)) {
+      await transport.close().catch(() => {});
     }
   }
 }

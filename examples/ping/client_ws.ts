@@ -1,4 +1,4 @@
-import { WS } from "@nullstyle/capnp";
+import { connect, WebSocketTransport } from "@nullstyle/capnp";
 import { Pinger } from "./gen/types.ts";
 import type { Ponger } from "./gen/types.ts";
 
@@ -26,9 +26,10 @@ const url = Deno.args[0] ?? DEFAULT_URL;
 const protocol = Deno.args[1] ?? DEFAULT_PROTOCOL;
 const pingCount = parsePositiveInt(Deno.args[2], DEFAULT_PING_COUNT);
 
-using pinger = await WS.connect(Pinger, url, {
-  protocols: protocol,
-});
+using pinger = await connect(
+  Pinger,
+  await WebSocketTransport.connect(url, protocol),
+);
 
 const clientPing = new ClientPing();
 

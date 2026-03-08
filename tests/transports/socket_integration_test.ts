@@ -1,4 +1,5 @@
 import {
+  connect,
   createRpcServiceToken,
   EMPTY_STRUCT_MESSAGE,
   ReconnectingRpcClientTransport,
@@ -6,15 +7,13 @@ import {
   RpcSession,
   type RpcTransport,
   RpcWireClient,
-  TCP,
+  serve,
   TcpTransport,
   TransportError,
   WasmPeer,
   WebSocketTransport,
-  type WebTransportConnectOptions,
   WebTransportTransport,
-  WS,
-  WT,
+  type WebTransportTransportConnectOptions,
 } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
@@ -300,18 +299,16 @@ function reserveTcpPort(): number {
   }
 }
 
-function createWebTransportConnectOptions(): WebTransportConnectOptions {
+function createWebTransportConnectOptions(): WebTransportTransportConnectOptions {
   return {
-    transport: {
-      webTransport: {
-        serverCertificateHashes: [{
-          algorithm: "sha-256",
-          value: new Uint8Array(TEST_WEBTRANSPORT_CERT_HASH),
-        }],
-      },
-      connectTimeoutMs: 2000,
-      streamOpenTimeoutMs: 2000,
+    webTransport: {
+      serverCertificateHashes: [{
+        algorithm: "sha-256",
+        value: new Uint8Array(TEST_WEBTRANSPORT_CERT_HASH),
+      }],
     },
+    connectTimeoutMs: 2000,
+    streamOpenTimeoutMs: 2000,
   };
 }
 
@@ -383,7 +380,7 @@ function immediateReconnectOptions() {
   };
 }
 
-Deno.test("TCP.serve disposes constructor instances on peer disconnect", async () => {
+Deno.test("serve disposes constructor instances on TCP peer disconnect", async () => {
   const connected = deferred<RpcPeer>();
   const disposed = deferred<RpcPeer>();
 
@@ -411,7 +408,11 @@ Deno.test("TCP.serve disposes constructor instances on peer disconnect", async (
   });
 
   const port = reserveTcpPort();
-  const handle = TCP.serve(service, "127.0.0.1", port, DisposableServer);
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(service, listener, DisposableServer);
 
   let conn: Deno.Conn | null = null;
   try {
@@ -437,7 +438,7 @@ Deno.test("TCP.serve disposes constructor instances on peer disconnect", async (
   }
 });
 
-Deno.test("WS.serve disposes constructor instances on peer disconnect", async () => {
+Deno.test("serve disposes constructor instances on WebSocket peer disconnect", async () => {
   const connected = deferred<RpcPeer>();
   const disposed = deferred<RpcPeer>();
 
@@ -465,10 +466,13 @@ Deno.test("WS.serve disposes constructor instances on peer disconnect", async ()
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, DisposableServer, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
     protocols: ["capnp-rpc"],
   });
+  const handle = serve(service, listener, DisposableServer);
 
   let socket: WebSocket | null = null;
   try {
@@ -490,7 +494,7 @@ Deno.test("WS.serve disposes constructor instances on peer disconnect", async ()
   }
 });
 
-Deno.test("WS.connect forwards sub-protocols for handshake", async () => {
+Deno.test("connect forwards WebSocket sub-protocols for handshake", async () => {
   class NoopServer {
     constructor(_peer: RpcPeer) {}
   }
@@ -506,27 +510,34 @@ Deno.test("WS.connect forwards sub-protocols for handshake", async () => {
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, NoopServer, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
     protocols: ["capnp-rpc"],
   });
+  const handle = serve(service, listener, NoopServer);
 
   let client: { close(): Promise<void> } | null = null;
   try {
-    client = await WS.connect(service, `ws://127.0.0.1:${port}/rpc`, {
-      protocols: ["other-rpc", "capnp-rpc"],
-    });
+    client = await connect(
+      service,
+      await WebSocketTransport.connect(
+        `ws://127.0.0.1:${port}/rpc`,
+        ["other-rpc", "capnp-rpc"],
+      ),
+    );
     await client.close();
     client = null;
 
     let handshakeRejected = false;
     try {
-      const unexpectedClient = await WS.connect(
+      const unexpectedClient = await connect(
         service,
-        `ws://127.0.0.1:${port}/rpc`,
-        {
-          protocols: ["other-rpc"],
-        },
+        await WebSocketTransport.connect(
+          `ws://127.0.0.1:${port}/rpc`,
+          ["other-rpc"],
+        ),
       );
       await unexpectedClient.close();
     } catch {
@@ -543,7 +554,7 @@ Deno.test("WS.connect forwards sub-protocols for handshake", async () => {
   }
 });
 
-Deno.test("WS.connect bootstraps through WS.serve runtime root wiring", async () => {
+Deno.test("connect bootstraps through WebSocket runtime root wiring", async () => {
   const service = createRpcServiceToken<
     { rootCapabilityIndex: number },
     Record<string, never>
@@ -564,12 +575,18 @@ Deno.test("WS.connect bootstraps through WS.serve runtime root wiring", async ()
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
   });
+  const handle = serve(service, listener, {});
 
   const client = await withTimeout(
-    WS.connect(service, `ws://127.0.0.1:${port}/rpc`),
+    connect(
+      service,
+      await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+    ),
     2000,
     "ws connect with bootstrap",
   );
@@ -581,7 +598,7 @@ Deno.test("WS.connect bootstraps through WS.serve runtime root wiring", async ()
   }
 });
 
-Deno.test("WS.handler composes with sibling HTTP routes", async () => {
+Deno.test("WebSocketTransport.handler composes with sibling HTTP routes", async () => {
   const service = createRpcServiceToken<
     { rootCapabilityIndex: number },
     Record<string, never>
@@ -602,9 +619,10 @@ Deno.test("WS.handler composes with sibling HTTP routes", async () => {
   });
 
   const port = reserveTcpPort();
-  const wsHandler = WS.handler(service, {}, {
+  const wsHandler = WebSocketTransport.handler({
     protocols: ["capnp-rpc"],
   });
+  const handle = serve(service, wsHandler, {});
   const abortController = new AbortController();
   const server = Deno.serve({
     hostname: "127.0.0.1",
@@ -630,9 +648,13 @@ Deno.test("WS.handler composes with sibling HTTP routes", async () => {
     assertEquals(await apiResponse.text(), "capnweb-route-placeholder");
 
     client = await withTimeout(
-      WS.connect(service, `ws://127.0.0.1:${port}/rpc`, {
-        protocols: ["capnp-rpc"],
-      }),
+      connect(
+        service,
+        await WebSocketTransport.connect(
+          `ws://127.0.0.1:${port}/rpc`,
+          ["capnp-rpc"],
+        ),
+      ),
       2000,
       "ws handler connect with bootstrap",
     );
@@ -641,22 +663,12 @@ Deno.test("WS.handler composes with sibling HTTP routes", async () => {
     await client?.close().catch(() => {});
     abortController.abort();
     await server.finished.catch(() => {});
-    await wsHandler.close();
+    await handle.close();
   }
 });
 
-Deno.test("WS.handler enforces handshake and path checks", async () => {
-  const service = createRpcServiceToken<
-    Record<string, never>,
-    Record<string, never>
-  >({
-    interfaceId: 0x124n,
-    interfaceName: "WsHandlerValidationProbe",
-    bootstrapClient: () => Promise.resolve({}),
-    registerServer: () => ({ capabilityIndex: 0 }),
-  });
-
-  const wsHandler = WS.handler(service, {}, {
+Deno.test("WebSocketTransport.handler enforces handshake and path checks", async () => {
+  const wsHandler = WebSocketTransport.handler({
     path: "/rpc",
     protocols: ["capnp-rpc"],
   });
@@ -681,7 +693,7 @@ Deno.test("WS.handler enforces handshake and path checks", async () => {
   }
 });
 
-Deno.test("WS.serve reports websocket upgrade failures via onConnectionError", async () => {
+Deno.test("WebSocketTransport.listen reports websocket upgrade failures via onConnectionError", async () => {
   const connectionError = deferred<unknown>();
   const service = createRpcServiceToken<
     Record<string, never>,
@@ -696,12 +708,15 @@ Deno.test("WS.serve reports websocket upgrade failures via onConnectionError", a
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
     onConnectionError: (error) => {
       connectionError.resolve(error);
     },
   });
+  const handle = serve(service, listener, {});
 
   let conn: Deno.Conn | null = null;
   try {
@@ -750,7 +765,7 @@ Deno.test("WS.serve reports websocket upgrade failures via onConnectionError", a
   }
 });
 
-Deno.test("WS.serve forwards transport frame-limit failures to transport.onError", async () => {
+Deno.test("serve forwards WebSocket frame-limit failures to transport.onError", async () => {
   const transportError = deferred<unknown>();
   const service = createRpcServiceToken<
     Record<string, never>,
@@ -767,7 +782,9 @@ Deno.test("WS.serve forwards transport frame-limit failures to transport.onError
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, {}, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
     transport: {
       frameLimits: {
@@ -778,6 +795,7 @@ Deno.test("WS.serve forwards transport frame-limit failures to transport.onError
       },
     },
   });
+  const handle = serve(service, listener, {});
 
   let socket: WebSocket | null = null;
   try {
@@ -841,9 +859,12 @@ Deno.test("ReconnectingRpcClientTransport retries bootstrap-cap calls over live 
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, ReconnectRootServer, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
   });
+  const handle = serve(service, listener, ReconnectRootServer);
 
   let connectCount = 0;
   const outboundCapabilityIndexes: number[] = [];
@@ -925,9 +946,12 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capabilities over
   });
 
   const port = reserveTcpPort();
-  const handle = WS.serve(service, "127.0.0.1", port, ReconnectRemapServer, {
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
     path: "/rpc",
   });
+  const handle = serve(service, listener, ReconnectRemapServer);
 
   let connectCount = 0;
   const outboundCapabilityIndexes: number[] = [];
@@ -1026,7 +1050,7 @@ Deno.test("ReconnectingRpcClientTransport remaps non-bootstrap capabilities over
 });
 
 Deno.test({
-  name: "WT.connect bootstraps through WT.serve runtime root wiring",
+  name: "connect bootstraps through WebTransport runtime root wiring",
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
     const service = createRpcServiceToken<
@@ -1049,17 +1073,22 @@ Deno.test({
     });
 
     const port = reserveTcpPort();
-    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
       path: "/rpc",
       cert: TEST_WEBTRANSPORT_CERT_PEM,
       key: TEST_WEBTRANSPORT_KEY_PEM,
     });
+    const handle = serve(service, listener, {});
 
     const client = await withTimeout(
-      WT.connect(
+      connect(
         service,
-        `https://127.0.0.1:${port}/rpc`,
-        createWebTransportConnectOptions(),
+        await WebTransportTransport.connect(
+          `https://127.0.0.1:${port}/rpc`,
+          createWebTransportConnectOptions(),
+        ),
       ),
       4000,
       "wt connect with bootstrap",
@@ -1075,7 +1104,7 @@ Deno.test({
 
 Deno.test({
   name:
-    "WT.serve accepts later sessions while an earlier session delays its first stream",
+    "serve accepts later WebTransport sessions while an earlier session delays its first stream",
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
     const service = createRpcServiceToken<
@@ -1098,11 +1127,14 @@ Deno.test({
     });
 
     const port = reserveTcpPort();
-    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
       path: "/rpc",
       cert: TEST_WEBTRANSPORT_CERT_PEM,
       key: TEST_WEBTRANSPORT_KEY_PEM,
     });
+    const handle = serve(service, listener, {});
 
     let slowClient: WebTransport | null = null;
     let client:
@@ -1111,16 +1143,22 @@ Deno.test({
     try {
       slowClient = new WebTransport(
         `https://127.0.0.1:${port}/rpc`,
-        createWebTransportConnectOptions().transport?.webTransport,
+        createWebTransportConnectOptions().webTransport,
       );
       await withTimeout(slowClient.ready, 4000, "slow wt ready");
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
 
       client = await withTimeout(
-        WT.connect(service, `https://127.0.0.1:${port}/rpc`, {
-          ...createWebTransportConnectOptions(),
-          bootstrap: { timeoutMs: 1000 },
-        }),
+        connect(
+          service,
+          await WebTransportTransport.connect(
+            `https://127.0.0.1:${port}/rpc`,
+            createWebTransportConnectOptions(),
+          ),
+          {
+            bootstrap: { timeoutMs: 1000 },
+          },
+        ),
         4000,
         "wt connect while first session has no stream",
       );
@@ -1138,7 +1176,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "WT.serve disposes constructor instances on peer disconnect",
+  name: "serve disposes constructor instances on WebTransport peer disconnect",
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
     const connected = deferred<RpcPeer>();
@@ -1168,17 +1206,20 @@ Deno.test({
     });
 
     const port = reserveTcpPort();
-    const handle = WT.serve(service, "127.0.0.1", port, DisposableServer, {
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
       path: "/rpc",
       cert: TEST_WEBTRANSPORT_CERT_PEM,
       key: TEST_WEBTRANSPORT_KEY_PEM,
     });
+    const handle = serve(service, listener, DisposableServer);
 
     let client: WebTransport | null = null;
     try {
       client = new WebTransport(
         `https://127.0.0.1:${port}/rpc`,
-        createWebTransportConnectOptions().transport?.webTransport,
+        createWebTransportConnectOptions().webTransport,
       );
       await withTimeout(client.ready, 4000, "wt ready");
       const stream = await withTimeout(
@@ -1209,7 +1250,7 @@ Deno.test({
 });
 
 Deno.test({
-  name: "WT.serve accepts direct WebTransportTransport clients",
+  name: "serve accepts direct WebTransportTransport clients",
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
     const service = createRpcServiceToken<
@@ -1232,11 +1273,14 @@ Deno.test({
     });
 
     const port = reserveTcpPort();
-    const handle = WT.serve(service, "127.0.0.1", port, {}, {
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
       path: "/rpc",
       cert: TEST_WEBTRANSPORT_CERT_PEM,
       key: TEST_WEBTRANSPORT_KEY_PEM,
     });
+    const handle = serve(service, listener, {});
 
     let transport: WebTransportTransport | null = null;
     let client: RpcWireClient | null = null;
@@ -1244,7 +1288,7 @@ Deno.test({
       transport = await withTimeout(
         WebTransportTransport.connect(
           `https://127.0.0.1:${port}/rpc`,
-          createWebTransportConnectOptions().transport,
+          createWebTransportConnectOptions(),
         ),
         4000,
         "direct wt transport connect",

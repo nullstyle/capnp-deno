@@ -13,8 +13,16 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
+import { SessionError } from "../../errors.ts";
+import {
+  type RpcAcceptedTransport,
+  type RpcAcceptedTransportAddress,
+  RpcAcceptedTransportQueue,
+  type RpcTransportAcceptSource,
+} from "./internal/accept.ts";
 import type { RpcTransport } from "./internal/transport.ts";
 import {
+  notifyTransportClose,
   OutboundFrameQueue,
   type QueuedOutboundFrame,
 } from "./internal/transport_internal.ts";
@@ -32,6 +40,12 @@ export interface WebSocketTransportOptions {
    * If not provided, errors are thrown.
    */
   onError?: (error: unknown) => void | Promise<void>;
+  /**
+   * Lifecycle callback invoked once when the transport transitions to closed.
+   *
+   * This fires for both local close() and remote peer disconnects.
+   */
+  onClose?: () => void | Promise<void>;
   /**
    * Whether to reject WebSocket text frames. Cap'n Proto uses binary only.
    * Defaults to `true`.
@@ -67,8 +81,112 @@ export interface WebSocketTransportOptions {
   observability?: RpcObservability;
 }
 
+export interface WebSocketTransportHandlerOptions {
+  /** Restrict accepted requests to this URL path. */
+  path?: string;
+  /** Supported sub-protocol(s) for the WebSocket handshake. */
+  protocols?: string | readonly string[];
+  /** Transport options applied to accepted WebSocket connections. */
+  transport?: WebSocketTransportOptions;
+  /** Callback invoked when request upgrade or accept logic fails. */
+  onConnectionError?: (error: unknown) => void | Promise<void>;
+  /** Observability provider for emitting handler/listener events. */
+  observability?: RpcObservability;
+}
+
+export interface WebSocketTransportListenOptions
+  extends WebSocketTransportHandlerOptions {
+  /** TCP port to bind the HTTP listener to. */
+  port: number;
+  /** Hostname/address to bind to. Defaults to `"0.0.0.0"`. */
+  hostname?: string;
+}
+
+export interface WebSocketTransportHandler extends RpcTransportAcceptSource {
+  accept(): AsyncIterable<AcceptedWebSocketTransport>;
+  handle(request: Request): Promise<Response>;
+  close(): Promise<void>;
+  [Symbol.dispose](): void;
+  [Symbol.asyncDispose](): Promise<void>;
+}
+
+export interface WebSocketTransportListener extends WebSocketTransportHandler {
+  readonly addr: Deno.Addr;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function requireDenoServe(): typeof Deno.serve {
+  const maybeServe = (Deno as unknown as { serve?: typeof Deno.serve }).serve;
+  if (typeof maybeServe !== "function") {
+    throw new SessionError(
+      "Deno.serve is unavailable; run with a runtime that supports HTTP/WebSocket serve",
+    );
+  }
+  return maybeServe;
+}
+
+function isWebSocketUpgradeRequest(request: Request): boolean {
+  const upgrade = request.headers.get("upgrade");
+  return typeof upgrade === "string" && upgrade.toLowerCase() === "websocket";
+}
+
+function parseRequestedWebSocketProtocols(request: Request): string[] {
+  const raw = request.headers.get("sec-websocket-protocol");
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function resolveWebSocketProtocol(
+  request: Request,
+  supported: string | readonly string[] | undefined,
+): string | null | undefined {
+  if (supported === undefined) return undefined;
+  const supportedList = typeof supported === "string" ? [supported] : [
+    ...supported,
+  ];
+  if (supportedList.length === 0) return undefined;
+
+  const requested = parseRequestedWebSocketProtocols(request);
+  if (requested.length === 0) return null;
+  for (const candidate of requested) {
+    if (supportedList.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function toWebSocketLocalAddress(
+  request: Request,
+): RpcAcceptedTransportAddress {
+  const url = new URL(request.url);
+  const parsedPort = url.port.length > 0 ? Number(url.port) : undefined;
+  return {
+    transport: "websocket",
+    hostname: url.hostname,
+    port: Number.isInteger(parsedPort) ? parsedPort : undefined,
+    path: url.pathname,
+  };
+}
+
+async function reportConnectionError(
+  callback: ((error: unknown) => void | Promise<void>) | undefined,
+  error: unknown,
+): Promise<void> {
+  if (!callback) {
+    return;
+  }
+  try {
+    await callback(error);
+  } catch {
+    // Error callbacks must not destabilize the upgrade or listen loop.
+  }
 }
 
 function toBinary(
@@ -127,6 +245,7 @@ export class WebSocketTransport implements RpcTransport {
 
   #outbound: OutboundFrameQueue<PendingOutboundFrame>;
   #drainLoop: Promise<void> | null = null;
+  #closeNotified = false;
 
   #onMessage = (event: MessageEvent) => {
     this.#inboundChain = this.#inboundChain
@@ -162,6 +281,7 @@ export class WebSocketTransport implements RpcTransport {
       `websocket closed (code=${event.code} reason=${event.reason || ""})`,
     );
     this.#outbound.rejectQueued(error);
+    this.#notifyClose();
     if (this.options.onError) {
       void Promise.resolve(this.options.onError(error));
     }
@@ -241,6 +361,18 @@ export class WebSocketTransport implements RpcTransport {
     });
 
     return new WebSocketTransport(socket, options);
+  }
+
+  static handler(
+    options: WebSocketTransportHandlerOptions = {},
+  ): WebSocketTransportHandler {
+    return new WebSocketTransportHandlerImpl(options);
+  }
+
+  static listen(
+    options: WebSocketTransportListenOptions,
+  ): WebSocketTransportListener {
+    return new WebSocketTransportListenerImpl(options);
   }
 
   start(
@@ -344,6 +476,7 @@ export class WebSocketTransport implements RpcTransport {
       this.socket.removeEventListener("close", this.#onClose);
       this.#listenersAttached = false;
     }
+    this.#notifyClose();
 
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.websocket.close",
@@ -456,6 +589,14 @@ export class WebSocketTransport implements RpcTransport {
     });
   }
 
+  #notifyClose(): void {
+    if (this.#closeNotified) {
+      return;
+    }
+    this.#closeNotified = true;
+    notifyTransportClose(this.options, "websocket onClose callback failed");
+  }
+
   private assertInboundFrameSize(frame: Uint8Array): void {
     const max = this.options.maxInboundFrameBytes;
     if (max !== undefined && frame.byteLength > max) {
@@ -471,6 +612,177 @@ export class WebSocketTransport implements RpcTransport {
       throw new TransportError(
         `websocket outbound frame size ${frame.byteLength} exceeds configured limit ${max}`,
       );
+    }
+  }
+}
+
+export class AcceptedWebSocketTransport extends WebSocketTransport
+  implements RpcAcceptedTransport {
+  readonly transport: RpcTransport = this;
+  readonly localAddress: RpcAcceptedTransportAddress | null;
+  readonly remoteAddress: RpcAcceptedTransportAddress | null;
+  readonly id: string | undefined;
+
+  constructor(
+    socket: WebSocket,
+    metadata: {
+      localAddress?: RpcAcceptedTransportAddress | null;
+      remoteAddress?: RpcAcceptedTransportAddress | null;
+      id?: string;
+    },
+    options: WebSocketTransportOptions = {},
+  ) {
+    super(socket, options);
+    this.localAddress = metadata.localAddress ?? null;
+    this.remoteAddress = metadata.remoteAddress ?? null;
+    this.id = metadata.id;
+  }
+}
+
+class WebSocketTransportHandlerImpl implements WebSocketTransportHandler {
+  readonly #options: WebSocketTransportHandlerOptions;
+  readonly #accepted = new RpcAcceptedTransportQueue<
+    AcceptedWebSocketTransport
+  >();
+
+  #closed = false;
+
+  constructor(options: WebSocketTransportHandlerOptions) {
+    this.#options = options;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+
+  accept(): AsyncIterable<AcceptedWebSocketTransport> {
+    return this.#accepted.accept();
+  }
+
+  async handle(request: Request): Promise<Response> {
+    if (this.#closed) {
+      return new Response("transport handler is closed", { status: 503 });
+    }
+
+    if (!isWebSocketUpgradeRequest(request)) {
+      return new Response("websocket upgrade required", { status: 426 });
+    }
+
+    if (this.#options.path) {
+      const url = new URL(request.url);
+      if (url.pathname !== this.#options.path) {
+        return new Response("not found", { status: 404 });
+      }
+    }
+
+    const selectedProtocol = resolveWebSocketProtocol(
+      request,
+      this.#options.protocols,
+    );
+    if (selectedProtocol === null) {
+      return new Response("websocket protocol mismatch", { status: 426 });
+    }
+
+    let socket: WebSocket;
+    let response: Response;
+    try {
+      ({ socket, response } = selectedProtocol === undefined
+        ? Deno.upgradeWebSocket(request)
+        : Deno.upgradeWebSocket(request, { protocol: selectedProtocol }));
+    } catch (error) {
+      await reportConnectionError(this.#options.onConnectionError, error);
+      return new Response("failed to upgrade websocket", { status: 400 });
+    }
+
+    const transport = new AcceptedWebSocketTransport(
+      socket,
+      {
+        localAddress: toWebSocketLocalAddress(request),
+        remoteAddress: { transport: "websocket" },
+        id: request.headers.get("sec-websocket-key") ?? undefined,
+      },
+      this.#options.transport ? { ...this.#options.transport } : undefined,
+    );
+    if (!this.#accepted.push(transport)) {
+      await transport.close().catch(() => {});
+    }
+    return response;
+  }
+
+  close(): Promise<void> {
+    if (this.#closed) {
+      return Promise.resolve();
+    }
+    this.#closed = true;
+    return this.#accepted.close();
+  }
+}
+
+class WebSocketTransportListenerImpl implements WebSocketTransportListener {
+  readonly #handler: WebSocketTransportHandlerImpl;
+  readonly #server: Deno.HttpServer<Deno.NetAddr>;
+
+  #closed = false;
+
+  constructor(options: WebSocketTransportListenOptions) {
+    this.#handler = new WebSocketTransportHandlerImpl(options);
+    this.#server = requireDenoServe()({
+      hostname: options.hostname ?? "0.0.0.0",
+      port: options.port,
+      onListen: () => {},
+    }, (request) => this.#handler.handle(request));
+  }
+
+  get addr(): Deno.Addr {
+    return this.#server.addr;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  [Symbol.dispose](): void {
+    void this.close();
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+
+  accept(): AsyncIterable<AcceptedWebSocketTransport> {
+    return this.#handler.accept();
+  }
+
+  handle(request: Request): Promise<Response> {
+    return this.#handler.handle(request);
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    await this.#server.shutdown().catch(() => {});
+
+    let closeError: unknown;
+    try {
+      await this.#handler.close();
+    } catch (error) {
+      closeError = error;
+    }
+
+    await this.#server.finished.catch(() => {});
+
+    if (closeError !== undefined) {
+      throw closeError;
     }
   }
 }

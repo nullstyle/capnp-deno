@@ -1,8 +1,11 @@
-import { TCP } from "@nullstyle/capnp";
+import { connect, TcpTransport } from "@nullstyle/capnp";
 import { Pinger } from "./gen/types.ts";
 import type { Ponger } from "./gen/types.ts";
 
-using pinger = await TCP.connect(Pinger, "127.0.0.1", 4000);
+using pinger = await connect(
+  Pinger,
+  await TcpTransport.connect("127.0.0.1", 4000),
+);
 
 class ClientPing implements Ponger {
   pong(count: number): Promise<void> {

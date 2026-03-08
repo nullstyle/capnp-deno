@@ -38,6 +38,39 @@ async function withPatchedGlobalWebTransport(
   }
 }
 
+async function withPatchedDenoQuicEndpoint(
+  replacement: unknown,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const denoMutable = Deno as unknown as {
+    QuicEndpoint?: typeof Deno.QuicEndpoint;
+  };
+  const original = denoMutable.QuicEndpoint;
+  denoMutable.QuicEndpoint = replacement as typeof Deno.QuicEndpoint;
+  try {
+    await fn();
+  } finally {
+    denoMutable.QuicEndpoint = original;
+  }
+}
+
+async function withPatchedDenoUpgradeWebTransport(
+  replacement: unknown,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const denoMutable = Deno as unknown as {
+    upgradeWebTransport?: typeof Deno.upgradeWebTransport;
+  };
+  const original = denoMutable.upgradeWebTransport;
+  denoMutable.upgradeWebTransport =
+    replacement as typeof Deno.upgradeWebTransport;
+  try {
+    await fn();
+  } finally {
+    denoMutable.upgradeWebTransport = original;
+  }
+}
+
 function createFakeReaderHarness(): {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   push: (chunk: Uint8Array) => void;
@@ -142,6 +175,102 @@ function createFakeBidiStream(
     writable: {
       getWriter: () => writer,
     } as WritableStream<Uint8Array> as WebTransportSendStream,
+  };
+}
+
+function createFakeIncomingBidiReaderHarness(): {
+  reader: ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
+  push: (stream: WebTransportBidirectionalStream) => void;
+  close: () => void;
+} {
+  const queue: Array<
+    ReadableStreamReadResult<WebTransportBidirectionalStream>
+  > = [];
+  let pending:
+    | ReturnType<
+      typeof deferred<ReadableStreamReadResult<WebTransportBidirectionalStream>>
+    >
+    | null = null;
+  let closed = false;
+
+  function resolveRead(
+    result: ReadableStreamReadResult<WebTransportBidirectionalStream>,
+  ): void {
+    if (pending) {
+      pending.resolve(result);
+      pending = null;
+      return;
+    }
+    queue.push(result);
+  }
+
+  const reader: ReadableStreamDefaultReader<WebTransportBidirectionalStream> = {
+    read(): Promise<ReadableStreamReadResult<WebTransportBidirectionalStream>> {
+      if (queue.length > 0) {
+        return Promise.resolve(queue.shift()!);
+      }
+      pending = deferred<
+        ReadableStreamReadResult<WebTransportBidirectionalStream>
+      >();
+      return pending.promise;
+    },
+    cancel(): Promise<void> {
+      if (!closed) {
+        closed = true;
+        resolveRead({ done: true, value: undefined });
+      }
+      return Promise.resolve();
+    },
+    releaseLock(): void {},
+    closed: Promise.resolve(undefined),
+  } as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
+
+  return {
+    reader,
+    push(stream: WebTransportBidirectionalStream): void {
+      if (closed) return;
+      resolveRead({ done: false, value: stream });
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      resolveRead({ done: true, value: undefined });
+    },
+  };
+}
+
+function createFakeAcceptedSession(url: string): {
+  session: WebTransport & { url: string };
+  pushStream: (stream: WebTransportBidirectionalStream) => void;
+  close: () => void;
+} {
+  const incoming = createFakeIncomingBidiReaderHarness();
+  const closed = deferred<WebTransportCloseInfo>();
+  let closedOnce = false;
+
+  return {
+    session: {
+      url,
+      closed: closed.promise,
+      incomingBidirectionalStreams: {
+        getReader: () => incoming.reader,
+      } as ReadableStream<WebTransportBidirectionalStream>,
+      close: () => {
+        if (closedOnce) return;
+        closedOnce = true;
+        incoming.close();
+        closed.resolve({ closeCode: 0, reason: "closed" });
+      },
+    } as WebTransport & { url: string },
+    pushStream(stream: WebTransportBidirectionalStream): void {
+      incoming.push(stream);
+    },
+    close(): void {
+      if (closedOnce) return;
+      closedOnce = true;
+      incoming.close();
+      closed.resolve({ closeCode: 0, reason: "closed" });
+    },
   };
 }
 
@@ -626,5 +755,175 @@ Deno.test({
       "webtransport close after stream eof",
     );
     assertEquals(webTransportCloseCalls, 1);
+  },
+});
+
+Deno.test({
+  name:
+    "WebTransportTransport.listen accepts later sessions while an earlier session waits for its first stream",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    class FakeQuicConn {
+      readonly remoteAddr: Deno.NetAddr;
+
+      constructor(hostname: string, port: number) {
+        this.remoteAddr = { transport: "udp", hostname, port };
+      }
+
+      close(): void {
+        // no-op
+      }
+    }
+
+    class FakeQuicIncoming {
+      readonly #conn: FakeQuicConn;
+
+      constructor(conn: FakeQuicConn) {
+        this.#conn = conn;
+      }
+
+      accept(): Promise<Deno.QuicConn> {
+        return Promise.resolve(this.#conn as unknown as Deno.QuicConn);
+      }
+    }
+
+    class FakeQuicListener {
+      readonly #queue: FakeQuicIncoming[] = [];
+      #pending: ReturnType<typeof deferred<FakeQuicIncoming>> | null = null;
+      #stopped = false;
+
+      incoming(): Promise<Deno.QuicIncoming> {
+        if (this.#queue.length > 0) {
+          return Promise.resolve(
+            this.#queue.shift()! as unknown as Deno.QuicIncoming,
+          );
+        }
+        if (this.#stopped) {
+          return Promise.reject(new Error("listener stopped"));
+        }
+        this.#pending = deferred<FakeQuicIncoming>();
+        return this.#pending.promise as unknown as Promise<Deno.QuicIncoming>;
+      }
+
+      enqueue(incoming: FakeQuicIncoming): void {
+        if (this.#pending) {
+          this.#pending.resolve(incoming);
+          this.#pending = null;
+          return;
+        }
+        this.#queue.push(incoming);
+      }
+
+      stop(): void {
+        this.#stopped = true;
+        if (this.#pending) {
+          this.#pending.reject(new Error("listener stopped"));
+          this.#pending = null;
+        }
+      }
+    }
+
+    class FakeQuicEndpoint {
+      static last: FakeQuicEndpoint | null = null;
+
+      readonly addr: Deno.NetAddr;
+      readonly listener = new FakeQuicListener();
+      readonly #sessions: Array<{ close(): void }> = [];
+
+      constructor(options: { hostname?: string; port: number }) {
+        this.addr = {
+          transport: "udp",
+          hostname: options.hostname ?? "0.0.0.0",
+          port: options.port,
+        };
+        FakeQuicEndpoint.last = this;
+      }
+
+      listen(): Deno.QuicListener {
+        return this.listener as unknown as Deno.QuicListener;
+      }
+
+      trackSession(session: { close(): void }): void {
+        this.#sessions.push(session);
+      }
+
+      close(): void {
+        for (const session of this.#sessions) {
+          session.close();
+        }
+        this.listener.stop();
+      }
+    }
+
+    const sessions = new Map<
+      FakeQuicConn,
+      ReturnType<typeof createFakeAcceptedSession>
+    >();
+
+    await withPatchedDenoQuicEndpoint(FakeQuicEndpoint, async () => {
+      await withPatchedDenoUpgradeWebTransport((conn: Deno.QuicConn) => {
+        return Promise.resolve(
+          sessions.get(conn as unknown as FakeQuicConn)!.session,
+        );
+      }, async () => {
+        const listener = WebTransportTransport.listen({
+          hostname: "127.0.0.1",
+          port: 4443,
+          path: "/rpc",
+          cert: "cert",
+          key: "key",
+        });
+
+        const endpoint = FakeQuicEndpoint.last!;
+        const slowConn = new FakeQuicConn("127.0.0.1", 5001);
+        const fastConn = new FakeQuicConn("127.0.0.1", 5002);
+        const slowSession = createFakeAcceptedSession(
+          "https://127.0.0.1:4443/rpc",
+        );
+        const fastSession = createFakeAcceptedSession(
+          "https://127.0.0.1:4443/rpc",
+        );
+        endpoint.trackSession(slowSession);
+        endpoint.trackSession(fastSession);
+        sessions.set(slowConn, slowSession);
+        sessions.set(fastConn, fastSession);
+
+        const fastReader = createFakeReaderHarness();
+        const fastWriter = createFakeWriterHarness();
+        fastSession.pushStream(
+          createFakeBidiStream(fastReader.reader, fastWriter.writer),
+        );
+
+        const acceptLoop = (async () => {
+          for await (const transport of listener.accept()) {
+            return transport;
+          }
+          return null;
+        })();
+
+        endpoint.listener.enqueue(new FakeQuicIncoming(slowConn));
+        endpoint.listener.enqueue(new FakeQuicIncoming(fastConn));
+
+        const accepted = await withTimeout(
+          acceptLoop,
+          1000,
+          "webtransport listener accepted transport",
+        );
+        assert(accepted !== null, "expected accepted webtransport transport");
+        assertEquals(accepted.transport, accepted);
+        assertEquals(accepted.localAddress?.transport, "webtransport");
+        assertEquals(accepted.localAddress?.path, "/rpc");
+        assertEquals(accepted.remoteAddress?.transport, "webtransport");
+        assertEquals(accepted.id, "127.0.0.1:5002");
+
+        await accepted.close();
+        await withTimeout(
+          listener.close(),
+          1000,
+          "webtransport listener close with pending first stream",
+        );
+      });
+    });
   },
 });

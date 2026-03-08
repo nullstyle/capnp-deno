@@ -254,8 +254,10 @@ const bridge = new RpcServerBridge({
 });
 ```
 
-- If you are using the high-level service API, prefer `WS.serve(...)` /
-  `TCP.serve(...)`, which configures bootstrap root wiring for you.
+- If you are using the high-level service API, prefer `serve(...)` over
+  `TcpTransport.listen(...)`, `WebSocketTransport.listen()/handler()`, or
+  `WebTransportTransport.listen()`, which configures bootstrap root wiring for
+  you.
 
 See [getting_started_rpc.md](getting_started_rpc.md) for a complete example.
 
@@ -383,9 +385,10 @@ or `promisedAnswer` (1).
 Transport errors (`TransportError`) cover I/O problems in the underlying network
 or IPC layer.
 
-### WebSocket Service Handshake (`WS.serve` / `WS.handler`)
+### WebSocket Handshake (`WebSocketTransport.listen` / `WebSocketTransport.handler`)
 
-When using high-level `WS.serve(...)` or `WS.handler(...)`:
+When using `WebSocketTransport.listen(...)` or
+`WebSocketTransport.handler(...)`:
 
 - non-WebSocket HTTP requests to the endpoint receive `426`
 - path mismatches (when `path` is configured) receive `404`
@@ -395,7 +398,8 @@ When using high-level `WS.serve(...)` or `WS.handler(...)`:
 If browser clients fail to connect, verify that:
 
 1. Client URL path matches your router and any configured
-   `WS.serve(..., { path })` / `WS.handler(..., { path })`.
+   `WebSocketTransport.listen(..., { path })` /
+   `WebSocketTransport.handler(..., { path })`.
 2. Client `protocols` include at least one server-supported protocol.
 3. Server is reachable over `ws://` or `wss://` and reverse proxies preserve
    upgrade headers.

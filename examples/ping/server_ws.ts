@@ -1,4 +1,8 @@
-import { WS } from "@nullstyle/capnp";
+import {
+  type RpcServiceHandle,
+  serve,
+  WebSocketTransport,
+} from "@nullstyle/capnp";
 import type { RpcPeer, RpcStub } from "@nullstyle/capnp";
 import { Pinger } from "./gen/types.ts";
 import type { Ponger } from "./gen/types.ts";
@@ -43,12 +47,18 @@ const path = Deno.args[2] ?? DEFAULT_PATH;
 const apiPath = Deno.args[3] ?? DEFAULT_API_PATH;
 const protocol = Deno.args[4] ?? DEFAULT_PROTOCOL;
 
-const wsHandler = WS.handler(Pinger, PingServer, {
+const wsHandler = WebSocketTransport.handler({
+  path,
   protocols: protocol,
   onConnectionError(error: unknown): void {
     console.error("connection error", error);
   },
 });
+const rpcServer: RpcServiceHandle = serve(
+  Pinger,
+  wsHandler,
+  ({ peer }) => new PingServer(peer),
+);
 const server = Deno.serve({
   hostname: host,
   port,
@@ -67,4 +77,4 @@ const server = Deno.serve({
 console.log(
   `ping ws server listening on ws://${host}:${port}${path} (protocol: ${protocol}, sibling route: ${apiPath})`,
 );
-await server.finished.finally(() => wsHandler.close().catch(() => {}));
+await server.finished.finally(() => rpcServer.close().catch(() => {}));

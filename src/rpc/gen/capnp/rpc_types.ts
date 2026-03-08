@@ -36,6 +36,7 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "../../server/rpc_runtime.ts";
+import { createRpcServiceToken } from "../../server/rpc_runtime.ts";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,

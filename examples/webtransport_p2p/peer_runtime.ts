@@ -1,8 +1,10 @@
 import {
+  connect,
   type RpcPeer,
+  type RpcServiceHandle,
   type RpcStub,
-  type WebTransportServeHandle,
-  WT,
+  serve,
+  WebTransportTransport,
 } from "@nullstyle/capnp";
 import { PeerNode } from "./gen/mod.ts";
 import type {
@@ -134,7 +136,7 @@ export class PeerRuntime {
   readonly #path: string;
   readonly #tls: WebTransportTlsMaterial;
   #name: string;
-  #server: WebTransportServeHandle | null = null;
+  #server: RpcServiceHandle | null = null;
   #closed = false;
   #nextInboundId = 0;
   readonly #inbound = new Map<string, InboundSession>();
@@ -163,12 +165,15 @@ export class PeerRuntime {
 
   start(): Promise<void> {
     if (this.#server) return Promise.resolve();
-    this.#server = WT.serve(
+    const peerNodeServer = createPeerNodeServer(this);
+    this.#server = serve(
       PeerNode,
-      this.#host,
-      this.#port,
-      createPeerNodeServer(this),
-      createServerOptions(this.#path, this.#tls.certPem, this.#tls.keyPem),
+      WebTransportTransport.listen({
+        hostname: this.#host,
+        port: this.#port,
+        ...createServerOptions(this.#path, this.#tls.certPem, this.#tls.keyPem),
+      }),
+      peerNodeServer,
     );
     this.print(`listening on ${this.listenUrl}`);
     this.print(`server certificate pin sha256=${this.#tls.certHashHex}`);
@@ -197,10 +202,12 @@ export class PeerRuntime {
     const label = { value: url };
     this.#connecting.add(url);
     try {
-      remote = await WT.connect(
+      remote = await connect(
         PeerNode,
-        url,
-        createConnectOptions(this.#tls.certHash),
+        await WebTransportTransport.connect(
+          url,
+          createConnectOptions(this.#tls.certHash),
+        ),
       );
       const result = await remote.connect(
         createLocalPeerEvents(this, () => label.value),

@@ -1,4 +1,5 @@
-import { TCP } from "@nullstyle/capnp";
+import { Command } from "@cliffy/command";
+import { connect, TcpTransport } from "@nullstyle/capnp";
 import { KvStore, type WriteBatchResults, type WriteOp } from "./gen/mod.ts";
 
 interface ClientOptions {
@@ -69,232 +70,6 @@ const DEFAULTS: ClientOptions = {
 
 const MAX_LATENCY_SAMPLES = 2048;
 const ERROR_BACKOFF_MS = 5;
-
-function usage(): string {
-  return [
-    "Usage:",
-    "  deno run --allow-net --allow-sys kvstore_stress_client.ts [options]",
-    "",
-    "Options:",
-    "  --host=<value>              server host (default: 127.0.0.1)",
-    "  --port=<value>              server port (default: 9000)",
-    "  --key-space=<M>             total key space size M (default: 16384)",
-    "  --active-keys=<N>           rotating active set size N (default: 1024)",
-    "  --rotation-step=<value>     window shift per batch (default: 1)",
-    "  --min-batch=<value>         min ops per batch (default: 8)",
-    "  --max-batch=<value>         max ops per batch (default: 64)",
-    "  --concurrency=<value>       concurrent write loops (default: 32)",
-    "  --delete-ratio=<0..1>       probability of delete op (default: 0.1)",
-    "  --min-value-bytes=<value>   min bytes per put value (default: 32)",
-    "  --max-value-bytes=<value>   max bytes per put value (default: 256)",
-    "  --report-ms=<value>         stats interval in ms (default: 1000)",
-    "  --duration-seconds=<value>  stop after N seconds, 0 = run forever (default: 0)",
-    "  --m=<value>                 alias for --key-space",
-    "  --n=<value>                 alias for --active-keys",
-    "  --help                      show this help",
-  ].join("\n");
-}
-
-function parseArgs(args: string[]): ClientOptions {
-  const aliases = new Map<string, string>([
-    ["m", "key-space"],
-    ["n", "active-keys"],
-  ]);
-
-  const allowed = new Set<string>([
-    "host",
-    "port",
-    "key-space",
-    "active-keys",
-    "rotation-step",
-    "min-batch",
-    "max-batch",
-    "concurrency",
-    "delete-ratio",
-    "min-value-bytes",
-    "max-value-bytes",
-    "report-ms",
-    "duration-seconds",
-    "help",
-  ]);
-
-  const values = new Map<string, string>();
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (arg === "--help" || arg === "-h") {
-      values.set("help", "true");
-      continue;
-    }
-
-    if (!arg.startsWith("--")) {
-      throw new Error(`unexpected positional argument: ${arg}`);
-    }
-
-    let rawKey = "";
-    let value = "";
-
-    const eqIndex = arg.indexOf("=");
-    if (eqIndex >= 0) {
-      rawKey = arg.slice(2, eqIndex);
-      value = arg.slice(eqIndex + 1);
-    } else {
-      rawKey = arg.slice(2);
-      const next = args[i + 1];
-      if (!next || next.startsWith("--")) {
-        throw new Error(`missing value for --${rawKey}`);
-      }
-      value = next;
-      i++;
-    }
-
-    const key = aliases.get(rawKey) ?? rawKey;
-    if (!allowed.has(key)) {
-      throw new Error(`unknown option: --${rawKey}`);
-    }
-
-    values.set(key, value);
-  }
-
-  if (values.has("help")) {
-    console.log(usage());
-    Deno.exit(0);
-  }
-
-  const host = values.get("host") ?? DEFAULTS.host;
-  const port = parseIntFlag(values, "port", DEFAULTS.port, {
-    min: 1,
-    max: 65_535,
-  });
-
-  const keySpace = parseIntFlag(values, "key-space", DEFAULTS.keySpace, {
-    min: 1,
-  });
-  const activeKeys = parseIntFlag(
-    values,
-    "active-keys",
-    DEFAULTS.activeKeys,
-    {
-      min: 1,
-      max: keySpace,
-    },
-  );
-  const rotationStep = parseIntFlag(
-    values,
-    "rotation-step",
-    DEFAULTS.rotationStep,
-    {
-      min: 1,
-    },
-  );
-
-  const minBatch = parseIntFlag(values, "min-batch", DEFAULTS.minBatch, {
-    min: 1,
-  });
-  const maxBatch = parseIntFlag(values, "max-batch", DEFAULTS.maxBatch, {
-    min: minBatch,
-  });
-
-  const concurrency = parseIntFlag(
-    values,
-    "concurrency",
-    DEFAULTS.concurrency,
-    {
-      min: 1,
-    },
-  );
-  const deleteRatio = parseFloatFlag(
-    values,
-    "delete-ratio",
-    DEFAULTS.deleteRatio,
-    { min: 0, max: 1 },
-  );
-
-  const minValueBytes = parseIntFlag(
-    values,
-    "min-value-bytes",
-    DEFAULTS.minValueBytes,
-    {
-      min: 1,
-    },
-  );
-  const maxValueBytes = parseIntFlag(
-    values,
-    "max-value-bytes",
-    DEFAULTS.maxValueBytes,
-    {
-      min: minValueBytes,
-    },
-  );
-
-  const reportMs = parseIntFlag(values, "report-ms", DEFAULTS.reportMs, {
-    min: 100,
-  });
-  const durationSeconds = parseIntFlag(
-    values,
-    "duration-seconds",
-    DEFAULTS.durationSeconds,
-    {
-      min: 0,
-    },
-  );
-
-  return {
-    host,
-    port,
-    keySpace,
-    activeKeys,
-    rotationStep,
-    minBatch,
-    maxBatch,
-    concurrency,
-    deleteRatio,
-    minValueBytes,
-    maxValueBytes,
-    reportMs,
-    durationSeconds,
-  };
-}
-
-function parseIntFlag(
-  values: Map<string, string>,
-  key: string,
-  fallback: number,
-  bounds: { min: number; max?: number },
-): number {
-  const raw = values.get(key);
-  if (raw === undefined) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed)) {
-    throw new Error(`--${key} must be an integer`);
-  }
-  if (parsed < bounds.min) {
-    throw new Error(`--${key} must be >= ${bounds.min}`);
-  }
-  if (bounds.max !== undefined && parsed > bounds.max) {
-    throw new Error(`--${key} must be <= ${bounds.max}`);
-  }
-  return parsed;
-}
-
-function parseFloatFlag(
-  values: Map<string, string>,
-  key: string,
-  fallback: number,
-  bounds: { min: number; max: number },
-): number {
-  const raw = values.get(key);
-  if (raw === undefined) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`--${key} must be a number`);
-  }
-  if (parsed < bounds.min || parsed > bounds.max) {
-    throw new Error(`--${key} must be between ${bounds.min} and ${bounds.max}`);
-  }
-  return parsed;
-}
 
 function randomInt(min: number, max: number): number {
   return min + Math.floor(Math.random() * (max - min + 1));
@@ -464,8 +239,16 @@ async function workerLoop(
   }
 }
 
-async function main(): Promise<void> {
-  const options = parseArgs(Deno.args);
+async function run(options: ClientOptions): Promise<void> {
+  if (options.activeKeys > options.keySpace) {
+    throw new Error("--active-keys must be <= --key-space");
+  }
+  if (options.maxBatch < options.minBatch) {
+    throw new Error("--max-batch must be >= --min-batch");
+  }
+  if (options.maxValueBytes < options.minValueBytes) {
+    throw new Error("--max-value-bytes must be >= --min-value-bytes");
+  }
 
   console.log(
     `connecting to ${options.host}:${options.port}` +
@@ -475,7 +258,10 @@ async function main(): Promise<void> {
       ` | batch=${options.minBatch}-${options.maxBatch}`,
   );
 
-  using kvStore = await TCP.connect(KvStore, options.host, options.port);
+  using kvStore = await connect(
+    KvStore,
+    await TcpTransport.connect(options.host, options.port),
+  );
 
   const state: WorkerState = {
     running: true,
@@ -550,5 +336,84 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  await main();
+  await new Command()
+    .name("kvstore-stress-client")
+    .description(
+      "Drive KvStore.writeBatch RPC traffic with configurable concurrency and rotating key windows.",
+    )
+    .option(
+      "--host <host:string>",
+      "Server host to connect to",
+      { default: DEFAULTS.host },
+    )
+    .option(
+      "--port <port:integer>",
+      "Server port to connect to",
+      { default: DEFAULTS.port },
+    )
+    .option(
+      "--key-space <size:integer>",
+      "Total key space size M",
+      { default: DEFAULTS.keySpace },
+    )
+    .option(
+      "--active-keys <count:integer>",
+      "Rotating active window size N",
+      { default: DEFAULTS.activeKeys },
+    )
+    .option(
+      "--rotation-step <step:integer>",
+      "Window shift applied after each batch",
+      { default: DEFAULTS.rotationStep },
+    )
+    .option(
+      "--min-batch <count:integer>",
+      "Minimum ops per batch",
+      { default: DEFAULTS.minBatch },
+    )
+    .option(
+      "--max-batch <count:integer>",
+      "Maximum ops per batch",
+      { default: DEFAULTS.maxBatch },
+    )
+    .option(
+      "--concurrency <count:integer>",
+      "Number of concurrent write loops",
+      { default: DEFAULTS.concurrency },
+    )
+    .option(
+      "--delete-ratio <ratio:number>",
+      "Probability of generating a delete op",
+      { default: DEFAULTS.deleteRatio },
+    )
+    .option(
+      "--min-value-bytes <bytes:integer>",
+      "Minimum bytes per put payload",
+      { default: DEFAULTS.minValueBytes },
+    )
+    .option(
+      "--max-value-bytes <bytes:integer>",
+      "Maximum bytes per put payload",
+      { default: DEFAULTS.maxValueBytes },
+    )
+    .option(
+      "--report-ms <ms:integer>",
+      "Stats reporting interval in milliseconds",
+      { default: DEFAULTS.reportMs },
+    )
+    .option(
+      "--duration-seconds <seconds:integer>",
+      "Stop automatically after N seconds; 0 runs until interrupted",
+      { default: DEFAULTS.durationSeconds },
+    )
+    .example(
+      "Run against the default local server",
+      "deno run --allow-net --allow-sys examples/kvstore_stress_2/kvstore_stress_client.ts",
+    )
+    .example(
+      "Run a 30 second stress pass over a wider key space",
+      "deno run --allow-net --allow-sys examples/kvstore_stress_2/kvstore_stress_client.ts --duration-seconds=30 --key-space=65536 --active-keys=4096",
+    )
+    .action(run)
+    .parse(Deno.args);
 }

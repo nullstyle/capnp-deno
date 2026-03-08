@@ -11,11 +11,11 @@ const EXPECTED_HASH_BY_PATH: Record<string, string> = {
   "person_codegen_meta.ts":
     "ff17ccca414fa180ebdb6ac9c2b9fdeb2a7a11ba57f0755acad3d376f0bc73a8",
   "person_codegen_types.ts":
-    "915512e5d6bbd91d712a192f20cd7d8a07afd8002b0e28bdb2434f2d50c6ad54",
+    "76265a86ce77d459c14d725c26aa42454726f01550db2d2ec73109e076b13cb8",
   "union_group_codegen_meta.ts":
     "55f346ad1d1dd9c4c7bffe0ac1f9d4180d2df09a101d294dbfba2d30ae8eb9fb",
   "union_group_codegen_types.ts":
-    "86289d62192844588c69a7db1c5354b2688c49e568cad11a101a12c1d160bfb4",
+    "e901b39fb2b2f4fceecdf7902ec85f322aef5df130a51a38ec15a5e3c4b17185",
   "mod.ts": "180ad7d85aecca1b9e3f7a4ac4e86ec6ae5d8694031cfc4d75196bb2663c8f01",
 };
 

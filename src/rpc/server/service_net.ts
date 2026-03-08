@@ -1,8 +1,5 @@
 import { SessionError } from "../../errors.ts";
-import type { RpcPeerAddress, TcpPort } from "./service_types.ts";
-
-const MIN_TCP_PORT = 1;
-const MAX_TCP_PORT = 65_535;
+import type { RpcPeerAddress } from "./service_types.ts";
 
 export function formatPeerAddress(address: RpcPeerAddress | null): string {
   if (!address) return "unknown";
@@ -136,20 +133,4 @@ export function resolveWebSocketProtocol(
     }
   }
   return null;
-}
-
-export function normalizeTcpPort(port: TcpPort): number {
-  const resolved = Number(port);
-  if (
-    !Number.isInteger(resolved) ||
-    resolved < MIN_TCP_PORT ||
-    resolved > MAX_TCP_PORT
-  ) {
-    throw new SessionError(
-      `port must be an integer in [${MIN_TCP_PORT}, ${MAX_TCP_PORT}], got ${
-        String(port)
-      }`,
-    );
-  }
-  return resolved;
 }

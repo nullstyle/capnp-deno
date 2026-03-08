@@ -1,5 +1,5 @@
 import { TransportError, WebSocketTransport } from "../../src/advanced.ts";
-import { assert, assertEquals, withTimeout } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 function buildFrame(words: number): Uint8Array {
   const frame = new Uint8Array(8 + words * 8);
@@ -50,6 +50,38 @@ async function withPatchedGlobalWebSocket(
     await fn();
   } finally {
     globalMutable.WebSocket = original;
+  }
+}
+
+async function withPatchedDenoUpgradeWebSocket(
+  replacement: unknown,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const denoMutable = Deno as unknown as {
+    upgradeWebSocket?: typeof Deno.upgradeWebSocket;
+  };
+  const original = denoMutable.upgradeWebSocket;
+  denoMutable.upgradeWebSocket = replacement as typeof Deno.upgradeWebSocket;
+  try {
+    await fn();
+  } finally {
+    denoMutable.upgradeWebSocket = original;
+  }
+}
+
+async function withPatchedDenoServe(
+  replacement: unknown,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const denoMutable = Deno as unknown as {
+    serve?: typeof Deno.serve;
+  };
+  const original = denoMutable.serve;
+  denoMutable.serve = replacement as typeof Deno.serve;
+  try {
+    await fn();
+  } finally {
+    denoMutable.serve = original;
   }
 }
 
@@ -588,6 +620,162 @@ Deno.test("WebSocketTransport close swallows socket.close errors", async () => {
   transport.start((_frame) => {});
 
   await withTimeout(transport.close(), 1000, "websocket close throw path");
+});
+
+Deno.test("WebSocketTransport invokes onClose when the socket closes", async () => {
+  const closed = deferred<void>();
+  const { socket, transport } = transportWithSocket({
+    onClose: () => {
+      closed.resolve();
+    },
+  });
+
+  try {
+    transport.start((_frame) => {});
+    socket.close();
+    await withTimeout(closed.promise, 1000, "websocket onClose callback");
+  } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("WebSocketTransport.handler validates requests and yields accepted transports", async () => {
+  const upgradedSockets: FakeWebSocket[] = [];
+  const handler = WebSocketTransport.handler({
+    path: "/rpc",
+    protocols: ["capnp-rpc"],
+  });
+
+  await withPatchedDenoUpgradeWebSocket((_request: Request, _options?: {
+    protocol?: string;
+  }) => {
+    const socket = new FakeWebSocket();
+    upgradedSockets.push(socket);
+    return {
+      socket: socket as unknown as WebSocket,
+      response: new Response(null, { status: 101 }),
+    };
+  }, async () => {
+    const notUpgrade = await handler.handle(
+      new Request("http://127.0.0.1:8080/rpc"),
+    );
+    assertEquals(notUpgrade.status, 426);
+
+    const wrongPath = await handler.handle(
+      new Request("http://127.0.0.1:8080/nope", {
+        headers: { upgrade: "websocket" },
+      }),
+    );
+    assertEquals(wrongPath.status, 404);
+
+    const wrongProtocol = await handler.handle(
+      new Request("http://127.0.0.1:8080/rpc", {
+        headers: {
+          upgrade: "websocket",
+          "sec-websocket-protocol": "other",
+        },
+      }),
+    );
+    assertEquals(wrongProtocol.status, 426);
+
+    const acceptLoop = (async () => {
+      for await (const transport of handler.accept()) {
+        return transport;
+      }
+      return null;
+    })();
+
+    const response = await handler.handle(
+      new Request("http://127.0.0.1:8080/rpc", {
+        headers: {
+          upgrade: "websocket",
+          "sec-websocket-protocol": "capnp-rpc",
+          "sec-websocket-key": "test-key",
+        },
+      }),
+    );
+    assertEquals(response.status, 101);
+
+    const accepted = await withTimeout(
+      acceptLoop,
+      1000,
+      "websocket accepted transport",
+    );
+    assert(accepted !== null, "expected accepted websocket transport");
+    assertEquals(accepted.transport, accepted);
+    assertEquals(accepted.localAddress?.transport, "websocket");
+    assertEquals(accepted.localAddress?.path, "/rpc");
+    assertEquals(accepted.remoteAddress?.transport, "websocket");
+    assertEquals(accepted.id, "test-key");
+
+    await accepted.close();
+    await handler.close();
+    for (const socket of upgradedSockets) {
+      socket.close();
+    }
+  });
+});
+
+Deno.test("WebSocketTransport.listen delegates requests through a transport-owned handler", async () => {
+  const acceptedSocket = new FakeWebSocket();
+  let serveHandler: ((request: Request) => Promise<Response>) | null = null;
+  let shutdownCalls = 0;
+
+  await withPatchedDenoServe((
+    options: Deno.ServeTcpOptions,
+    handler: (request: Request) => Promise<Response>,
+  ) => {
+    serveHandler = handler;
+    return {
+      addr: {
+        transport: "tcp",
+        hostname: options.hostname ?? "0.0.0.0",
+        port: options.port,
+      },
+      shutdown: () => {
+        shutdownCalls += 1;
+        return Promise.resolve();
+      },
+      finished: Promise.resolve(),
+    } as Deno.HttpServer<Deno.NetAddr>;
+  }, async () => {
+    await withPatchedDenoUpgradeWebSocket((_request: Request) => ({
+      socket: acceptedSocket as unknown as WebSocket,
+      response: new Response(null, { status: 101 }),
+    }), async () => {
+      const listener = WebSocketTransport.listen({
+        hostname: "127.0.0.1",
+        port: 8080,
+      });
+
+      const acceptLoop = (async () => {
+        for await (const transport of listener.accept()) {
+          return transport;
+        }
+        return null;
+      })();
+
+      assert(serveHandler !== null, "expected Deno.serve handler");
+      const response = await serveHandler!(
+        new Request("http://127.0.0.1:8080/rpc", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      assertEquals(response.status, 101);
+
+      const accepted = await withTimeout(
+        acceptLoop,
+        1000,
+        "websocket listener accepted transport",
+      );
+      assert(accepted !== null, "expected websocket transport from listener");
+      assertEquals((listener.addr as Deno.NetAddr).hostname, "127.0.0.1");
+
+      await accepted.close();
+      await listener.close();
+      assertEquals(shutdownCalls, 1);
+    });
+  });
 });
 
 Deno.test("WebSocketTransport queued send fails when transport closes during buffered backpressure", async () => {

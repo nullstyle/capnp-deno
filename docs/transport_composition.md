@@ -233,15 +233,44 @@ const runtime = await RpcServerRuntime.create(transport, bridge, {
 });
 ```
 
-### High-Level WebSocket Service API (`WS`)
+### High-Level WebSocket Service API
 
-If you are using generated `RpcServiceToken` values, prefer `WS.connect(...)`
-and either `WS.serve(...)` or `WS.handler(...)`:
+If you are using generated `RpcServiceToken` values, prefer the generic
+`connect(...)` / `serve(...)` helpers with transport-owned WebSocket server
+primitives:
 
 ```ts
-const wsHandler = WS.handler(Pinger, new PingServer(), {
+using client = await connect(
+  Pinger,
+  await WebSocketTransport.connect("ws://127.0.0.1:8080/rpc", ["capnp-rpc"]),
+);
+
+const listener = WebSocketTransport.listen({
+  hostname: "127.0.0.1",
+  port: 8080,
+  path: "/rpc",
   protocols: ["capnp-rpc"],
 });
+using server = serve(
+  Pinger,
+  listener,
+  ({ peer }) => new PingServer(peer),
+);
+```
+
+For custom HTTP routers, use `WebSocketTransport.handler(...)` as the upgrade
+surface and bind it once with `serve(...)`:
+
+```ts
+const wsHandler = WebSocketTransport.handler({
+  path: "/rpc",
+  protocols: ["capnp-rpc"],
+});
+using rpc = serve(
+  Pinger,
+  wsHandler,
+  ({ peer }) => new PingServer(peer),
+);
 
 const httpServer = Deno.serve({ hostname: "127.0.0.1", port: 8080 }, (req) => {
   const url = new URL(req.url);
@@ -249,25 +278,12 @@ const httpServer = Deno.serve({ hostname: "127.0.0.1", port: 8080 }, (req) => {
   if (url.pathname === "/api") return new Response("capnweb route");
   return new Response("not found", { status: 404 });
 });
-
-// Or let capnp-deno own the HTTP server:
-const handle = WS.serve(Pinger, "127.0.0.1", 8080, new PingServer(), {
-  path: "/rpc",
-  protocols: ["capnp-rpc"],
-  transport: {
-    frameLimits: { maxFrameBytes: 64 * 1024 * 1024 },
-  },
-});
-
-using client = await WS.connect(Pinger, "ws://127.0.0.1:8080/rpc", {
-  protocols: ["capnp-rpc"],
-});
 ```
 
 #### Browser <-> Deno WebSocket Contract
 
-`WS.serve(...)` and `WS.handler(...)` define the same server-side contract for
-browser and Deno clients:
+`WebSocketTransport.listen(...)` and `WebSocketTransport.handler(...)` define
+the same server-side contract for browser and Deno clients:
 
 1. Handshake requirements:
    - Non-upgrade HTTP requests receive `426`.
@@ -276,15 +292,17 @@ browser and Deno clients:
      is rejected with `426`.
 2. Runtime wiring:
    - Each accepted socket is upgraded via `Deno.upgradeWebSocket(...)`.
-   - The upgraded socket is wrapped in `WebSocketTransport`.
-   - A per-connection `RpcServerRuntime.createWithRoot(...)` is created.
+   - The upgraded socket is wrapped in `WebSocketTransport` and yielded through
+     the accept source.
+   - `serve(...)` creates a per-connection
+     `RpcServerRuntime.createWithRoot(...)`.
 3. Bootstrap wiring:
-   - `WS.serve(...)` registers a root capability for bootstrap automatically
+   - `serve(...)` registers a root capability for bootstrap automatically
      (default index `0`, reference count `1`).
    - Override with `rootCapabilityIndex` / `rootReferenceCount` if needed.
-   - If you wire WebSocket manually, use `RpcServerRuntime.createWithRoot(...)`
-     (or provide `onBootstrap` on `RpcServerBridge`) so bootstrap requests do
-     not fail.
+   - If you wire WebSocket manually without `serve(...)`, use
+     `serveConnection(...)` or `RpcServerRuntime.createWithRoot(...)` so
+     bootstrap requests do not fail.
 4. Frame-limit policy:
    - Apply WebSocket frame validation using `transport.frameLimits`.
    - Use `transport.maxInboundFrameBytes` / `transport.maxOutboundFrameBytes`
@@ -293,9 +311,11 @@ browser and Deno clients:
    - Initialization/accept errors (upgrade failure, runtime setup failure) are
      reported via `onConnectionError`.
    - Per-connection transport errors are reported via `transport.onError`.
-   - `handle.close()` stops accepting new upgrades and closes active runtimes.
+   - Closing the `serve(...)` handle stops accepting new upgrades and closes
+     active runtimes.
 6. Fallback order and reconnect layering:
-   - Browser clients should prefer `WS.connect(...)` when TCP is unavailable.
+   - Browser clients should prefer `connect(...)` over
+     `WebSocketTransport.connect(...)` when they want typed service stubs.
    - For transport-level retry (connect/open failures), layer
      `connectWebSocketTransportWithReconnect(...)` under your client factory.
    - For RPC-level retry/remap across reconnects, wrap the client with
@@ -306,40 +326,50 @@ browser and Deno clients:
      are not retried automatically after reconnect.
    - Non-bootstrap capability retries require `remapCapabilityOnReconnect`.
 
-### High-Level WebTransport Service API (`WT`)
+### High-Level WebTransport Service API
 
-If you are using generated `RpcServiceToken` values, use `WT.connect(...)` and
-`WT.serve(...)` for HTTP/3/QUIC-based RPC:
+If you are using generated `RpcServiceToken` values, prefer `connect(...)` with
+`WebTransportTransport.connect(...)` and `serve(...)` with
+`WebTransportTransport.listen(...)`:
 
 ```ts
-const handle = WT.serve(Presence, "127.0.0.1", 4443, new PresenceServer(), {
+const listener = WebTransportTransport.listen({
+  hostname: "127.0.0.1",
+  port: 4443,
   path: "/p2p",
   cert: certPem,
   key: keyPem,
 });
+using server = serve(
+  Presence,
+  listener,
+  ({ peer }) => new PresenceServer(peer),
+);
 
-using client = await WT.connect(Presence, "https://127.0.0.1:4443/p2p", {
-  transport: {
+using client = await connect(
+  Presence,
+  await WebTransportTransport.connect("https://127.0.0.1:4443/p2p", {
     webTransport: {
       serverCertificateHashes: [
         { algorithm: "sha-256", value: certHashBytes },
       ],
     },
-  },
-});
+  }),
+);
 ```
 
 WebTransport specifics:
 
-1. `WT.serve(...)` requires Deno's unstable QUIC APIs (`--unstable-net`) plus a
-   TLS certificate and private key.
-2. `WT.connect(...)` uses `WebTransportTransport.connect(...)` under the hood
-   and opens a single bidirectional stream for Cap'n Proto RPC traffic.
-3. `WT.serve(...)` upgrades each accepted QUIC connection with
-   `Deno.upgradeWebTransport(...)`, waits for the first bidirectional stream,
-   and boots a per-connection `RpcServerRuntime.createWithRoot(...)`.
+1. `WebTransportTransport.listen(...)` requires Deno's unstable QUIC APIs
+   (`--unstable-net`) plus a TLS certificate and private key.
+2. `connect(...)` over `WebTransportTransport.connect(...)` opens a single
+   bidirectional stream for Cap'n Proto RPC traffic.
+3. `serve(...)` over `WebTransportTransport.listen(...)` upgrades each accepted
+   QUIC connection with `Deno.upgradeWebTransport(...)`, waits for the first
+   bidirectional stream, and boots a per-connection
+   `RpcServerRuntime.createWithRoot(...)`.
 4. For local development, prefer certificate-hash pinning via
-   `transport.webTransport.serverCertificateHashes`.
+   `webTransport.serverCertificateHashes`.
 5. For retry-on-connect behavior, layer
    `connectWebTransportTransportWithReconnect(...)` under your client factory.
 
@@ -378,16 +408,16 @@ const runtime = await RpcServerRuntime.create(serverTransport, bridge, {
 
 ## Decision Guide
 
-| Scenario                     | Transport                                           | Client wrapper                                              | Server wrapper                    |
-| ---------------------------- | --------------------------------------------------- | ----------------------------------------------------------- | --------------------------------- |
-| Unit/integration tests       | `InMemoryRpcHarnessTransport`                       | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
-| TCP client to remote server  | `TcpTransport.connect()`                            | `NetworkRpcHarnessTransport`                                | --                                |
-| TCP server accepting clients | `TcpTransport.listen()`                             | --                                                          | `RpcServerRuntime` (one per conn) |
-| WebSocket client             | `WS.connect()` or `WebSocketTransport.connect()`    | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
-| WebSocket server             | `WS.serve()` or `new WebSocketTransport(socket)`    | --                                                          | `RpcServerRuntime`                |
-| WebTransport client          | `WT.connect()` or `WebTransportTransport.connect()` | `RpcWireClient` or `NetworkRpcHarnessTransport`             | --                                |
-| WebTransport server          | `WT.serve()` or `WebTransportTransport.accept()`    | --                                                          | `RpcServerRuntime`                |
-| Worker / iframe IPC          | `MessagePortTransport`                              | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
+| Scenario                     | Transport                                                                                  | Client wrapper                                              | Server wrapper                    |
+| ---------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------- | --------------------------------- |
+| Unit/integration tests       | `InMemoryRpcHarnessTransport`                                                              | `SessionRpcClientTransport` (direct)                        | `RpcServerRuntime`                |
+| TCP client to remote server  | `TcpTransport.connect()`                                                                   | `NetworkRpcHarnessTransport`                                | --                                |
+| TCP server accepting clients | `TcpTransport.listen()`                                                                    | --                                                          | `RpcServerRuntime` (one per conn) |
+| WebSocket client             | `connect(service, await WebSocketTransport.connect())`                                     | `SessionRpcClientTransport` or `NetworkRpcHarnessTransport` | --                                |
+| WebSocket server             | `serve(service, WebSocketTransport.listen()/handler(), impl)`                              | --                                                          | `RpcServerRuntime`                |
+| WebTransport client          | `connect(service, await WebTransportTransport.connect())`                                  | `RpcWireClient` or `NetworkRpcHarnessTransport`             | --                                |
+| WebTransport server          | `serve(service, WebTransportTransport.listen(), impl)` or `WebTransportTransport.accept()` | --                                                          | `RpcServerRuntime`                |
+| Worker / iframe IPC          | `MessagePortTransport`                                                                     | `NetworkRpcHarnessTransport`                                | `RpcServerRuntime`                |
 
 ## Middleware
 

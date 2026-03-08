@@ -113,16 +113,14 @@ export function formatUrl(host: string, port: number, path: string): string {
 
 export function createConnectOptions(certHash: Uint8Array) {
   return {
-    transport: {
-      webTransport: {
-        serverCertificateHashes: [{
-          algorithm: "sha-256",
-          value: new Uint8Array(certHash),
-        }],
-      },
-      connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
-      streamOpenTimeoutMs: DEFAULT_STREAM_OPEN_TIMEOUT_MS,
+    webTransport: {
+      serverCertificateHashes: [{
+        algorithm: "sha-256",
+        value: new Uint8Array(certHash),
+      }],
     },
+    connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
+    streamOpenTimeoutMs: DEFAULT_STREAM_OPEN_TIMEOUT_MS,
   };
 }
 

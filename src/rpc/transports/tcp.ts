@@ -13,6 +13,11 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
+import type {
+  RpcAcceptedTransport,
+  RpcAcceptedTransportAddress,
+  RpcTransportAcceptSource,
+} from "./internal/accept.ts";
 import type { RpcTransport } from "./internal/transport.ts";
 import {
   awaitWithTimeout,
@@ -44,12 +49,13 @@ export interface TcpTransportListenOptions {
 export interface TcpTransportListener {
   /** Returns the local address the listener is bound to. */
   readonly addr: Deno.Addr;
+  /** Whether the listener has been closed. */
+  readonly closed: boolean;
   /**
-   * Returns an async iterable that yields a new {@link TcpTransport} for each
-   * accepted TCP connection. The iterable terminates when the listener is
-   * closed.
+   * Returns an async iterable that yields a new accepted TCP transport for each
+   * inbound connection. The iterable terminates when the listener is closed.
    */
-  accept(): AsyncIterable<TcpTransport>;
+  accept(): AsyncIterable<TcpAcceptedTransport>;
   /**
    * Stops the listener and prevents any further connections from being
    * accepted. Calling close on an already-closed listener is a no-op.
@@ -57,7 +63,23 @@ export interface TcpTransportListener {
   close(): void;
 }
 
-class TcpTransportListenerImpl implements TcpTransportListener {
+function toAcceptedTcpAddress(
+  addr: Deno.Addr,
+): RpcAcceptedTransportAddress | null {
+  if (addr.transport !== "tcp" && addr.transport !== "udp") {
+    return null;
+  }
+  return {
+    transport: addr.transport,
+    hostname: addr.hostname,
+    port: addr.port,
+  };
+}
+
+export type TcpAcceptedTransport = TcpTransport & RpcAcceptedTransport;
+
+class TcpTransportListenerImpl
+  implements TcpTransportListener, RpcTransportAcceptSource {
   readonly #listener: Deno.Listener;
   readonly #options: TcpTransportListenOptions;
 
@@ -92,14 +114,18 @@ class TcpTransportListenerImpl implements TcpTransportListener {
     return this.#listener.addr;
   }
 
+  get closed(): boolean {
+    return this.#closed;
+  }
+
   /**
-   * Returns an async iterable that yields a new {@link TcpTransport} for each
+   * Returns an async iterable that yields a new accepted TCP transport for each
    * accepted TCP connection. The iterable terminates when the listener is
    * closed.
    *
-   * @yields A `TcpTransport` wrapping the accepted connection.
+   * @yields A `TcpAcceptedTransport` wrapping the accepted connection.
    */
-  async *accept(): AsyncIterable<TcpTransport> {
+  async *accept(): AsyncIterable<TcpAcceptedTransport> {
     while (!this.#closed) {
       let conn: Deno.Conn;
       try {
@@ -112,7 +138,7 @@ class TcpTransportListenerImpl implements TcpTransportListener {
         throw normalizeTransportError(error, "tcp accept failed");
       }
 
-      const transport = new TcpTransport(
+      const transport = createAcceptedTcpTransport(
         conn,
         this.#options.transportOptions
           ? { ...this.#options.transportOptions }
@@ -593,4 +619,21 @@ export class TcpTransport implements RpcTransport {
       );
     }
   }
+}
+
+function createAcceptedTcpTransport(
+  conn: Deno.Conn,
+  options: TcpTransportOptions = {},
+): TcpAcceptedTransport {
+  const transport = new TcpTransport(conn, options);
+  const remoteAddress = toAcceptedTcpAddress(conn.remoteAddr);
+  return Object.assign(transport, {
+    transport: transport as RpcTransport,
+    localAddress: toAcceptedTcpAddress(conn.localAddr),
+    remoteAddress,
+    id: remoteAddress?.hostname !== undefined &&
+        remoteAddress.port !== undefined
+      ? `${remoteAddress.hostname}:${remoteAddress.port}`
+      : undefined,
+  }) as TcpAcceptedTransport;
 }

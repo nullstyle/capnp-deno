@@ -1,7 +1,9 @@
 import type { RpcServerRuntime } from "./runtime.ts";
 import type {
   RpcPeer,
+  RpcServiceBinding,
   RpcServiceConstructor,
+  RpcServiceFactory,
   RpcServiceImplementation,
 } from "./service_types.ts";
 
@@ -17,6 +19,23 @@ export function resolveImplementationForConnection<TServer extends object>(
   if (typeof implementation === "function") {
     const Ctor = implementation as RpcServiceConstructor<TServer>;
     const server = new Ctor(peer);
+    return { server, disposeInstance: toDisposer(server) };
+  }
+  return { server: implementation, disposeInstance: null };
+}
+
+export async function resolveBindingForConnection<TServer extends object>(
+  implementation: RpcServiceBinding<TServer>,
+  peer: RpcPeer,
+): Promise<{ server: TServer; disposeInstance: (() => Promise<void>) | null }> {
+  if (typeof implementation === "function") {
+    if (isServiceConstructor(implementation)) {
+      const Ctor = implementation as RpcServiceConstructor<TServer>;
+      const server = new Ctor(peer);
+      return { server, disposeInstance: toDisposer(server) };
+    }
+    const factory = implementation as RpcServiceFactory<TServer>;
+    const server = await factory({ peer });
     return { server, disposeInstance: toDisposer(server) };
   }
   return { server: implementation, disposeInstance: null };
@@ -73,4 +92,17 @@ function toDisposer(instance: unknown): (() => Promise<void>) | null {
     }
   }
   return null;
+}
+
+function isServiceConstructor<TServer extends object>(
+  value: RpcServiceBinding<TServer>,
+): value is RpcServiceConstructor<TServer> {
+  if (typeof value !== "function") return false;
+  const source = Function.prototype.toString.call(value);
+  if (/^class\s/.test(source)) return true;
+  const prototype = (value as { prototype?: object }).prototype;
+  if (!prototype || typeof prototype !== "object") return false;
+  return Object.getOwnPropertyNames(prototype).some((name) =>
+    name !== "constructor"
+  );
 }

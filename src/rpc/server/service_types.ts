@@ -57,12 +57,22 @@ export interface RpcStubLifecycle {
 
 export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
 
-export type TcpPort = number | string;
+export interface RpcServiceContext {
+  readonly peer: RpcPeer;
+}
 
 export type RpcServiceConstructor<TServer extends object> = new (
   peer: RpcPeer,
 ) => TServer;
 
+export type RpcServiceFactory<TServer extends object> = (
+  context: RpcServiceContext,
+) => TServer | Promise<TServer>;
+
 export type RpcServiceImplementation<TServer extends object> =
   | TServer
   | RpcServiceConstructor<TServer>;
+
+export type RpcServiceBinding<TServer extends object> =
+  | RpcServiceImplementation<TServer>
+  | RpcServiceFactory<TServer>;
