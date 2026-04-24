@@ -104,7 +104,8 @@ vendor-test:
     cd vendor/capnp-zig && just test
 
 regen-rpc-fixtures:
-    cd vendor/capnp-zig && zig build gen-rpc-fixtures > ../../tests/fixtures/rpc_frames.ts
+    zig build --build-file tools/gen_rpc_fixtures/build.zig run > tests/fixtures/rpc_frames.ts
+    deno fmt tests/fixtures/rpc_frames.ts
 
 regen-rpc-ts:
     ./scripts/generate_rpc_schema_ts.sh

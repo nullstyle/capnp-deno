@@ -56,8 +56,8 @@ deno task bench:real     # real-WASM benches only
 CI gates: `just ci-fast` (PR minimum), `just ci-integration`, `just ci-real`.
 
 If changing vendor code, also run `cd vendor/capnp-zig && just test`. Regenerate
-RPC fixtures with
-`cd vendor/capnp-zig && zig build gen-rpc-fixtures > ../../tests/fixtures/rpc_frames.ts`.
+RPC fixtures with `just regen-rpc-fixtures` (runs the local Zig CLI under
+`tools/gen_rpc_fixtures/`, which reuses the vendored fixture library).
 
 ## Architecture
 

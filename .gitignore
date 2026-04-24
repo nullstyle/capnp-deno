@@ -3,6 +3,10 @@ bench/results.json
 bench/previous/
 dist/
 
+# Zig build artifacts
+.zig-cache/
+tools/**/zig-out/
+
 # Dolt database files (added by bd init)
 .dolt/
 *.db
