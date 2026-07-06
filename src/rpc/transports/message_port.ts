@@ -13,7 +13,7 @@ import {
   emitObservabilityEvent,
   type RpcObservability,
 } from "../../observability/observability.ts";
-import type { RpcTransport } from "./internal/transport.ts";
+import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   OutboundFrameQueue,
   type QueuedOutboundFrame,
@@ -142,6 +142,33 @@ export class MessagePortTransport implements RpcTransport {
     this.port = port;
     this.options = options;
     this.#outbound = new OutboundFrameQueue("message port", options);
+  }
+
+  /**
+   * Current lifecycle and outbound queue snapshot.
+   *
+   * @returns A point-in-time transport health and saturation summary.
+   *
+   * @example
+   * ```ts
+   * const stats = transport.stats;
+   * console.log(stats.closed, stats.queuedOutboundFrames);
+   * ```
+   */
+  get stats(): RpcTransportStats {
+    const queue = this.#outbound.stats;
+    return {
+      started: this.#started,
+      closed: this.#closed,
+      draining: this.#drainLoop !== null,
+      queuedOutboundFrames: queue.queuedFrames,
+      queuedOutboundBytes: queue.queuedBytes,
+      inflightOutboundFrames: queue.inflightFrames,
+      inflightOutboundBytes: queue.inflightBytes,
+      maxOutboundFrameBytes: this.options.maxOutboundFrameBytes ?? null,
+      maxQueuedOutboundFrames: this.options.maxQueuedOutboundFrames ?? null,
+      maxQueuedOutboundBytes: this.options.maxQueuedOutboundBytes ?? null,
+    };
   }
 
   start(

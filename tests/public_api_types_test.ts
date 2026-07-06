@@ -40,6 +40,7 @@ import type {
   ExponentialBackoffReconnectPolicyOptions,
   FrameSizeLimitMiddlewareOptions,
   LoggingMiddlewareOptions,
+  MessagePortTransport,
   MessagePortTransportOptions,
   MiddlewareResult,
   ReconnectCapabilityRemapContext,
@@ -342,6 +343,10 @@ type AssertRpcTransportStatsQueuedBytes = Assert<
 
 type AssertRpcTransportStatsLimit = Assert<
   IsEqual<RpcTransportStats["maxQueuedOutboundFrames"], number | null>
+>;
+
+type AssertMessagePortTransportStats = Assert<
+  IsEqual<MessagePortTransport["stats"], RpcTransportStats>
 >;
 
 type AssertRpcClientCallOptionsCapTable = Assert<
@@ -723,6 +728,7 @@ type StaticAssertions = [
   AssertRpcTransportStatsClosed,
   AssertRpcTransportStatsQueuedBytes,
   AssertRpcTransportStatsLimit,
+  AssertMessagePortTransportStats,
   AssertRpcClientCallOptionsCapTable,
   AssertRpcClientCallResultCapTable,
   AssertRpcServerCallContextCapTable,
@@ -857,8 +863,9 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 68);
+  assert(STATIC_ASSERTIONS.length === 69);
 });

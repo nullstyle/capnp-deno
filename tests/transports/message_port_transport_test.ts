@@ -215,6 +215,76 @@ Deno.test("MessagePortTransport enforces queued outbound frame limits", async ()
   }
 });
 
+Deno.test("MessagePortTransport stats expose lifecycle and outbound pressure", async () => {
+  const channel = new MessageChannel();
+  const port = channel.port1 as unknown as {
+    postMessage: (value: unknown) => void;
+  };
+  const originalPostMessage = port.postMessage;
+  const posted = deferred<void>();
+  let postCalls = 0;
+  let transport: MessagePortTransport | null = null;
+
+  port.postMessage = (_value: unknown) => {
+    postCalls += 1;
+    if (postCalls === 1) {
+      assert(transport !== null, "expected transport to be assigned");
+      assertEquals(transport.stats.inflightOutboundFrames, 1);
+      assertEquals(transport.stats.inflightOutboundBytes, 2);
+      assertEquals(transport.stats.queuedOutboundFrames, 1);
+      posted.resolve();
+    }
+  };
+
+  transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+    maxOutboundFrameBytes: 8,
+    maxQueuedOutboundFrames: 2,
+    maxQueuedOutboundBytes: 4,
+  });
+
+  try {
+    assertEquals(transport.stats.started, false);
+    assertEquals(transport.stats.closed, false);
+    assertEquals(transport.stats.draining, false);
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+    assertEquals(transport.stats.maxOutboundFrameBytes, 8);
+    assertEquals(transport.stats.maxQueuedOutboundFrames, 2);
+    assertEquals(transport.stats.maxQueuedOutboundBytes, 4);
+
+    transport.start((_frame) => {});
+    assertEquals(transport.stats.started, true);
+
+    const first = transport.send(new Uint8Array([0x01, 0x02]));
+    assertEquals(transport.stats.draining, true);
+    assertEquals(transport.stats.queuedOutboundFrames, 1);
+    assertEquals(transport.stats.queuedOutboundBytes, 2);
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+
+    const second = transport.send(new Uint8Array([0x03]));
+    assertEquals(transport.stats.queuedOutboundFrames, 2);
+    assertEquals(transport.stats.queuedOutboundBytes, 3);
+
+    await withTimeout(
+      posted.promise,
+      1000,
+      "message port stats postMessage",
+    );
+    await Promise.all([first, second]);
+    await Promise.resolve();
+
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+    assertEquals(transport.stats.queuedOutboundBytes, 0);
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+    assertEquals(transport.stats.inflightOutboundBytes, 0);
+  } finally {
+    transport.close();
+    port.postMessage = originalPostMessage;
+    channel.port2.close();
+  }
+});
+
 Deno.test("MessagePortTransport validates inbound frameLimits", async () => {
   const channel = new MessageChannel();
   const transportError = deferred<unknown>();

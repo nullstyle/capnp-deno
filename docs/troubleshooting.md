@@ -474,8 +474,8 @@ been closed.
   reconnection).
 - Inspect `transport.stats.closed`, `transport.stats.draining`,
   `transport.stats.queuedOutboundFrames`, and
-  `transport.stats.inflightOutboundFrames` on TCP, WebSocket, and WebTransport
-  transports to distinguish shutdown from outbound saturation.
+  `transport.stats.inflightOutboundFrames` on built-in transports to distinguish
+  shutdown from outbound saturation.
 
 #### `TcpTransport already started` / `WebSocketTransport already started`
 

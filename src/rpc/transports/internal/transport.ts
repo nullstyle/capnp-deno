@@ -54,9 +54,9 @@ export interface RpcTransport {
  * Operational snapshot exposed by built-in byte transports.
  *
  * The base {@link RpcTransport} contract intentionally does not require this
- * property, so custom transports remain source-compatible. TCP, WebSocket, and
- * WebTransport expose this shape as `transport.stats` for health checks,
- * saturation dashboards, and shutdown diagnostics.
+ * property, so custom transports remain source-compatible. TCP, WebSocket,
+ * WebTransport, and MessagePort expose this shape as `transport.stats` for
+ * health checks, saturation dashboards, and shutdown diagnostics.
  *
  * @example
  * ```ts
@@ -75,7 +75,7 @@ export interface RpcTransportStats {
   readonly queuedOutboundFrames: number;
   /** Total queued outbound payload bytes. */
   readonly queuedOutboundBytes: number;
-  /** Number of outbound frames currently being written. */
+  /** Number of outbound frames currently being written or posted. */
   readonly inflightOutboundFrames: number;
   /** Total in-flight outbound payload bytes. */
   readonly inflightOutboundBytes: number;
