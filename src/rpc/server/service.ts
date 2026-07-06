@@ -864,55 +864,26 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     accepted: RpcAcceptedTransport,
     createPromise: Promise<RpcServiceConnectionHandleImpl>,
   ): Promise<RpcServiceConnectionHandleImpl> {
-    const timeoutMs = this.#connectionInitTimeoutMs;
-    if (timeoutMs === undefined) {
-      return await createPromise;
-    }
-
-    const result = await raceTimeoutValue(createPromise, timeoutMs);
-    if (result !== "timeout") {
-      return result;
-    }
-
-    const error = new SessionError(
-      `generated RPC service ${this.#service.interfaceName} connection initialization timed out after ${timeoutMs}ms`,
+    return await awaitServiceConnectionInitialization(
+      this.#service,
+      accepted,
+      createPromise,
       {
-        metadata: {
-          phase: "service_serve",
-          serviceName: this.#service.interfaceName,
-          interfaceId: this.#service.interfaceId,
-          peerId: accepted.id,
-          transport: accepted.remoteAddress?.transport ??
-            accepted.localAddress?.transport,
+        timeoutMs: this.#connectionInitTimeoutMs,
+        observability: this.#observability,
+        activeConnections: this.#active.size,
+        initializingConnections: this.#initializingConnections,
+        report: this.#options.onConnectionError,
+        onLateHandle: async (lateHandle) => {
+          this.#forcedClosedConnections++;
+          this.#emitServiceEvent("rpc.service.connections_force_close", {
+            "rpc.force_close_reason": "rpc service init timeout late cleanup",
+            "rpc.force_close_count": 1,
+          });
+          await lateHandle.close();
         },
       },
     );
-    emitObservabilityEvent(this.#observability, {
-      name: "rpc.service.connection_init_timeout",
-      attributes: {
-        "rpc.service_name": this.#service.interfaceName,
-        "rpc.interface_id": this.#service.interfaceId,
-        "rpc.connection_init_timeout_ms": timeoutMs,
-        "rpc.active_connections": this.#active.size,
-        "rpc.initializing_connections": this.#initializingConnections,
-        ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
-      },
-      error,
-    });
-    await Promise.resolve(accepted.transport.close()).catch((closeError) =>
-      reportConnectionError(this.#options.onConnectionError, closeError)
-    );
-    void createPromise.then((lateHandle) => {
-      this.#forcedClosedConnections++;
-      this.#emitServiceEvent("rpc.service.connections_force_close", {
-        "rpc.force_close_reason": "rpc service init timeout late cleanup",
-        "rpc.force_close_count": 1,
-      });
-      return lateHandle.close();
-    }).catch(() => {
-      // createServiceConnectionHandle already closes/disposes failed attempts.
-    });
-    throw error;
   }
 
   async #closeAcceptor(): Promise<void> {
@@ -1049,6 +1020,87 @@ function raceTimeoutValue<T>(
   ]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
+}
+
+interface ServiceConnectionInitializationOptions {
+  timeoutMs: number | undefined;
+  observability: RpcObservability | undefined;
+  activeConnections?: number;
+  initializingConnections?: number;
+  report?: (error: unknown) => void | Promise<void>;
+  onLateHandle?: (handle: RpcServiceConnectionHandleImpl) => Promise<void>;
+}
+
+async function awaitServiceConnectionInitialization<
+  TClient extends object,
+  TServer extends object,
+>(
+  service: RpcServiceToken<TClient, TServer>,
+  accepted: RpcAcceptedTransport,
+  createPromise: Promise<RpcServiceConnectionHandleImpl>,
+  options: ServiceConnectionInitializationOptions,
+): Promise<RpcServiceConnectionHandleImpl> {
+  if (options.timeoutMs === undefined) {
+    return await createPromise;
+  }
+
+  const result = await raceTimeoutValue(createPromise, options.timeoutMs);
+  if (result !== "timeout") {
+    return result;
+  }
+
+  const error = createConnectionInitTimeoutError(
+    service,
+    accepted,
+    options.timeoutMs,
+  );
+  emitObservabilityEvent(options.observability, {
+    name: "rpc.service.connection_init_timeout",
+    attributes: {
+      "rpc.service_name": service.interfaceName,
+      "rpc.interface_id": service.interfaceId,
+      "rpc.connection_init_timeout_ms": options.timeoutMs,
+      "rpc.active_connections": options.activeConnections ?? 0,
+      "rpc.initializing_connections": options.initializingConnections ?? 0,
+      ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
+    },
+    error,
+  });
+  await Promise.resolve(accepted.transport.close()).catch((closeError) =>
+    reportConnectionError(options.report, closeError)
+  );
+  void createPromise.then((lateHandle) => {
+    if (options.onLateHandle) {
+      return options.onLateHandle(lateHandle);
+    }
+    return lateHandle.close();
+  }).catch(() => {
+    // createServiceConnectionHandle already closes/disposes failed attempts.
+  });
+  throw error;
+}
+
+function createConnectionInitTimeoutError<
+  TClient extends object,
+  TServer extends object,
+>(
+  service: RpcServiceToken<TClient, TServer>,
+  accepted: RpcAcceptedTransport,
+  timeoutMs: number,
+): SessionError {
+  return new SessionError(
+    `generated RPC service ${service.interfaceName} connection initialization timed out after ${timeoutMs}ms`,
+    {
+      metadata: {
+        phase: "service_serve",
+        serviceName: service.interfaceName,
+        interfaceId: service.interfaceId,
+        peerId: accepted.id,
+        transport: accepted.remoteAddress?.transport ??
+          accepted.localAddress?.transport,
+      },
+    },
+  );
 }
 
 async function createServiceConnectionHandle<
@@ -1228,11 +1280,30 @@ export function serveConnection<
   implementation: RpcServiceBinding<TServer>,
   options: RpcServiceServeOptions = {},
 ): Promise<RpcServiceConnectionHandle> {
-  return createServiceConnectionHandle(
+  const timeoutMs = normalizeConnectionInitTimeoutMs(
+    options.connectionInitTimeoutMs,
+    service,
+  );
+  const tracer = resolveDebugTracer(options.debug);
+  const createPromise = createServiceConnectionHandle(
     service,
     accepted,
     implementation,
-    options,
+    tracer ? { ...options, debug: tracer } : options,
+  );
+  return awaitServiceConnectionInitialization(
+    service,
+    accepted,
+    createPromise,
+    {
+      timeoutMs,
+      observability: composeObservability(
+        options.observability,
+        tracer?.observability,
+      ),
+      report: options.onConnectionError,
+      onLateHandle: (lateHandle) => lateHandle.close(),
+    },
   );
 }
 

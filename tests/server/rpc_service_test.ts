@@ -233,6 +233,107 @@ Deno.test("serveConnection closes accepted transport when an async factory rejec
   assertEquals(closeCount, 1);
 });
 
+Deno.test("serveConnection times out stalled initialization and cleans up late runtimes", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const runtimeCreateStarted = deferred<void>();
+  const releaseRuntimeCreate = deferred<void>();
+  const lateRuntimeClosed = deferred<void>();
+  const events: RpcObservabilityEvent[] = [];
+  let closeCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = async (transport) => {
+    runtimeCreateStarted.resolve();
+    await releaseRuntimeCreate.promise;
+    return {
+      close: async (): Promise<void> => {
+        await transport.close();
+        lateRuntimeClosed.resolve();
+      },
+    } as RpcServerRuntime;
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x186n,
+    interfaceName: "ServeConnectionInitTimeoutProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const accepted = {
+    transport: {
+      start(): void {
+        // no-op
+      },
+      send(): Promise<void> {
+        return Promise.resolve();
+      },
+      close(): Promise<void> {
+        closeCount += 1;
+        return Promise.resolve();
+      },
+    },
+    remoteAddress: {
+      transport: "tcp",
+      hostname: "127.0.0.1",
+      port: 41241,
+    },
+    id: "direct-stalled-init-peer",
+  };
+
+  try {
+    const pendingHandle = serveConnection(service, accepted, {}, {
+      connectionInitTimeoutMs: 1,
+      observability: {
+        onEvent(event) {
+          events.push(event);
+        },
+      },
+    });
+
+    await withTimeout(
+      runtimeCreateStarted.promise,
+      1000,
+      "runtime creation started",
+    );
+
+    let thrown: unknown;
+    try {
+      await pendingHandle;
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(thrown instanceof SessionError);
+    assert(
+      /connection initialization timed out/i.test(thrown.message),
+      `expected init timeout error, got: ${String(thrown)}`,
+    );
+    assertEquals(
+      thrown.metadata?.serviceName,
+      "ServeConnectionInitTimeoutProbe",
+    );
+    assertEquals(thrown.metadata?.peerId, "direct-stalled-init-peer");
+    assertEquals(thrown.metadata?.transport, "tcp");
+    assertEquals(closeCount, 1);
+    assert(
+      events.some((event) =>
+        event.name === "rpc.service.connection_init_timeout"
+      ),
+    );
+
+    releaseRuntimeCreate.resolve();
+    await withTimeout(lateRuntimeClosed.promise, 1000, "late runtime cleanup");
+    assertEquals(closeCount, 2);
+  } finally {
+    releaseRuntimeCreate.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
 Deno.test("serveConnection disposes async-factory instances when a websocket closes before activation", async () => {
   const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
   const pendingServer = deferred<AsyncDisposable & object>();
