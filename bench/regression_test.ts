@@ -35,6 +35,8 @@ interface BenchResult {
   name: string;
   iterations: number;
   elapsedMs: number;
+  budgetMs: number;
+  percentOfBudget: number;
   opsPerSec: number;
 }
 
@@ -44,9 +46,37 @@ function recordResult(
   name: string,
   iterations: number,
   elapsedMs: number,
+  budgetMs: number,
 ): void {
   const opsPerSec = (iterations / elapsedMs) * 1000;
-  collectedResults.push({ name, iterations, elapsedMs, opsPerSec });
+  const percentOfBudget = (elapsedMs / budgetMs) * 100;
+  collectedResults.push({
+    name,
+    iterations,
+    elapsedMs,
+    budgetMs,
+    percentOfBudget,
+    opsPerSec,
+  });
+}
+
+function recordAndAssertBudget(
+  name: string,
+  iterations: number,
+  elapsedMs: number,
+  budgetMs: number,
+): void {
+  recordResult(name, iterations, elapsedMs, budgetMs);
+  const percent = (elapsedMs / budgetMs) * 100;
+  console.log(
+    `  ${name}: ${iterations} iterations in ${elapsedMs.toFixed(1)}ms ` +
+      `/ ${budgetMs}ms budget (${percent.toFixed(1)}%)`,
+  );
+  assert(
+    elapsedMs < budgetMs,
+    `${name} exceeded budget: ${elapsedMs.toFixed(1)}ms / ${budgetMs}ms ` +
+      `(${percent.toFixed(1)}%)`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -149,12 +179,7 @@ Deno.test("regression: framer push/pop 10k iterations < 2000ms", () => {
     assert(b !== null, "expected second frame");
   }, iterations);
 
-  recordResult("framer push/pop", iterations, elapsed);
-  console.log(`  framer push/pop 10k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 2000,
-    `framer push/pop took ${elapsed.toFixed(1)}ms, budget is 2000ms`,
-  );
+  recordAndAssertBudget("framer push/pop", iterations, elapsed, 2000);
 });
 
 Deno.test("regression: framer fragmented reassembly 10k iterations < 2000ms", () => {
@@ -172,13 +197,11 @@ Deno.test("regression: framer fragmented reassembly 10k iterations < 2000ms", ()
     assert(out !== null, "expected completed frame");
   }, iterations);
 
-  recordResult("framer fragmented reassembly", iterations, elapsed);
-  console.log(`  framer fragmented 10k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 2000,
-    `framer fragmented reassembly took ${
-      elapsed.toFixed(1)
-    }ms, budget is 2000ms`,
+  recordAndAssertBudget(
+    "framer fragmented reassembly",
+    iterations,
+    elapsed,
+    2000,
   );
 });
 
@@ -190,11 +213,11 @@ Deno.test("regression: validateCapnpFrame depth-64 chain 5k iterations < 3000ms"
     validateCapnpFrame(deepFrame, { maxNestingDepth: 64 });
   }, iterations);
 
-  recordResult("validateCapnpFrame depth-64", iterations, elapsed);
-  console.log(`  validateCapnpFrame depth-64 5k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 3000,
-    `validateCapnpFrame took ${elapsed.toFixed(1)}ms, budget is 3000ms`,
+  recordAndAssertBudget(
+    "validateCapnpFrame depth-64",
+    iterations,
+    elapsed,
+    3000,
   );
 });
 
@@ -209,12 +232,7 @@ Deno.test("regression: rpc wire encode call 10k iterations < 2000ms", () => {
     });
   }, iterations);
 
-  recordResult("rpc wire encode call", iterations, elapsed);
-  console.log(`  rpc_wire encode call 10k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 2000,
-    `rpc_wire encode call took ${elapsed.toFixed(1)}ms, budget is 2000ms`,
-  );
+  recordAndAssertBudget("rpc wire encode call", iterations, elapsed, 2000);
 });
 
 Deno.test("regression: rpc wire encode call with 48-cap table 5k iterations < 3000ms", () => {
@@ -239,11 +257,11 @@ Deno.test("regression: rpc wire encode call with 48-cap table 5k iterations < 30
     });
   }, iterations);
 
-  recordResult("rpc wire encode call+cap48", iterations, elapsed);
-  console.log(`  rpc_wire encode call+cap48 5k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 3000,
-    `rpc_wire encode call+cap48 took ${elapsed.toFixed(1)}ms, budget is 3000ms`,
+  recordAndAssertBudget(
+    "rpc wire encode call+cap48",
+    iterations,
+    elapsed,
+    3000,
   );
 });
 
@@ -261,12 +279,7 @@ Deno.test("regression: rpc wire decode call 10k iterations < 2000ms", () => {
     decodeCallRequestFrame(frame);
   }, iterations);
 
-  recordResult("rpc wire decode call", iterations, elapsed);
-  console.log(`  rpc_wire decode call 10k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 2000,
-    `rpc_wire decode call took ${elapsed.toFixed(1)}ms, budget is 2000ms`,
-  );
+  recordAndAssertBudget("rpc wire decode call", iterations, elapsed, 2000);
 });
 
 Deno.test("regression: rpc wire encode/decode bootstrap 10k iterations < 2000ms", () => {
@@ -276,13 +289,11 @@ Deno.test("regression: rpc wire encode/decode bootstrap 10k iterations < 2000ms"
     decodeBootstrapRequestFrame(frame);
   }, iterations);
 
-  recordResult("rpc wire bootstrap roundtrip", iterations, elapsed);
-  console.log(`  rpc_wire bootstrap roundtrip 10k: ${elapsed.toFixed(1)}ms`);
-  assert(
-    elapsed < 2000,
-    `rpc_wire bootstrap roundtrip took ${
-      elapsed.toFixed(1)
-    }ms, budget is 2000ms`,
+  recordAndAssertBudget(
+    "rpc wire bootstrap roundtrip",
+    iterations,
+    elapsed,
+    2000,
   );
 });
 
@@ -306,15 +317,11 @@ Deno.test("regression: rpc wire return results roundtrip 5k iterations < 3000ms"
     decodeReturnFrame(encoded);
   }, iterations);
 
-  recordResult("rpc wire return results roundtrip", iterations, elapsed);
-  console.log(
-    `  rpc_wire return results roundtrip 5k: ${elapsed.toFixed(1)}ms`,
-  );
-  assert(
-    elapsed < 3000,
-    `rpc_wire return results roundtrip took ${
-      elapsed.toFixed(1)
-    }ms, budget is 3000ms`,
+  recordAndAssertBudget(
+    "rpc wire return results roundtrip",
+    iterations,
+    elapsed,
+    3000,
   );
 });
 
@@ -328,15 +335,11 @@ Deno.test("regression: rpc wire return exception roundtrip 10k iterations < 2000
     decodeReturnFrame(encoded);
   }, iterations);
 
-  recordResult("rpc wire return exception roundtrip", iterations, elapsed);
-  console.log(
-    `  rpc_wire return exception roundtrip 10k: ${elapsed.toFixed(1)}ms`,
-  );
-  assert(
-    elapsed < 2000,
-    `rpc_wire return exception roundtrip took ${
-      elapsed.toFixed(1)
-    }ms, budget is 2000ms`,
+  recordAndAssertBudget(
+    "rpc wire return exception roundtrip",
+    iterations,
+    elapsed,
+    2000,
   );
 });
 

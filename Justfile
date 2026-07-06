@@ -51,6 +51,10 @@ bench-fast:
 bench-real:
     deno task bench:real
 
+perf-check:
+    just bench-fast
+    deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts
+
 ci-bench:
     @echo "=========================================="
     @echo "  Performance Benchmarks"

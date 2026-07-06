@@ -8,6 +8,8 @@
  */
 
 import {
+  CapnpError,
+  connect,
   decodeReturnFrame,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
@@ -16,9 +18,22 @@ import {
   instantiatePeer,
   RpcServerBridge,
   RpcServerRuntime,
+  type RpcStub,
+  serve,
   TcpTransport,
 } from "../../src/advanced.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, withTimeout } from "../test_utils.ts";
+import {
+  CounterSink,
+  type CounterSink as CounterSinkClient,
+  type CounterSinkService,
+  createCounterSinkAddStreamSender,
+} from "../../examples/streaming/gen/schema_types.ts";
+import {
+  Pinger,
+  type Pinger as PingerService,
+  type Ponger,
+} from "../../examples/ping/gen/schema_types.ts";
 
 const wasmPath = new URL("../../generated/capnp_deno.wasm", import.meta.url);
 const INTERFACE_ID = 0xABCD_1234n;
@@ -35,6 +50,20 @@ function encodeSingleU32StructMessage(value: number): Uint8Array {
   view.setUint32(4, 2, true); // 2 words
   view.setBigUint64(8, 0x0000_0001_0000_0000n, true); // struct pointer: 1 data word
   view.setUint32(16, value >>> 0, true);
+  return out;
+}
+
+function encodeU32AndCapPointerStructMessage(
+  value: number,
+  capTableIndex: number,
+): Uint8Array {
+  const out = new Uint8Array(32);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, 0, true); // segment count - 1
+  view.setUint32(4, 3, true); // 3 words
+  view.setBigUint64(8, 0x0001_0001_0000_0000n, true); // 1 data, 1 pointer
+  view.setUint32(16, value >>> 0, true);
+  view.setBigUint64(24, (BigInt(capTableIndex) << 32n) | 3n, true);
   return out;
 }
 
@@ -85,6 +114,14 @@ class FrameCollector {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sumNumbers(values: readonly number[]): bigint {
+  return values.reduce((sum, value) => sum + BigInt(value), 0n);
+}
+
 // ---------------------------------------------------------------------------
 // Test: full TCP RPC round-trip with real WASM server peer
 // ---------------------------------------------------------------------------
@@ -131,8 +168,14 @@ Deno.test("TCP RPC interop: bootstrap + call + response over real TCP", async ()
 
       bridge.exportCapability({
         interfaceId: INTERFACE_ID,
-        dispatch(_methodId, params) {
+        dispatch(methodId, params) {
           const value = decodeSingleU32StructMessage(params);
+          if (methodId === 1) {
+            return {
+              content: encodeU32AndCapPointerStructMessage(value + 10, 0),
+              capTable: [{ tag: 1, id: 0 }],
+            };
+          }
           return encodeSingleU32StructMessage(value + 1);
         },
       }, {
@@ -225,6 +268,57 @@ Deno.test("TCP RPC interop: bootstrap + call + response over real TCP", async ()
       }));
     }
 
+    // --- Cap-bearing result ---
+    const capResultQuestionId = 40;
+    await clientTcp.send(encodeCallRequestFrame({
+      questionId: capResultQuestionId,
+      target: { tag: 0, importedCap: bootstrapCapId },
+      interfaceId: INTERFACE_ID,
+      methodId: 1,
+      paramsContent: encodeSingleU32StructMessage(32),
+    }));
+
+    const capResultResponse = decodeReturnFrame(await collector.nextFrame());
+    assertEquals(capResultResponse.answerId, capResultQuestionId);
+    assert(
+      capResultResponse.kind === "results",
+      "cap-bearing result: expected results",
+    );
+    assertEquals(
+      decodeSingleU32StructMessage(capResultResponse.contentBytes),
+      42,
+    );
+    assertEquals(capResultResponse.capTable.length, 1);
+    assertEquals(capResultResponse.capTable[0].tag, 1);
+    assertEquals(capResultResponse.capTable[0].id, 0);
+
+    const childQuestionId = 41;
+    await clientTcp.send(encodeCallRequestFrame({
+      questionId: childQuestionId,
+      target: { tag: 0, importedCap: capResultResponse.capTable[0].id },
+      interfaceId: INTERFACE_ID,
+      methodId: 0,
+      paramsContent: encodeSingleU32StructMessage(42),
+    }));
+
+    const childResponse = decodeReturnFrame(await collector.nextFrame());
+    assertEquals(childResponse.answerId, childQuestionId);
+    assert(childResponse.kind === "results", "child cap: expected results");
+    assertEquals(decodeSingleU32StructMessage(childResponse.contentBytes), 43);
+    await clientTcp.send(encodeFinishFrame({
+      questionId: childQuestionId,
+      releaseResultCaps: true,
+    }));
+
+    await clientTcp.send(encodeFinishFrame({
+      questionId: capResultQuestionId,
+      releaseResultCaps: false,
+    }));
+    await clientTcp.send(encodeReleaseFrame({
+      id: capResultResponse.capTable[0].id,
+      referenceCount: 1,
+    }));
+
     // --- Release the bootstrap capability ---
     await clientTcp.send(encodeReleaseFrame({
       id: bootstrapCapId,
@@ -242,4 +336,171 @@ Deno.test("TCP RPC interop: bootstrap + call + response over real TCP", async ()
   } finally {
     serverListener.close();
   }
+});
+
+Deno.test("TCP RPC interop: generated callback capability over real TCP", async () => {
+  let serverCallbackStarted = false;
+  let serverCallbackFinished = false;
+  const listener = TcpTransport.listen({
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  const addr = listener.addr as Deno.NetAddr;
+  const handle = serve(Pinger, listener, {
+    async ping(ponger) {
+      serverCallbackStarted = true;
+      await ponger.pong(451, { timeoutMs: 2_000 });
+      serverCallbackFinished = true;
+    },
+  });
+
+  let client: RpcStub<PingerService> | null = null;
+  try {
+    client = await withTimeout(
+      connect(Pinger, await TcpTransport.connect(addr.hostname, addr.port)),
+      4_000,
+      "generated tcp callback connect",
+    );
+
+    let pingResolved = false;
+    let callbackSawPendingPing = false;
+    const callbackValues: number[] = [];
+    const localPonger: Ponger = {
+      pong(value) {
+        callbackSawPendingPing = !pingResolved;
+        callbackValues.push(value);
+        return Promise.resolve();
+      },
+    };
+
+    await withTimeout(
+      client.ping(localPonger, { timeoutMs: 2_000 }),
+      4_000,
+      "generated tcp callback call",
+    );
+    pingResolved = true;
+
+    assertEquals(serverCallbackStarted, true);
+    assertEquals(serverCallbackFinished, true);
+    assertEquals(callbackSawPendingPing, true);
+    assertEquals(callbackValues.join(","), "451");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("TCP RPC interop: generated streaming calls over real TCP stay ordered", async () => {
+  const values: number[] = [];
+  let active = 0;
+  let maxActive = 0;
+  const listener = TcpTransport.listen({
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  const addr = listener.addr as Deno.NetAddr;
+  const service: CounterSinkService = {
+    async add(value, ctx) {
+      assertEquals(ctx.signal.aborted, false);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        values.push(value);
+        await delay(5);
+      } finally {
+        active -= 1;
+      }
+    },
+
+    total() {
+      return {
+        sum: sumNumbers(values),
+        count: values.length,
+      };
+    },
+  };
+  const handle = serve(CounterSink, listener, service);
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      connect(
+        CounterSink,
+        await TcpTransport.connect(addr.hostname, addr.port),
+      ),
+      4_000,
+      "generated tcp streaming connect",
+    );
+
+    const sender = createCounterSinkAddStreamSender(client, {
+      maxInFlight: 4,
+    });
+    for (const value of [2, 3, 5, 7, 11, 13]) {
+      await sender.send(value);
+    }
+    await withTimeout(sender.flush(), 4_000, "generated tcp streaming flush");
+
+    assertEquals(sender.totalSent, 6);
+    assertEquals(sender.totalReceived, 6);
+    assertEquals(maxActive, 1);
+    assertEquals(values.join(","), "2,3,5,7,11,13");
+
+    const total = await withTimeout(
+      client.total({ timeoutMs: 2_000 }),
+      4_000,
+      "generated tcp streaming total",
+    );
+    assertEquals(total.sum, 41n);
+    assertEquals(total.count, 6);
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("TCP RPC interop: generated server failures preserve typed metadata", async () => {
+  const listener = TcpTransport.listen({
+    port: 0,
+    hostname: "127.0.0.1",
+  });
+  const addr = listener.addr as Deno.NetAddr;
+  const handle = serve(Pinger, listener, {
+    ping() {
+      throw new Error("interop failure");
+    },
+  });
+
+  let client: RpcStub<PingerService> | null = null;
+  try {
+    client = await withTimeout(
+      connect(Pinger, await TcpTransport.connect(addr.hostname, addr.port)),
+      4_000,
+      "generated tcp error connect",
+    );
+
+    let thrown: unknown;
+    try {
+      await client.ping({
+        pong() {
+          return Promise.resolve();
+        },
+      }, { timeoutMs: 2_000 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(thrown instanceof CapnpError, `expected CapnpError: ${thrown}`);
+    assertEquals(thrown.metadata?.serviceName, "Pinger");
+    assertEquals(thrown.metadata?.methodName, "ping");
+    assertEquals(thrown.metadata?.methodId, 0);
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
 });

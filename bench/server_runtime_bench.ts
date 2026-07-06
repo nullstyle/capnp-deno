@@ -1,5 +1,6 @@
 import {
   encodeCallRequestFrame,
+  encodeFinishFrame,
   RpcServerBridge,
   RpcServerRuntime,
   type RpcTransport,
@@ -144,6 +145,12 @@ async function runAutoPumpIteration(
   await runtime.flush();
   if (hostAbi.exceptions !== 0) {
     throw new Error(`unexpected host-call exceptions: ${hostAbi.exceptions}`);
+  }
+  for (const call of batch) {
+    await bridge.handleFrame(encodeFinishFrame({
+      questionId: call.questionId,
+      releaseResultCaps: true,
+    }));
   }
   blackhole ^= hostAbi.results;
 }
