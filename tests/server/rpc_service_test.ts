@@ -399,6 +399,100 @@ Deno.test("serve supervises accepted connections through the generic binder", as
   assert(events.includes("transport.close"));
 });
 
+Deno.test("serve close waits for runtimes that finish initializing during shutdown", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const runtimeCreateStarted = deferred<void>();
+  const releaseRuntimeCreate = deferred<void>();
+  const acceptClosed = deferred<void>();
+  const events: string[] = [];
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = async (transport) => {
+    runtimeCreateStarted.resolve();
+    await releaseRuntimeCreate.promise;
+    return {
+      close: async (): Promise<void> => {
+        events.push("runtime.close");
+        await transport.close();
+      },
+    } as RpcServerRuntime;
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x183n,
+    interfaceName: "ServeCloseInitRaceProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const transport = {
+    start(): void {
+      // no-op
+    },
+    send(): Promise<void> {
+      return Promise.resolve();
+    },
+    close(): Promise<void> {
+      events.push("transport.close");
+      return Promise.resolve();
+    },
+  };
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport,
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41239,
+        },
+        id: "initializing-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  try {
+    using handle = serve(service, acceptor, {});
+
+    await withTimeout(
+      runtimeCreateStarted.promise,
+      1000,
+      "runtime creation started",
+    );
+
+    let closeResolved = false;
+    const closePromise = handle.close().then(() => {
+      closeResolved = true;
+      events.push("handle.close");
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    assertEquals(closeResolved, false);
+    assertEquals(events.includes("runtime.close"), false);
+
+    releaseRuntimeCreate.resolve();
+    await withTimeout(closePromise, 1000, "service close");
+
+    assertEquals(events.includes("runtime.close"), true);
+    assertEquals(events.includes("transport.close"), true);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+  } finally {
+    acceptClosed.resolve();
+    releaseRuntimeCreate.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
 Deno.test("serve refuses accepted connections above maxActiveConnections", async () => {
   const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
   const acceptClosed = deferred<void>();

@@ -714,6 +714,7 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     await this.#forceCloseActiveConnections("rpc service close");
     await this.#closeAcceptor();
     await this.#acceptLoop;
+    await this.#forceCloseActiveConnections("rpc service close");
   }
 
   async #runAcceptLoop(): Promise<void> {
@@ -806,10 +807,15 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     });
     if (!handle || handle.closed) return;
     this.#active.add(handle);
-    if (this.#closed) {
-      void handle.close().catch((error) => {
-        void reportConnectionError(this.#options.onConnectionError, error);
+    if (this.#closed && !this.#draining) {
+      this.#forcedClosedConnections++;
+      this.#emitServiceEvent("rpc.service.connections_force_close", {
+        "rpc.force_close_reason": "rpc service close during initialization",
+        "rpc.force_close_count": 1,
       });
+      await handle.close().catch((error) =>
+        reportConnectionError(this.#options.onConnectionError, error)
+      );
     }
   }
 
