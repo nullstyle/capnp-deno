@@ -18,7 +18,7 @@ import type {
   RpcAcceptedTransportAddress,
   RpcTransportAcceptSource,
 } from "./internal/accept.ts";
-import type { RpcTransport } from "./internal/transport.ts";
+import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   awaitWithTimeout,
   notifyTransportClose,
@@ -270,6 +270,7 @@ export class TcpTransport implements RpcTransport {
 
   #started = false;
   #closed = false;
+  #remoteClosed = false;
   #readLoop: Promise<void> = Promise.resolve();
   #framer: CapnpFrameFramer;
 
@@ -282,6 +283,33 @@ export class TcpTransport implements RpcTransport {
     this.options = options;
     this.#framer = new CapnpFrameFramer(options.frameLimits);
     this.#outbound = new OutboundFrameQueue("tcp", options);
+  }
+
+  /**
+   * Current lifecycle and outbound queue snapshot.
+   *
+   * @returns A point-in-time transport health and saturation summary.
+   *
+   * @example
+   * ```ts
+   * const stats = transport.stats;
+   * console.log(stats.closed, stats.queuedOutboundFrames);
+   * ```
+   */
+  get stats(): RpcTransportStats {
+    const queue = this.#outbound.stats;
+    return {
+      started: this.#started,
+      closed: this.#closed || this.#remoteClosed,
+      draining: this.#drainLoop !== null,
+      queuedOutboundFrames: queue.queuedFrames,
+      queuedOutboundBytes: queue.queuedBytes,
+      inflightOutboundFrames: queue.inflightFrames,
+      inflightOutboundBytes: queue.inflightBytes,
+      maxOutboundFrameBytes: this.options.maxOutboundFrameBytes ?? null,
+      maxQueuedOutboundFrames: this.options.maxQueuedOutboundFrames ?? null,
+      maxQueuedOutboundBytes: this.options.maxQueuedOutboundBytes ?? null,
+    };
   }
 
   /**
@@ -401,7 +429,9 @@ export class TcpTransport implements RpcTransport {
   async send(frame: Uint8Array): Promise<void> {
     const startedAt = performance.now();
     if (!this.#started) throw new TransportError("TcpTransport not started");
-    if (this.#closed) throw new TransportError("TcpTransport is closed");
+    if (this.#closed || this.#remoteClosed) {
+      throw new TransportError("TcpTransport is closed");
+    }
     this.assertOutboundFrameSize(frame);
 
     const payload = new Uint8Array(frame);
@@ -482,7 +512,7 @@ export class TcpTransport implements RpcTransport {
     while (!this.#closed) {
       const read = await this.readChunk(buffer);
       if (read === null) {
-        this.#notifyClose();
+        this.#markRemoteClosed();
         return;
       }
       if (read === 0) continue;
@@ -609,6 +639,24 @@ export class TcpTransport implements RpcTransport {
     if (this.#closeNotified) return;
     this.#closeNotified = true;
     notifyTransportClose(this.options, "tcp onClose callback failed");
+  }
+
+  #markRemoteClosed(): void {
+    if (this.#remoteClosed) return;
+    const alreadyClosed = this.#closed;
+    this.#remoteClosed = true;
+    this.#closed = true;
+    this.#outbound.rejectQueued(
+      new TransportError("TcpTransport is closed"),
+    );
+    if (!alreadyClosed) {
+      try {
+        this.conn.close();
+      } catch {
+        // no-op -- connection may already be closed by the runtime.
+      }
+    }
+    this.#notifyClose();
   }
 
   private assertOutboundFrameSize(frame: Uint8Array): void {

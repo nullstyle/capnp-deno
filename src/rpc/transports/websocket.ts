@@ -20,7 +20,7 @@ import {
   RpcAcceptedTransportQueue,
   type RpcTransportAcceptSource,
 } from "./internal/accept.ts";
-import type { RpcTransport } from "./internal/transport.ts";
+import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   notifyTransportClose,
   OutboundFrameQueue,
@@ -292,6 +292,34 @@ export class WebSocketTransport implements RpcTransport {
     this.options = options;
     this.#outbound = new OutboundFrameQueue("websocket", options);
     this.socket.binaryType = "arraybuffer";
+  }
+
+  /**
+   * Current lifecycle and outbound queue snapshot.
+   *
+   * @returns A point-in-time transport health and saturation summary.
+   *
+   * @example
+   * ```ts
+   * const stats = transport.stats;
+   * console.log(stats.closed, stats.queuedOutboundBytes);
+   * ```
+   */
+  get stats(): RpcTransportStats {
+    const queue = this.#outbound.stats;
+    return {
+      started: this.#started,
+      closed: this.#closed || this.#socketClosed ||
+        this.socket.readyState === WebSocket.CLOSED,
+      draining: this.#drainLoop !== null,
+      queuedOutboundFrames: queue.queuedFrames,
+      queuedOutboundBytes: queue.queuedBytes,
+      inflightOutboundFrames: queue.inflightFrames,
+      inflightOutboundBytes: queue.inflightBytes,
+      maxOutboundFrameBytes: this.options.maxOutboundFrameBytes ?? null,
+      maxQueuedOutboundFrames: this.options.maxQueuedOutboundFrames ?? null,
+      maxQueuedOutboundBytes: this.options.maxQueuedOutboundBytes ?? null,
+    };
   }
 
   /**

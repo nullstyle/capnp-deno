@@ -12,6 +12,13 @@ export interface QueuedOutboundFrame {
   reject: (error: unknown) => void;
 }
 
+export interface OutboundFrameQueueStats {
+  queuedFrames: number;
+  queuedBytes: number;
+  inflightFrames: number;
+  inflightBytes: number;
+}
+
 export interface OutboundFrameQueueOptions {
   maxQueuedOutboundFrames?: number;
   maxQueuedOutboundBytes?: number;
@@ -43,6 +50,23 @@ export class OutboundFrameQueue<T extends QueuedOutboundFrame> {
 
   get queuedBytes(): number {
     return this.#queuedBytes;
+  }
+
+  get inflightFrames(): number {
+    return this.#inflightFrames;
+  }
+
+  get inflightBytes(): number {
+    return this.#inflightBytes;
+  }
+
+  get stats(): OutboundFrameQueueStats {
+    return {
+      queuedFrames: this.#queue.length,
+      queuedBytes: this.#queuedBytes,
+      inflightFrames: this.#inflightFrames,
+      inflightBytes: this.#inflightBytes,
+    };
   }
 
   enqueue(frame: T): void {

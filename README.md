@@ -240,6 +240,10 @@ Built-in transports:
 - `WebTransportTransport`
 - `MessagePortTransport`
 
+`TcpTransport`, `WebSocketTransport`, and `WebTransportTransport` expose
+`transport.stats` snapshots for lifecycle state, outbound queue depth, in-flight
+writes, and configured outbound limits.
+
 Browser WebTransport clients must connect over `https:` and trust the server
 certificate by hash:
 

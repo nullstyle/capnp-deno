@@ -75,7 +75,10 @@ export {
 
 // === Session & Transport ===
 
-export { type RpcTransport } from "./rpc/transports/internal/transport.ts";
+export {
+  type RpcTransport,
+  type RpcTransportStats,
+} from "./rpc/transports/internal/transport.ts";
 
 export { type RpcRuntimeModuleOptions } from "./rpc/server/runtime_module.ts";
 

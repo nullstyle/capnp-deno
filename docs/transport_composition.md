@@ -48,6 +48,10 @@ The lowest-level contract: `start(onFrame)`, `send(frame)`, `close()`. All
 concrete transports implement this. You never need to implement it yourself
 unless you are adding a new wire protocol.
 
+Built-in TCP, WebSocket, and WebTransport implementations also expose
+`transport.stats` snapshots for closed state, drain activity, outbound queue
+depth, in-flight writes, and configured outbound limits.
+
 ### `TcpTransport`
 
 Communicates over a Deno `Deno.Conn` TCP socket. Uses `CapnpFrameFramer` to

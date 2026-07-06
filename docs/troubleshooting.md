@@ -472,6 +472,10 @@ been closed.
 - If the transport was closed by the remote peer, handle the close event and
   create a new transport (or use `ReconnectingRpcClientTransport` for automatic
   reconnection).
+- Inspect `transport.stats.closed`, `transport.stats.draining`,
+  `transport.stats.queuedOutboundFrames`, and
+  `transport.stats.inflightOutboundFrames` on TCP, WebSocket, and WebTransport
+  transports to distinguish shutdown from outbound saturation.
 
 #### `TcpTransport already started` / `WebSocketTransport already started`
 

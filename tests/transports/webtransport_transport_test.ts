@@ -715,12 +715,33 @@ Deno.test({
     const transport = new WebTransportTransport(
       webTransport,
       createFakeBidiStream(reader.reader, writer.writer),
+      {
+        maxOutboundFrameBytes: 64,
+        maxQueuedOutboundFrames: 1,
+        maxQueuedOutboundBytes: 64,
+      },
     );
+    assertEquals(transport.stats.started, false);
+    assertEquals(transport.stats.closed, false);
+    assertEquals(transport.stats.maxOutboundFrameBytes, 64);
+    assertEquals(transport.stats.maxQueuedOutboundFrames, 1);
+    assertEquals(transport.stats.maxQueuedOutboundBytes, 64);
+
     transport.start((_frame) => {});
+    assertEquals(transport.stats.started, true);
 
     const pending = transport.send(buildFrame(2));
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(transport.stats.draining, true);
+    assertEquals(transport.stats.inflightOutboundFrames, 1);
+    assertEquals(
+      transport.stats.inflightOutboundBytes,
+      buildFrame(2).byteLength,
+    );
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+
     await transport.close();
+    assertEquals(transport.stats.closed, true);
 
     let thrown: unknown;
     try {
@@ -808,6 +829,7 @@ Deno.test({
         /is closed/i.test(sendError.message),
       `expected send-after-session-close error, got: ${String(sendError)}`,
     );
+    assertEquals(transport.stats.closed, true);
 
     await withTimeout(
       transport.close(),

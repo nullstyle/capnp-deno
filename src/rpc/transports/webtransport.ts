@@ -20,7 +20,7 @@ import {
   RpcAcceptedTransportQueue,
   type RpcTransportAcceptSource,
 } from "./internal/accept.ts";
-import type { RpcTransport } from "./internal/transport.ts";
+import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   awaitWithTimeout,
   notifyTransportClose,
@@ -554,6 +554,33 @@ export class WebTransportTransport implements RpcTransport {
         });
       },
     );
+  }
+
+  /**
+   * Current lifecycle and outbound queue snapshot.
+   *
+   * @returns A point-in-time transport health and saturation summary.
+   *
+   * @example
+   * ```ts
+   * const stats = transport.stats;
+   * console.log(stats.closed, stats.inflightOutboundFrames);
+   * ```
+   */
+  get stats(): RpcTransportStats {
+    const queue = this.#outbound.stats;
+    return {
+      started: this.#started,
+      closed: this.#closed || this.#sessionClosed,
+      draining: this.#drainLoop !== null,
+      queuedOutboundFrames: queue.queuedFrames,
+      queuedOutboundBytes: queue.queuedBytes,
+      inflightOutboundFrames: queue.inflightFrames,
+      inflightOutboundBytes: queue.inflightBytes,
+      maxOutboundFrameBytes: this.options.maxOutboundFrameBytes ?? null,
+      maxQueuedOutboundFrames: this.options.maxQueuedOutboundFrames ?? null,
+      maxQueuedOutboundBytes: this.options.maxQueuedOutboundBytes ?? null,
+    };
   }
 
   /**

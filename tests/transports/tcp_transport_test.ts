@@ -463,6 +463,7 @@ Deno.test("TcpTransport treats connection-reset read failures as remote close", 
 });
 
 Deno.test("TcpTransport invokes onClose exactly once on remote disconnect", async () => {
+  const closed = deferred<void>();
   let onCloseCalls = 0;
   let onErrorCalls = 0;
   const fake = createFakeConn({
@@ -473,6 +474,7 @@ Deno.test("TcpTransport invokes onClose exactly once on remote disconnect", asyn
   const transport = new TcpTransport(fake.conn, {
     onClose: () => {
       onCloseCalls += 1;
+      closed.resolve();
     },
     onError: () => {
       onErrorCalls += 1;
@@ -480,9 +482,21 @@ Deno.test("TcpTransport invokes onClose exactly once on remote disconnect", asyn
   });
 
   transport.start((_frame) => {});
-  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  await withTimeout(closed.promise, 1000, "tcp remote close callback");
   assertEquals(onCloseCalls, 1);
   assertEquals(onErrorCalls, 0);
+  assertEquals(transport.stats.closed, true);
+
+  let sendErr: unknown;
+  try {
+    await transport.send(new Uint8Array([0x01]));
+  } catch (error) {
+    sendErr = error;
+  }
+  assert(
+    sendErr instanceof TransportError && /is closed/i.test(sendErr.message),
+    `expected send-after-remote-close error, got: ${String(sendErr)}`,
+  );
 
   await transport.close();
   assertEquals(onCloseCalls, 1);
@@ -566,6 +580,59 @@ Deno.test("TcpTransport rejects send after close", async () => {
   );
 });
 
+Deno.test("TcpTransport stats expose lifecycle and outbound pressure", async () => {
+  const blockedWrite = deferred<number>();
+  const blockedRead = deferred<number | null>();
+  const fake = createFakeConn({
+    read() {
+      return blockedRead.promise;
+    },
+    write(buffer) {
+      return buffer[0] === 0x01 ? blockedWrite.promise : buffer.byteLength;
+    },
+  });
+  const transport = new TcpTransport(fake.conn, {
+    maxOutboundFrameBytes: 8,
+    maxQueuedOutboundFrames: 2,
+    maxQueuedOutboundBytes: 3,
+  });
+
+  try {
+    assertEquals(transport.stats.started, false);
+    assertEquals(transport.stats.closed, false);
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+    assertEquals(transport.stats.maxOutboundFrameBytes, 8);
+    assertEquals(transport.stats.maxQueuedOutboundFrames, 2);
+    assertEquals(transport.stats.maxQueuedOutboundBytes, 3);
+
+    transport.start((_frame) => {});
+    assertEquals(transport.stats.started, true);
+
+    const first = transport.send(new Uint8Array([0x01, 0x02]));
+    await Promise.resolve();
+    assertEquals(transport.stats.draining, true);
+    assertEquals(transport.stats.inflightOutboundFrames, 1);
+    assertEquals(transport.stats.inflightOutboundBytes, 2);
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+
+    const second = transport.send(new Uint8Array([0x03]));
+    assertEquals(transport.stats.inflightOutboundFrames, 1);
+    assertEquals(transport.stats.queuedOutboundFrames, 1);
+    assertEquals(transport.stats.queuedOutboundBytes, 1);
+
+    blockedWrite.resolve(2);
+    await first;
+    await second;
+    await Promise.resolve();
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+  } finally {
+    blockedRead.resolve(null);
+    await transport.close();
+  }
+});
+
 Deno.test("TcpTransport close timeout path tolerates conn.close failures", async () => {
   const neverRead = deferred<number | null>();
   const fake = createFakeConn({
@@ -591,7 +658,11 @@ Deno.test("TcpTransport close timeout path tolerates conn.close failures", async
 
 Deno.test("TcpTransport propagates send failures through onError and rejects queued frames", async () => {
   const seenErrors: unknown[] = [];
+  const blockedRead = deferred<number | null>();
   const fake = createFakeConn({
+    read() {
+      return blockedRead.promise;
+    },
     write() {
       return Promise.reject(new Error("send exploded"));
     },
@@ -654,6 +725,7 @@ Deno.test("TcpTransport propagates send failures through onError and rejects que
       "tcp onError callback",
     );
   } finally {
+    blockedRead.resolve(null);
     await transport.close();
   }
 });
@@ -806,8 +878,12 @@ Deno.test("TcpTransport drain loop does not start duplicate loops under rapid se
   let concurrentDrains = 0;
   let maxConcurrentDrains = 0;
   let writeCallCount = 0;
+  const blockedRead = deferred<number | null>();
 
   const fake = createFakeConn({
+    read() {
+      return blockedRead.promise;
+    },
     write(buffer) {
       writeCallCount += 1;
       concurrentDrains += 1;
@@ -844,6 +920,7 @@ Deno.test("TcpTransport drain loop does not start duplicate loops under rapid se
     // The drain loop should never have been running concurrently with itself.
     assertEquals(maxConcurrentDrains, 1);
   } finally {
+    blockedRead.resolve(null);
     await transport.close();
   }
 });

@@ -49,3 +49,40 @@ export interface RpcTransport {
    */
   close(): void | Promise<void>;
 }
+
+/**
+ * Operational snapshot exposed by built-in byte transports.
+ *
+ * The base {@link RpcTransport} contract intentionally does not require this
+ * property, so custom transports remain source-compatible. TCP, WebSocket, and
+ * WebTransport expose this shape as `transport.stats` for health checks,
+ * saturation dashboards, and shutdown diagnostics.
+ *
+ * @example
+ * ```ts
+ * const transport = await TcpTransport.connect("127.0.0.1", 4000);
+ * console.log(transport.stats.queuedOutboundFrames);
+ * ```
+ */
+export interface RpcTransportStats {
+  /** Whether `start()` has been called successfully. */
+  readonly started: boolean;
+  /** Whether the transport currently rejects new sends because it is closed. */
+  readonly closed: boolean;
+  /** Whether an outbound drain loop is active. */
+  readonly draining: boolean;
+  /** Number of outbound frames queued but not yet being written. */
+  readonly queuedOutboundFrames: number;
+  /** Total queued outbound payload bytes. */
+  readonly queuedOutboundBytes: number;
+  /** Number of outbound frames currently being written. */
+  readonly inflightOutboundFrames: number;
+  /** Total in-flight outbound payload bytes. */
+  readonly inflightOutboundBytes: number;
+  /** Configured maximum outbound frame size, or `null` when unlimited. */
+  readonly maxOutboundFrameBytes: number | null;
+  /** Configured maximum queued/in-flight outbound frames, or `null` when unlimited. */
+  readonly maxQueuedOutboundFrames: number | null;
+  /** Configured maximum queued/in-flight outbound bytes, or `null` when unlimited. */
+  readonly maxQueuedOutboundBytes: number | null;
+}

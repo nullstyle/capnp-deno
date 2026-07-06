@@ -128,6 +128,7 @@ import type {
   RpcTransport,
   RpcTransportAcceptor,
   RpcTransportMiddleware,
+  RpcTransportStats,
   RpcWireClientOptions,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
@@ -291,6 +292,7 @@ type PublicTypeExportSmoke = {
   rpcTransport: RpcTransport;
   sessionRpcClientTransportCreateOptions:
     SessionRpcClientTransportCreateOptions;
+  rpcTransportStats: RpcTransportStats;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
   streamCallFn: StreamCallFn<number, void>;
   streamSendContext: StreamSendContext;
@@ -328,6 +330,18 @@ type AssertRpcTransportStartSignature = Assert<
       onFrame: (frame: Uint8Array) => void | Promise<void>,
     ) => void | Promise<void>
   >
+>;
+
+type AssertRpcTransportStatsClosed = Assert<
+  IsEqual<RpcTransportStats["closed"], boolean>
+>;
+
+type AssertRpcTransportStatsQueuedBytes = Assert<
+  IsEqual<RpcTransportStats["queuedOutboundBytes"], number>
+>;
+
+type AssertRpcTransportStatsLimit = Assert<
+  IsEqual<RpcTransportStats["maxQueuedOutboundFrames"], number | null>
 >;
 
 type AssertRpcClientCallOptionsCapTable = Assert<
@@ -706,6 +720,9 @@ type AssertCounterAddStreamSenderClientParam = Assert<
 type StaticAssertions = [
   AssertTypeExportsExist,
   AssertRpcTransportStartSignature,
+  AssertRpcTransportStatsClosed,
+  AssertRpcTransportStatsQueuedBytes,
+  AssertRpcTransportStatsLimit,
   AssertRpcClientCallOptionsCapTable,
   AssertRpcClientCallResultCapTable,
   AssertRpcServerCallContextCapTable,
@@ -837,8 +854,11 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 65);
+  assert(STATIC_ASSERTIONS.length === 68);
 });

@@ -133,6 +133,49 @@ Deno.test("WebSocketTransport enforces queued outbound frame limits", async () =
   }
 });
 
+Deno.test("WebSocketTransport stats expose lifecycle and outbound pressure", async () => {
+  const { socket, transport } = transportWithSocket({
+    maxSocketBufferedAmountBytes: 2,
+    maxOutboundFrameBytes: 8,
+    maxQueuedOutboundFrames: 2,
+    maxQueuedOutboundBytes: 3,
+    sendTimeoutMs: 1000,
+    outboundDrainIntervalMs: 1,
+  });
+  socket.bufferedAmount = 10;
+
+  try {
+    assertEquals(transport.stats.started, false);
+    assertEquals(transport.stats.closed, false);
+    assertEquals(transport.stats.maxOutboundFrameBytes, 8);
+    assertEquals(transport.stats.maxQueuedOutboundFrames, 2);
+    assertEquals(transport.stats.maxQueuedOutboundBytes, 3);
+
+    transport.start((_frame) => {});
+    assertEquals(transport.stats.started, true);
+
+    const first = transport.send(new Uint8Array([0x01, 0x02]));
+    await Promise.resolve();
+    assertEquals(transport.stats.draining, true);
+    assertEquals(transport.stats.inflightOutboundFrames, 1);
+    assertEquals(transport.stats.inflightOutboundBytes, 2);
+
+    const second = transport.send(new Uint8Array([0x03]));
+    assertEquals(transport.stats.inflightOutboundFrames, 1);
+    assertEquals(transport.stats.queuedOutboundFrames, 1);
+    assertEquals(transport.stats.queuedOutboundBytes, 1);
+
+    socket.bufferedAmount = 0;
+    await withTimeout(first, 1000, "first websocket stats send");
+    await withTimeout(second, 1000, "second websocket stats send");
+    await Promise.resolve();
+    assertEquals(transport.stats.inflightOutboundFrames, 0);
+    assertEquals(transport.stats.queuedOutboundFrames, 0);
+  } finally {
+    await transport.close();
+  }
+});
+
 Deno.test("WebSocketTransport enforces sendTimeoutMs under buffered backpressure", async () => {
   const { socket, transport } = transportWithSocket({
     maxSocketBufferedAmountBytes: 0,
@@ -634,6 +677,7 @@ Deno.test("WebSocketTransport invokes onClose when the socket closes", async () 
     transport.start((_frame) => {});
     socket.close();
     await withTimeout(closed.promise, 1000, "websocket onClose callback");
+    assertEquals(transport.stats.closed, true);
   } finally {
     await transport.close();
   }
