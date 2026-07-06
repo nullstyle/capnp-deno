@@ -10,6 +10,14 @@
 
 import { SessionError } from "../../errors.ts";
 
+/** Current lifecycle state of a {@link StreamSender}. */
+export type StreamSenderState =
+  | "open"
+  | "draining"
+  | "canceling"
+  | "canceled"
+  | "failed";
+
 /**
  * Context for a single streaming call.
  */
@@ -56,14 +64,28 @@ export interface StreamSenderOptions<TResult = Uint8Array> {
   signal?: AbortSignal;
 }
 
+/** Options for waiting until a {@link StreamSender} has capacity. */
+export interface StreamSenderWaitOptions {
+  /** Abort signal that cancels only the capacity wait, not the stream itself. */
+  signal?: AbortSignal;
+}
+
 /**
  * Tracks an in-flight streaming call.
  */
 interface InFlightCall<TResult> {
-  index: number;
-  promise: Promise<TResult>;
-  abortController: AbortController;
-  cleanup: () => void;
+  readonly index: number;
+  readonly abortController: AbortController;
+  readonly cleanup: () => void;
+  settled?: StreamCallSettled<TResult>;
+}
+
+type StreamCallSettled<TResult> =
+  | { ok: true; value: TResult }
+  | { ok: false; error: unknown };
+
+interface StreamDrainOptions extends StreamSenderWaitOptions {
+  readonly allowClosed?: boolean;
 }
 
 /**
@@ -87,19 +109,53 @@ export interface StreamSender<TParams = Uint8Array, TResult = Uint8Array> {
   /**
    * Send one streaming call. Blocks if the in-flight window is full,
    * providing natural backpressure.
+   *
+   * @param params - Parameters for one generated streaming method call.
+   * @returns Resolves once the call has been accepted into the in-flight window.
    */
   send(params: TParams): Promise<void>;
 
   /**
+   * Wait until at least one in-flight slot is available.
+   *
+   * This exposes the same backpressure boundary used by {@link send} without
+   * starting another RPC call, which is useful when producing stream items is
+   * expensive and should pause before allocating more work.
+   *
+   * @param options - Optional abort signal for the wait itself.
+   * @returns Resolves when `inFlight < maxInFlight`.
+   *
+   * @example
+   * ```ts
+   * await sender.waitForCapacity();
+   * const next = await readNextExpensiveChunk();
+   * await sender.send(next);
+   * ```
+   */
+  waitForCapacity(options?: StreamSenderWaitOptions): Promise<void>;
+
+  /**
    * Wait for all in-flight calls to complete. Must be called after
    * the last {@link send} to ensure all responses are received.
+   *
+   * @returns Resolves after every accepted stream call has completed.
    */
   flush(): Promise<void>;
 
   /**
    * Abort all in-flight calls and prevent new calls from being sent.
+   *
+   * @param reason - Optional cancellation reason propagated to in-flight calls.
+   * @returns Resolves after in-flight calls have been drained, or rejects with
+   * the first unhandled in-flight error.
    */
   cancel(reason?: unknown): Promise<void>;
+
+  /** Lifecycle state for diagnostics and producer coordination. */
+  readonly state: StreamSenderState;
+
+  /** Maximum number of calls allowed in-flight at once. */
+  readonly maxInFlight: number;
 
   /** Number of calls currently in-flight. */
   readonly inFlight: number;
@@ -144,20 +200,44 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
   const streamAbortController = new AbortController();
 
   const inFlightCalls: InFlightCall<TResult>[] = [];
+  const stateWaiters = new Set<() => void>();
   let nextIndex = 0;
   let totalReceived = 0;
   let firstError: unknown = undefined;
   let hasError = false;
   let canceled = false;
   let cancelReason: unknown = undefined;
+  let drainDepth = 0;
+  let drainTail: Promise<void> = Promise.resolve();
 
   function abortReasonFromSignal(source: AbortSignal): unknown {
     return source.reason ?? new SessionError("stream aborted");
   }
 
+  function notifyStateChange(): void {
+    if (stateWaiters.size === 0) return;
+    const waiters = [...stateWaiters];
+    stateWaiters.clear();
+    for (const waiter of waiters) waiter();
+  }
+
+  function currentState(): StreamSenderState {
+    const streamClosed = canceled ||
+      streamAbortController.signal.aborted ||
+      signal?.aborted === true;
+    if (streamClosed) {
+      return inFlightCalls.length > 0 ? "canceling" : "canceled";
+    }
+    if (hasError) return "failed";
+    if (drainDepth > 0) return "draining";
+    return "open";
+  }
+
   function checkAborted(): void {
     if (signal?.aborted) {
-      throw new SessionError("stream aborted");
+      throw new SessionError("stream aborted", {
+        cause: abortReasonFromSignal(signal),
+      });
     }
     if (canceled || streamAbortController.signal.aborted) {
       throw cancelReason instanceof SessionError
@@ -172,41 +252,152 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
     }
   }
 
-  async function drainOne(): Promise<void> {
-    if (inFlightCalls.length === 0) return;
-    const oldest = inFlightCalls.shift()!;
-    try {
-      const response = await oldest.promise;
-      totalReceived++;
-      if (onResponse) {
-        await onResponse(response, oldest.index);
+  function rememberError(error: unknown): void {
+    if (!hasError) {
+      hasError = true;
+      firstError = error;
+      notifyStateChange();
+    }
+  }
+
+  function waitForStateChange(
+    options: StreamSenderWaitOptions = {},
+  ): Promise<void> {
+    if (options.signal?.aborted) {
+      return Promise.reject(
+        options.signal.reason ??
+          new SessionError("stream capacity wait aborted"),
+      );
+    }
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (
+        complete: () => void,
+      ): void => {
+        if (settled) return;
+        settled = true;
+        stateWaiters.delete(onChange);
+        options.signal?.removeEventListener("abort", onWaitAbort);
+        signal?.removeEventListener("abort", onStreamAbort);
+        streamAbortController.signal.removeEventListener(
+          "abort",
+          onStreamAbort,
+        );
+        complete();
+      };
+      const onChange = (): void => finish(resolve);
+      const onWaitAbort = (): void =>
+        finish(() =>
+          reject(
+            options.signal?.reason ??
+              new SessionError("stream capacity wait aborted"),
+          )
+        );
+      const onStreamAbort = (): void => finish(resolve);
+
+      stateWaiters.add(onChange);
+      options.signal?.addEventListener("abort", onWaitAbort, { once: true });
+      signal?.addEventListener("abort", onStreamAbort, { once: true });
+      streamAbortController.signal.addEventListener("abort", onStreamAbort, {
+        once: true,
+      });
+    });
+  }
+
+  function withDrainLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = drainTail;
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    drainTail = previous.then(() => next, () => next);
+    const run = async (): Promise<T> => {
+      drainDepth += 1;
+      notifyStateChange();
+      try {
+        return await operation();
+      } finally {
+        drainDepth -= 1;
+        release();
+        notifyStateChange();
       }
-    } catch (error) {
+    };
+    return previous.then(run, run);
+  }
+
+  async function drainOneUnlocked(
+    options: StreamDrainOptions = {},
+  ): Promise<void> {
+    const oldest = inFlightCalls[0];
+    if (!oldest) return;
+
+    while (!oldest.settled) {
+      if (!options.allowClosed) {
+        checkAborted();
+        checkError();
+      }
+      await waitForStateChange(options);
+    }
+
+    const settled = oldest.settled;
+    try {
       totalReceived++;
-      if (onError) {
-        onError(error, oldest.index);
+      if (settled.ok) {
+        try {
+          if (onResponse) {
+            await onResponse(settled.value, oldest.index);
+          }
+        } catch (error) {
+          rememberError(error);
+          throw error;
+        }
       } else {
-        if (!hasError) {
-          hasError = true;
-          firstError = error;
+        if (onError) {
+          try {
+            onError(settled.error, oldest.index);
+          } catch (error) {
+            rememberError(error);
+            throw error;
+          }
+        } else {
+          rememberError(settled.error);
+          throw settled.error;
         }
       }
     } finally {
       oldest.cleanup();
+      if (inFlightCalls[0] === oldest) {
+        inFlightCalls.shift();
+      } else {
+        const index = inFlightCalls.indexOf(oldest);
+        if (index >= 0) {
+          inFlightCalls.splice(index, 1);
+        }
+      }
+      notifyStateChange();
+    }
+  }
+
+  async function drainOne(options?: StreamDrainOptions): Promise<void> {
+    await withDrainLock(() => drainOneUnlocked(options));
+  }
+
+  async function waitForCapacity(
+    options: StreamSenderWaitOptions = {},
+  ): Promise<void> {
+    checkAborted();
+    checkError();
+    while (inFlightCalls.length >= maxInFlight) {
+      await drainOne(options);
+      checkAborted();
+      checkError();
     }
   }
 
   return {
     async send(params: TParams): Promise<void> {
-      checkAborted();
-      checkError();
-
-      // Wait until there's room in the window
-      while (inFlightCalls.length >= maxInFlight) {
-        await drainOne();
-        checkAborted();
-        checkError();
-      }
+      await waitForCapacity();
 
       const index = nextIndex++;
       const abortController = new AbortController();
@@ -227,29 +418,55 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
       if (signal) relayAbort(signal);
       relayAbort(streamAbortController.signal);
 
-      let promise: Promise<TResult>;
-      try {
-        promise = Promise.resolve(callFn(params, {
-          index,
-          signal: abortController.signal,
-        }));
-      } catch (error) {
-        for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
-        throw error;
-      }
-      inFlightCalls.push({
+      const call: InFlightCall<TResult> = {
         index,
-        promise,
         abortController,
         cleanup: () => {
           for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
         },
-      });
+      };
+      try {
+        Promise.resolve(callFn(params, {
+          index,
+          signal: abortController.signal,
+        })).then(
+          (value) => {
+            call.settled = { ok: true, value };
+            notifyStateChange();
+          },
+          (error) => {
+            call.settled = { ok: false, error };
+            notifyStateChange();
+          },
+        );
+      } catch (error) {
+        for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
+        rememberError(error);
+        throw error;
+      }
+      inFlightCalls.push(call);
+      notifyStateChange();
+    },
+
+    async waitForCapacity(
+      options?: StreamSenderWaitOptions,
+    ): Promise<void> {
+      await waitForCapacity(options);
     },
 
     async flush(): Promise<void> {
+      let firstUnhandledError: unknown = undefined;
       while (inFlightCalls.length > 0) {
-        await drainOne();
+        try {
+          await drainOne({ allowClosed: true });
+        } catch (error) {
+          if (firstUnhandledError === undefined) {
+            firstUnhandledError = error;
+          }
+        }
+      }
+      if (firstUnhandledError !== undefined) {
+        throw firstUnhandledError;
       }
       checkError();
     },
@@ -259,6 +476,7 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
         canceled = true;
         cancelReason = reason ?? new SessionError("stream canceled");
         streamAbortController.abort(cancelReason);
+        notifyStateChange();
       }
       for (const call of inFlightCalls) {
         call.abortController.abort(cancelReason);
@@ -267,6 +485,14 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
         if (onError) return;
         throw error;
       });
+    },
+
+    get state(): StreamSenderState {
+      return currentState();
+    },
+
+    get maxInFlight(): number {
+      return maxInFlight;
     },
 
     get inFlight(): number {
