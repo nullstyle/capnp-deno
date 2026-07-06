@@ -18,6 +18,10 @@ Primary public entrypoint is `mod.ts`. Split entrypoints are available at
 (`@nullstyle/capnp/encoding`). Advanced low-level WASM APIs are in
 `advanced.ts`.
 
+The published runtime source is dependency-clean: `src/**/*.ts` imports only
+relative project modules. Optional tools such as Playwright, esbuild, and Cliffy
+are limited to tests, examples, and codegen workflows.
+
 ## Core Contract
 
 Runtime invariant:
@@ -162,6 +166,24 @@ await client.ping({
 });
 ```
 
+When a generated RPC call fails, attach an opt-in debug tracer to the high-level
+helpers. The tracer records redacted frame summaries and runtime error metadata:
+
+```ts
+import { connect, createRpcDebugTracer, TcpTransport } from "@nullstyle/capnp";
+import { Pinger } from "./generated/schema/pinger_types.ts";
+
+const debug = createRpcDebugTracer({ log: true });
+using client = await connect(
+  Pinger,
+  await TcpTransport.connect("127.0.0.1", 4000),
+  { debug },
+);
+```
+
+Generated service tokens register method names automatically, so debug lines
+include both numeric ids and labels such as `rpc=Pinger.ping`.
+
 Generated `-> stream` methods are also first-class. A schema method such as:
 
 ```capnp
@@ -194,9 +216,20 @@ await sender.flush();
 console.log(await counter.total());
 ```
 
+`send()` is the backpressure boundary: when `maxInFlight` calls are already
+accepted, it waits for the oldest call to drain before starting another one.
+When producing the next item is expensive, wait explicitly before allocating it:
+
+```ts
+await sender.waitForCapacity();
+const next = await readNextValue();
+await sender.send(next);
+```
+
 Server streaming handlers receive `RpcCallContext`, including `ctx.signal`. When
 a caller cancels a stream sender, pending stream calls are aborted and server
-code can stop work by observing that signal.
+code can stop work by observing that signal. See `docs/streaming.md` for sender
+state, counters, cancellation, and tuning guidance.
 
 ## Transports, Resilience, and Ops
 
@@ -206,6 +239,35 @@ Built-in transports:
 - `WebSocketTransport`
 - `WebTransportTransport`
 - `MessagePortTransport`
+
+Browser WebTransport clients must connect over `https:` and trust the server
+certificate by hash:
+
+```ts
+import {
+  connect,
+  createWebTransportCertificateHashOptions,
+  getWebTransportRuntimeSupport,
+  WebTransportTransport,
+} from "@nullstyle/capnp";
+import { Pinger } from "./gen/schema_types.ts";
+
+const support = getWebTransportRuntimeSupport();
+if (!support.client) {
+  throw new Error(`WebTransport unavailable: ${support.missing.join(", ")}`);
+}
+
+const transport = await WebTransportTransport.connect(
+  "https://127.0.0.1:4443/rpc",
+  {
+    webTransport: createWebTransportCertificateHashOptions(certHashHex),
+  },
+);
+const pinger = await connect(Pinger, transport);
+```
+
+Server-side WebTransport uses `WebTransportTransport.listen(...)` and requires
+Deno's QUIC/WebTransport runtime support (`--unstable-net`).
 
 Low-level client adapters:
 

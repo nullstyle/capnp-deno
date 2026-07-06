@@ -6,29 +6,41 @@ This guide maps common errors encountered while using capnp-deno to their likely
 causes and fixes. Use the quick-reference table below to jump to the relevant
 section, or read through by error category.
 
+For generated `connect()` / `serve()` failures, start by attaching an opt-in
+debug tracer. See `docs/diagnostics.md` for redacted frame summaries, structured
+error metadata, and log formatting.
+
 ## Quick-Reference Table
 
-| Error message pattern                                                                      | Category      | Likely cause                                                                                    | Fix                                                                                                                                    |
-| ------------------------------------------------------------------------------------------ | ------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `InvalidInlineCompositePointer`                                                            | ABI/WASM      | Mismatched schema version between client and server WASM modules                                | Rebuild both client and server WASM from the same schema; see [ABI/WASM Errors](#abiwasm-errors)                                       |
-| `UnknownQuestion`                                                                          | ABI/WASM      | Sending a call to a question ID the peer does not recognize                                     | Ensure `finish` was not sent before pipelined calls complete; see [ABI/WASM Errors](#abiwasm-errors)                                   |
-| `InvalidPointer`                                                                           | ABI/WASM      | Corrupted or incorrectly encoded Cap'n Proto message pushed to the WASM peer                    | Verify the frame bytes are a valid Cap'n Proto message; see [ABI/WASM Errors](#abiwasm-errors)                                         |
-| `capnp_wasm_abi_version mismatch`                                                          | ABI/WASM      | WASM module ABI version does not match the runtime's expected version                           | Update either the WASM module or the `expectedVersion` option; see [Version Negotiation](#version-negotiation-errors)                  |
-| `missing wasm export: ...`                                                                 | ABI/WASM      | WASM module is missing a required or expected export                                            | Rebuild the WASM module or check the runtime's capability requirements; see [Missing Exports](#missing-wasm-exports)                   |
-| `unknown rpc message tag: N`                                                               | Protocol      | Frame contains an unrecognized RPC message type                                                 | Check that both peers speak the same protocol version; see [Protocol Errors](#protocol-errors)                                         |
-| `rpc message root pointer is null`                                                         | Protocol      | Frame is too short or has a null root struct pointer                                            | Verify the frame is a properly framed Cap'n Proto message; see [Malformed Frames](#malformed-frames)                                   |
-| `bootstrap not configured`                                                                 | Protocol      | Server has no `onBootstrap` handler in `RpcServerBridgeOptions`                                 | Provide `onBootstrap` when constructing `RpcServerBridge`; see [Bootstrap Failures](#bootstrap-failures)                               |
-| `rpc bootstrap failed: ...`                                                                | Protocol      | Server returned an exception to a bootstrap request                                             | Check server logs for the exception reason; see [Bootstrap Failures](#bootstrap-failures)                                              |
-| `unknown capability index: N`                                                              | Protocol      | Call targets a capability that was never exported or was already released                       | Export the capability before the client calls it; see [Capability Resolution](#capability-resolution-failures)                         |
-| `interface mismatch for capability N`                                                      | Protocol      | Call's `interfaceId` does not match the registered dispatch                                     | Check that client and server use the same generated schema; see [Capability Resolution](#capability-resolution-failures)               |
-| `TcpTransport is closed`                                                                   | Transport     | Attempting to use a transport after it was closed                                               | Check connection lifecycle; see [Transport Errors](#transport-errors)                                                                  |
-| `capnp frame size ... exceeds configured limit`                                            | Transport     | Received frame is larger than `maxFrameBytes`                                                   | Increase `maxFrameBytes` or investigate oversized messages; see [Frame Size Limits](#frame-size-limits)                                |
-| `RpcSession is closed`                                                                     | Session       | Operating on a session after `close()` was called                                               | Ensure session lifecycle ordering; see [Session Errors](#session-errors)                                                               |
-| `rpc wait timed out after Nms`                                                             | Session       | No response received within the configured timeout                                              | Check server health and increase `timeoutMs` or `defaultTimeoutMs`; see [Timeout and Abort](#timeout-and-abort-errors)                 |
-| `transport is closed` / `transport is not started`                                         | Session       | Client transport used before `start()` or after `close()`                                       | Call `start()` or set `autoStart: true`; see [Session Errors](#session-errors)                                                         |
-| `host-call pump was explicitly enabled, but wasm host-call bridge exports are unavailable` | Runtime       | WASM module does not support the host-call bridge, but `hostCallPump.enabled` was set to `true` | Set `hostCallPump.enabled: false` or use a WASM module with host-call support; see [Server Runtime Warnings](#server-runtime-warnings) |
-| `unsupported BufferSource`                                                                 | Instantiation | `instantiatePeer` received a value that is not a URL, string, Response, or BufferSource         | Pass a valid source; see [Instantiation Errors](#instantiation-errors)                                                                 |
-| `failed to fetch wasm module: 404`                                                         | Instantiation | The URL for the WASM module returned an HTTP error                                              | Check the URL path and server availability; see [Instantiation Errors](#instantiation-errors)                                          |
+| Error message pattern                                                                      | Category      | Likely cause                                                                                    | Fix                                                                                                                                                        |
+| ------------------------------------------------------------------------------------------ | ------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InvalidInlineCompositePointer`                                                            | ABI/WASM      | Mismatched schema version between client and server WASM modules                                | Rebuild both client and server WASM from the same schema; see [ABI/WASM Errors](#abiwasm-errors)                                                           |
+| `UnknownQuestion`                                                                          | ABI/WASM      | Sending a call to a question ID the peer does not recognize                                     | Ensure `finish` was not sent before pipelined calls complete; see [ABI/WASM Errors](#abiwasm-errors)                                                       |
+| `InvalidPointer`                                                                           | ABI/WASM      | Corrupted or incorrectly encoded Cap'n Proto message pushed to the WASM peer                    | Verify the frame bytes are a valid Cap'n Proto message; see [ABI/WASM Errors](#abiwasm-errors)                                                             |
+| `capnp_wasm_abi_version mismatch`                                                          | ABI/WASM      | WASM module ABI version does not match the runtime's expected version                           | Update either the WASM module or the `expectedVersion` option; see [Version Negotiation](#version-negotiation-errors)                                      |
+| `missing wasm export: ...`                                                                 | ABI/WASM      | WASM module is missing a required or expected export                                            | Rebuild the WASM module or check the runtime's capability requirements; see [Missing Exports](#missing-wasm-exports)                                       |
+| `unknown rpc message tag: N`                                                               | Protocol      | Frame contains an unrecognized RPC message type                                                 | Check that both peers speak the same protocol version; see [Protocol Errors](#protocol-errors)                                                             |
+| `rpc message root pointer is null`                                                         | Protocol      | Frame is too short or has a null root struct pointer                                            | Verify the frame is a properly framed Cap'n Proto message; see [Malformed Frames](#malformed-frames)                                                       |
+| `bootstrap not configured`                                                                 | Protocol      | Server has no `onBootstrap` handler in `RpcServerBridgeOptions`                                 | Provide `onBootstrap` when constructing `RpcServerBridge`; see [Bootstrap Failures](#bootstrap-failures)                                                   |
+| `rpc bootstrap failed: ...`                                                                | Protocol      | Server returned an exception to a bootstrap request                                             | Check server logs for the exception reason; see [Bootstrap Failures](#bootstrap-failures)                                                                  |
+| `unknown capability index: N`                                                              | Protocol      | Call targets a capability that was never exported or was already released                       | Export the capability before the client calls it; see [Capability Resolution](#capability-resolution-failures)                                             |
+| `interface mismatch for capability N`                                                      | Protocol      | Call's `interfaceId` does not match the registered dispatch                                     | Check that client and server use the same generated schema; see [Capability Resolution](#capability-resolution-failures)                                   |
+| `transport does not support exporting local capabilities`                                  | Generated RPC | A generated client passed a local callback through a transport without `exportCapability`       | Use `connect()`/`RpcWireClient`/`SessionRpcClientTransport`, or pass an existing `RpcStub`; see `docs/diagnostics.md`                                      |
+| `rpc outbound client is unavailable for capability callbacks`                              | Generated RPC | A generated server received a capability param without an outbound callback client              | Serve through `serve()` or `RpcServerRuntime`; see `docs/diagnostics.md`                                                                                   |
+| `TcpTransport is closed`                                                                   | Transport     | Attempting to use a transport after it was closed                                               | Check connection lifecycle; see [Transport Errors](#transport-errors)                                                                                      |
+| `capnp frame size ... exceeds configured limit`                                            | Transport     | Received frame is larger than `maxFrameBytes`                                                   | Increase `maxFrameBytes` or investigate oversized messages; see [Frame Size Limits](#frame-size-limits)                                                    |
+| `WebTransport requires an https URL`                                                       | Transport     | Browser/Deno WebTransport was asked to connect to `http:`                                       | Use an `https:` WebTransport URL; see [WebTransport Browser Setup](#webtransport-browser-setup)                                                            |
+| `WebTransport is unavailable` / `Deno.QuicEndpoint is unavailable`                         | Transport     | Runtime lacks browser WebTransport or Deno QUIC server APIs                                     | Check `getWebTransportRuntimeSupport()` and run Deno servers with `--unstable-net`; see [WebTransport Browser Setup](#webtransport-browser-setup)          |
+| `webtransport path mismatch`                                                               | Transport     | Client URL path does not match listener `path`                                                  | Align client URL and listener path; `"rpc"` and `"/rpc"` are equivalent; see [WebTransport Browser Setup](#webtransport-browser-setup)                     |
+| `webtransport bidirectional stream accept timed out`                                       | Transport     | Session upgraded but the RPC bidirectional stream was never opened                              | Verify the client uses `WebTransportTransport.connect(...)` and check `streamOpenTimeoutMs`; see [WebTransport Browser Setup](#webtransport-browser-setup) |
+| browser WebTransport connection failure with certificate/trust errors                      | Transport     | Certificate hash is missing, malformed, stale, or for a different certificate                   | Pin the SHA-256 hash with `createWebTransportCertificateHashOptions(...)`; see [WebTransport Browser Setup](#webtransport-browser-setup)                   |
+| `RpcSession is closed`                                                                     | Session       | Operating on a session after `close()` was called                                               | Ensure session lifecycle ordering; see [Session Errors](#session-errors)                                                                                   |
+| `rpc wait timed out after Nms`                                                             | Session       | No response received within the configured timeout                                              | Check server health and increase `timeoutMs` or `defaultTimeoutMs`; see [Timeout and Abort](#timeout-and-abort-errors)                                     |
+| `stream canceled`                                                                          | Streaming     | A generated stream sender was canceled, or its configured abort signal fired                    | Create a fresh sender for later calls and observe `ctx.signal` on the server; see [Timeout and Abort](#timeout-and-abort-errors)                           |
+| `transport is closed` / `transport is not started`                                         | Session       | Client transport used before `start()` or after `close()`                                       | Call `start()` or set `autoStart: true`; see [Session Errors](#session-errors)                                                                             |
+| `host-call pump was explicitly enabled, but wasm host-call bridge exports are unavailable` | Runtime       | WASM module does not support the host-call bridge, but `hostCallPump.enabled` was set to `true` | Set `hostCallPump.enabled: false` or use a WASM module with host-call support; see [Server Runtime Warnings](#server-runtime-warnings)                     |
+| `unsupported BufferSource`                                                                 | Instantiation | `instantiatePeer` received a value that is not a URL, string, Response, or BufferSource         | Pass a valid source; see [Instantiation Errors](#instantiation-errors)                                                                                     |
+| `failed to fetch wasm module: 404`                                                         | Instantiation | The URL for the WASM module returned an HTTP error                                              | Check the URL path and server availability; see [Instantiation Errors](#instantiation-errors)                                                              |
 
 ---
 
@@ -404,6 +416,47 @@ If browser clients fail to connect, verify that:
 3. Server is reachable over `ws://` or `wss://` and reverse proxies preserve
    upgrade headers.
 
+### WebTransport Browser Setup
+
+WebTransport clients are browser-facing and QUIC-backed, so a few failures
+surface before Cap'n Proto RPC starts:
+
+```ts
+import {
+  createWebTransportCertificateHashOptions,
+  getWebTransportRuntimeSupport,
+  WebTransportTransport,
+} from "@nullstyle/capnp";
+
+const support = getWebTransportRuntimeSupport();
+if (!support.client) {
+  throw new Error(`WebTransport unavailable: ${support.missing.join(", ")}`);
+}
+
+const transport = await WebTransportTransport.connect(
+  "https://127.0.0.1:4443/rpc",
+  {
+    webTransport: createWebTransportCertificateHashOptions(certHashHex),
+    streamOpenTimeoutMs: 5000,
+  },
+);
+```
+
+Common checks:
+
+- Use an `https:` URL. `http:` is rejected with `TransportError` before
+  constructing the session.
+- Browser and Deno loopback clients should pass
+  `createWebTransportCertificateHashOptions(hash)`. The helper accepts a 32-byte
+  `Uint8Array` / `ArrayBuffer` or a 64-character SHA-256 hex string and throws
+  `TransportError` for malformed hashes.
+- Run Deno WebTransport servers with `--unstable-net`; otherwise
+  `Deno.QuicEndpoint` / `Deno.upgradeWebTransport` are unavailable.
+- Match listener and client paths. Listener paths are normalized, so `"rpc"` and
+  `"/rpc"` are equivalent, but `"/rpc"` and `"/other"` are not.
+- A first-stream timeout means the QUIC/WebTransport session upgraded, but the
+  RPC bidirectional stream did not arrive before `streamOpenTimeoutMs`.
+
 ### Connection Lifecycle
 
 #### `TcpTransport is closed` / `WebSocketTransport is closed` / `MessagePortTransport is closed`
@@ -593,6 +646,26 @@ configured abort signal fired.
   streaming calls.
 - On the server, observe `ctx.signal` in the generated streaming handler to stop
   pending work promptly.
+- A producer blocked in `send()` or `waitForCapacity()` will reject when the
+  stream is canceled; this is expected and prevents additional calls from being
+  admitted after cancellation.
+
+#### Stream sender appears stalled while sending
+
+**What it means:** The sender has reached `maxInFlight` and is applying
+backpressure. `send()` waits for the oldest accepted streaming call to drain
+before starting another call.
+
+**How to fix:**
+
+- Treat the wait as normal flow control when the server is slower than the
+  producer.
+- Lower `maxInFlight` to reduce memory pressure, or raise it after testing with
+  realistic payload sizes and server latency.
+- Use `await sender.waitForCapacity()` before constructing expensive stream
+  items so work pauses before allocation.
+- Attach `createRpcDebugTracer({ log: true })` to `connect()` / `serve()` to
+  confirm that `Call`, `Finish`, and `Return` frames are moving as expected.
 
 #### `rpc wait rejected: question N is not awaiting a return`
 
@@ -698,6 +771,8 @@ that did not recognize the standard Cap'n Proto `StreamResult` type id.
   `RpcCallContext`.
 - Use the generated `create<Interface><Method>StreamSender(client, options?)`
   helper for bounded in-flight sends and cancellation.
+- See `docs/streaming.md` for `maxInFlight`, `waitForCapacity()`, sender state,
+  and cancellation semantics.
 
 #### Confusing RPC `-> stream` with transport byte streams
 

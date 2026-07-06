@@ -4,6 +4,11 @@
 
 - `docs/getting_started_serde.md`
 - `docs/getting_started_rpc.md`
+- `docs/diagnostics.md`
+- `docs/streaming.md`
+- `docs/interop.md`
+- `docs/performance.md`
+- `docs/interop_performance_sprint.md`
 - `docs/transport_composition.md`
 - `docs/troubleshooting.md`
 - `docs/capnp_zig_additions.md`

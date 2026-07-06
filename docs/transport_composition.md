@@ -64,9 +64,15 @@ Communicates over a standard `WebSocket` with `binaryType = "arraybuffer"`. Use
 ### `WebTransportTransport`
 
 Communicates over a WebTransport bidirectional stream running on HTTP/3/QUIC.
-Use `WebTransportTransport.connect(url)` for clients. On the server side, accept
-or upgrade a WebTransport session and wrap it with
-`WebTransportTransport.accept(session)`.
+Use `WebTransportTransport.connect(url)` for clients. Client URLs must use
+`https:`. On the server side, accept or upgrade a WebTransport session and wrap
+it with `WebTransportTransport.accept(session)`, or use
+`WebTransportTransport.listen(...)` with `serve(...)`.
+
+Browser and Deno loopback clients usually trust development certificates with
+`createWebTransportCertificateHashOptions(...)`. Use
+`getWebTransportRuntimeSupport()` to detect whether the current runtime has the
+client and server primitives before enabling this path.
 
 ### `MessagePortTransport`
 
@@ -342,6 +348,11 @@ If you are using generated `RpcServiceToken` values, prefer `connect(...)` with
 `WebTransportTransport.listen(...)`:
 
 ```ts
+const support = getWebTransportRuntimeSupport();
+if (!support.client) {
+  throw new Error(`WebTransport unavailable: ${support.missing.join(", ")}`);
+}
+
 const listener = WebTransportTransport.listen({
   hostname: "127.0.0.1",
   port: 4443,
@@ -358,11 +369,7 @@ using server = serve(
 using client = await connect(
   Presence,
   await WebTransportTransport.connect("https://127.0.0.1:4443/p2p", {
-    webTransport: {
-      serverCertificateHashes: [
-        { algorithm: "sha-256", value: certHashBytes },
-      ],
-    },
+    webTransport: createWebTransportCertificateHashOptions(certHashBytes),
   }),
 );
 ```
@@ -372,15 +379,24 @@ WebTransport specifics:
 1. `WebTransportTransport.listen(...)` requires Deno's unstable QUIC APIs
    (`--unstable-net`) plus a TLS certificate and private key.
 2. `connect(...)` over `WebTransportTransport.connect(...)` opens a single
-   bidirectional stream for Cap'n Proto RPC traffic.
+   bidirectional stream for Cap'n Proto RPC traffic. Client URLs must use
+   `https:`; `http:` is rejected before the session constructor is called.
 3. `serve(...)` over `WebTransportTransport.listen(...)` upgrades each accepted
    QUIC connection with `Deno.upgradeWebTransport(...)`, waits for the first
    bidirectional stream, and boots a per-connection
    `RpcServerRuntime.createWithRoot(...)`.
 4. For local development, prefer certificate-hash pinning via
-   `webTransport.serverCertificateHashes`.
-5. For retry-on-connect behavior, layer
+   `createWebTransportCertificateHashOptions(hash)`. The helper accepts 32-byte
+   `Uint8Array` / `ArrayBuffer` values or a 64-character SHA-256 hex string.
+5. Listener paths are normalized so `"p2p"` and `"/p2p"` match the same client
+   URL path. Path mismatch, upgrade failure, first-stream timeout, and abnormal
+   close are reported through `TransportError`, `onConnectionError`, and
+   observability.
+6. For retry-on-connect behavior, layer
    `connectWebTransportTransportWithReconnect(...)` under your client factory.
+7. Browser WebTransport coverage is opt-in:
+   `mise run test:browser-webtransport`. Mise installs Chromium first, then runs
+   `deno task test:browser-webtransport` with `CAPNP_DENO_BROWSER_E2E=1`.
 
 ### MessagePort (Workers / Iframes)
 

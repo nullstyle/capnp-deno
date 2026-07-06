@@ -1,6 +1,9 @@
 import {
+  CapnpError,
   connect,
+  createRpcDebugTracer,
   createRpcServiceToken,
+  createWebTransportCertificateHashOptions,
   EMPTY_STRUCT_MESSAGE,
   ReconnectingRpcClientTransport,
   type RpcPeer,
@@ -313,12 +316,9 @@ function reserveTcpPort(): number {
 
 function createWebTransportConnectOptions(): WebTransportTransportConnectOptions {
   return {
-    webTransport: {
-      serverCertificateHashes: [{
-        algorithm: "sha-256",
-        value: new Uint8Array(TEST_WEBTRANSPORT_CERT_HASH),
-      }],
-    },
+    webTransport: createWebTransportCertificateHashOptions(
+      TEST_WEBTRANSPORT_CERT_HASH,
+    ),
     connectTimeoutMs: 2000,
     streamOpenTimeoutMs: 2000,
   };
@@ -546,6 +546,105 @@ async function assertGeneratedStreamingFlow(
   assertEquals(total.count, values.length);
 }
 
+interface GeneratedStreamingBackpressureProbe {
+  readonly firstStarted: ReturnType<typeof deferred<void>>;
+  readonly releaseFirst: ReturnType<typeof deferred<void>>;
+  values: number[];
+  startedValues: number[];
+}
+
+function createGeneratedStreamingBackpressureProbe(): GeneratedStreamingBackpressureProbe {
+  return {
+    firstStarted: deferred<void>(),
+    releaseFirst: deferred<void>(),
+    values: [],
+    startedValues: [],
+  };
+}
+
+function createGeneratedStreamingBackpressureCounter(
+  probe: GeneratedStreamingBackpressureProbe,
+): CounterSinkService {
+  return {
+    async add(value, ctx) {
+      if (ctx.signal.aborted) {
+        throw new Error("stream call started after cancellation");
+      }
+      probe.startedValues.push(value);
+      if (value === 1) {
+        probe.firstStarted.resolve();
+        await probe.releaseFirst.promise;
+        if (ctx.signal.aborted) return;
+      }
+      probe.values.push(value);
+    },
+
+    total() {
+      return {
+        sum: sumNumbers(probe.values),
+        count: probe.values.length,
+      };
+    },
+  };
+}
+
+async function assertGeneratedStreamingBackpressureFlow(
+  client: RpcStub<CounterSinkClient>,
+  probe: GeneratedStreamingBackpressureProbe,
+  label: string,
+): Promise<void> {
+  const sender = createCounterSinkAddStreamSender(client, {
+    maxInFlight: 2,
+  });
+
+  assertEquals(sender.state, "open");
+  assertEquals(sender.maxInFlight, 2);
+  await sender.send(1);
+  await withTimeout(
+    probe.firstStarted.promise,
+    2_000,
+    `${label} first stream call start`,
+  );
+  await sender.send(2);
+  assertEquals(sender.totalSent, 2);
+  assertEquals(sender.inFlight, 2);
+
+  let thirdSettled = false;
+  const third = sender.send(3).then(
+    () => {
+      thirdSettled = true;
+    },
+    (error) => {
+      thirdSettled = true;
+      throw error;
+    },
+  );
+
+  await delay(25);
+  assertEquals(thirdSettled, false);
+  assertEquals(sender.totalSent, 2);
+  assertEquals(sender.inFlight, 2);
+  assertEquals(sender.state, "draining");
+
+  probe.releaseFirst.resolve();
+  await withTimeout(third, 4_000, `${label} third send capacity`);
+  assertEquals(sender.totalSent, 3);
+  await withTimeout(sender.flush(), 4_000, `${label} backpressure flush`);
+
+  assertEquals(sender.inFlight, 0);
+  assertEquals(sender.totalReceived, 3);
+  assertEquals(sender.state, "open");
+  assertEquals(probe.values.join(","), "1,2,3");
+
+  const total = await withTimeout(
+    client.total({ timeoutMs: 2_000 }),
+    4_000,
+    `${label} backpressure total`,
+  );
+  assertEquals(total.sum, 6n);
+  assertEquals(total.count, 3);
+}
+
 interface GeneratedStreamingCancellationProbe {
   readonly started: ReturnType<typeof deferred<number>>;
   readonly canceled: ReturnType<typeof deferred<void>>;
@@ -616,11 +715,30 @@ async function assertGeneratedStreamingCancellationFlow(
     ),
     99,
   );
+  const blockedSend = sender.send(123).then(
+    () => {
+      throw new Error("blocked send resolved after stream cancellation");
+    },
+    (error) => {
+      assert(
+        error instanceof Error && /stream canceled/i.test(error.message),
+        `expected blocked stream send cancellation, got: ${String(error)}`,
+      );
+    },
+  );
+  await delay(25);
+  assertEquals(sender.totalSent, 1);
+  assertEquals(sender.inFlight, 1);
 
   await withTimeout(
     sender.cancel("client canceled stream"),
     4_000,
     `${label} cancel stream`,
+  );
+  await withTimeout(
+    blockedSend,
+    2_000,
+    `${label} blocked stream send rejection`,
   );
   await withTimeout(
     probe.canceled.promise,
@@ -630,6 +748,7 @@ async function assertGeneratedStreamingCancellationFlow(
   assertEquals(probe.sawAbort, true);
   assertEquals(sender.inFlight, 0);
   assertEquals(errors.length, 1);
+  assertEquals(probe.values.includes(123), false);
 
   const followup = createCounterSinkAddStreamSender(client, {
     maxInFlight: 1,
@@ -678,6 +797,96 @@ Deno.test("connect/serve generated callbacks over TcpTransport", async () => {
   }
 
   assertEquals(handle.closed, true);
+});
+
+Deno.test("generated callback failure over TcpTransport includes debug trace", async () => {
+  const debug = createRpcDebugTracer();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(Pinger, listener, {
+    ping() {
+      throw new Error("server rejected callback");
+    },
+  }, { debug });
+
+  let client: RpcStub<PingerService> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          Pinger,
+          await TcpTransport.connect("127.0.0.1", port),
+          { debug },
+        ))(),
+      4_000,
+      "tcp generated callback debug connect",
+    );
+
+    let thrown: unknown;
+    try {
+      await client.ping({
+        pong() {
+          return Promise.resolve();
+        },
+      }, { timeoutMs: 2_000 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof CapnpError,
+      `expected CapnpError, got: ${String(thrown)}`,
+    );
+    assertEquals(thrown.metadata?.serviceName, "Pinger");
+    assertEquals(thrown.metadata?.methodName, "ping");
+    assertEquals(thrown.metadata?.methodId, 0);
+
+    const events = debug.snapshot();
+    assert(
+      events.some((event) =>
+        event.kind === "frame" &&
+        event.messageName === "Call" &&
+        event.interfaceId === Pinger.interfaceId &&
+        event.interfaceName === "Pinger" &&
+        event.methodId === 0 &&
+        event.methodName === "ping" &&
+        event.capTableCount === 1 &&
+        event.payload?.redacted === true
+      ),
+      "expected debug trace to include redacted cap-bearing Pinger.ping call",
+    );
+    assert(
+      events.some((event) =>
+        event.kind === "frame" &&
+        event.messageName === "Return" &&
+        event.returnKind === "exception"
+      ),
+      `expected debug trace to include server exception return, saw ${
+        events.map((event) =>
+          `${event.kind}:${event.messageName ?? event.eventName ?? "unknown"}:${
+            event.returnKind ?? ""
+          }:${event.reason ?? ""}:${event.errorMessage ?? ""}`
+        ).join(" | ")
+      }`,
+    );
+    assert(
+      events.some((event) =>
+        event.kind === "observability" &&
+        event.eventName === "rpc.server.dispatch_error" &&
+        event.attributes?.["rpc.service_name"] === "Pinger" &&
+        event.attributes?.["rpc.method_name"] === "ping" &&
+        event.questionId !== undefined &&
+        /server rejected callback/.test(event.errorMessage ?? "")
+      ),
+      "expected debug trace to include structured generated dispatch error",
+    );
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
 });
 
 Deno.test("connect/serve generated callbacks over WebSocketTransport", async () => {
@@ -780,6 +989,85 @@ Deno.test("connect/serve generated streaming over WebSocketTransport", async () 
   assertEquals(handle.closed, true);
 });
 
+Deno.test("generated streaming backpressure over TcpTransport", async () => {
+  const probe = createGeneratedStreamingBackpressureProbe();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingBackpressureCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await TcpTransport.connect("127.0.0.1", port),
+        ))(),
+      4_000,
+      "tcp generated streaming backpressure connect",
+    );
+
+    await assertGeneratedStreamingBackpressureFlow(
+      client,
+      probe,
+      "tcp",
+    );
+  } finally {
+    probe.releaseFirst.resolve();
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("generated streaming backpressure over WebSocketTransport", async () => {
+  const probe = createGeneratedStreamingBackpressureProbe();
+  const port = reserveTcpPort();
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+    path: "/rpc",
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingBackpressureCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+        ))(),
+      4_000,
+      "websocket generated streaming backpressure connect",
+    );
+
+    await assertGeneratedStreamingBackpressureFlow(
+      client,
+      probe,
+      "websocket",
+    );
+  } finally {
+    probe.releaseFirst.resolve();
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
 Deno.test("generated streaming cancellation over TcpTransport", async () => {
   const probe = createGeneratedStreamingCancellationProbe();
   const port = reserveTcpPort();
@@ -817,6 +1105,7 @@ Deno.test("generated streaming cancellation over TcpTransport", async () => {
 
 Deno.test("generated streaming cancellation over WebSocketTransport", async () => {
   const probe = createGeneratedStreamingCancellationProbe();
+  const debug = createRpcDebugTracer();
   const port = reserveTcpPort();
   const listener = WebSocketTransport.listen({
     hostname: "127.0.0.1",
@@ -827,6 +1116,7 @@ Deno.test("generated streaming cancellation over WebSocketTransport", async () =
     CounterSink,
     listener,
     createGeneratedStreamingCancellationCounter(probe),
+    { debug },
   );
 
   let client: RpcStub<CounterSinkClient> | null = null;
@@ -836,12 +1126,33 @@ Deno.test("generated streaming cancellation over WebSocketTransport", async () =
         await connect(
           CounterSink,
           await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+          { debug },
         ))(),
       4_000,
       "websocket generated streaming cancellation connect",
     );
 
     await assertGeneratedStreamingCancellationFlow(client, probe, "websocket");
+
+    const events = debug.snapshot();
+    assert(
+      events.some((event) =>
+        event.kind === "frame" &&
+        event.messageName === "Call" &&
+        event.interfaceId === CounterSink.interfaceId &&
+        event.methodId === 0 &&
+        event.payload?.redacted === true
+      ),
+      "expected debug trace to include redacted CounterSink.add call",
+    );
+    assert(
+      events.some((event) =>
+        event.kind === "frame" &&
+        event.messageName === "Finish" &&
+        event.requireEarlyCancellation === true
+      ),
+      "expected debug trace to include early-cancel Finish frame",
+    );
   } finally {
     probe.release.resolve();
     await client?.close().catch(() => {});
@@ -1671,6 +1982,83 @@ Deno.test({
     } finally {
       await client.close();
       await handle.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "WebTransport listener reports first stream timeout over loopback",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const port = reserveTcpPort();
+    const reported = deferred<unknown>();
+    const events: Array<{
+      name: string;
+      attributes: Record<string, unknown>;
+      error?: unknown;
+    }> = [];
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+      transport: {
+        streamOpenTimeoutMs: 25,
+      },
+      onConnectionError: (error) => {
+        reported.resolve(error);
+      },
+      observability: {
+        onEvent(event) {
+          events.push({
+            name: event.name,
+            attributes: event.attributes ?? {},
+            error: event.error,
+          });
+        },
+      },
+    });
+
+    let client: WebTransport | null = null;
+    let clientClosed: Promise<void> | null = null;
+    try {
+      client = new WebTransport(
+        `https://127.0.0.1:${port}/rpc`,
+        createWebTransportConnectOptions().webTransport,
+      );
+      void client.ready.catch(() => {});
+      clientClosed = client.closed.catch(() => {}).then(() => {});
+      await withTimeout(client.ready, 4000, "wt no-stream client ready");
+      const error = await withTimeout(
+        reported.promise,
+        4000,
+        "wt first stream timeout report",
+      );
+      assert(
+        error instanceof TransportError &&
+          /bidirectional stream accept timed out/i.test(error.message),
+        `expected first stream timeout TransportError, got: ${String(error)}`,
+      );
+      assert(
+        events.some((event) =>
+          event.name === "rpc.transport.webtransport.connection_error" &&
+          event.attributes["rpc.connection.phase"] === "first_stream"
+        ),
+        "expected first stream timeout observability event",
+      );
+      await Promise.race([
+        clientClosed,
+        delay(100),
+      ]);
+    } finally {
+      try {
+        client?.close();
+      } catch {
+        // no-op
+      }
+      await clientClosed?.catch(() => {});
+      await listener.close();
     }
   },
 });

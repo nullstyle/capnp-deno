@@ -20,6 +20,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 - Generated Ping/Ponger and streaming examples covering TCP and WebSocket golden
   paths.
 - MessagePort generated RPC integration coverage for callbacks and streaming.
+- Generated RPC diagnostics:
+  - `createRpcDebugTracer(...)`
+  - `formatRpcDebugEvent(...)`
+  - schema-aware frame labels such as `rpc=Pinger.ping`
+  - `docs/diagnostics.md`
+- Streaming reliability docs:
+  - `docs/streaming.md`
+  - explicit `StreamSender` backpressure, state, and cancellation guidance
+- Browser/WebTransport hardening helpers:
+  - `getWebTransportRuntimeSupport()`
+  - `createWebTransportCertificateHash(...)`
+  - `createWebTransportCertificateHashOptions(...)`
+  - opt-in `mise run test:browser-webtransport`
+- Runtime dependency surface guard that fails if published `src/**/*.ts` starts
+  importing npm/jsr/node/http or bare package specifiers.
 - Release checklist:
   - `docs/release_checklist.md`
   - `just release-check`
@@ -34,11 +49,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   - `register<Interface>Server(...)`
 - RPC codegen now emits JSDoc for generated high-level clients, servers,
   callback-capable parameters, and stream sender helpers.
+- RPC codegen now emits typed `SessionError` / `ProtocolError` failures with
+  structured metadata for generated callback, streaming, and dispatch paths.
+- `connect()` and `serve()` now accept an opt-in `debug` tracer option for
+  redacted generated RPC frame summaries.
 - RPC codegen now fails fast when interface methods reference unknown
   param/result structs (instead of generating late-bound `unknown` fallbacks).
 - `RpcServerRuntime` now allows host-call dispatch to complete asynchronously so
   `Finish(requireEarlyCancellation)` can abort `RpcCallContext.signal` while a
   generated streaming handler is still pending.
+- `StreamSender` now exposes `waitForCapacity()`, `state`, and `maxInFlight`
+  while preserving existing `send()` / `flush()` / `cancel()` behavior.
+- `WebTransportTransport` now validates `https:` client URLs, normalizes
+  listener paths, reports listener upgrade/path/first-stream failures through
+  `onConnectionError` and observability, and rejects queued/in-flight sends when
+  sessions close.
 - Documentation cleanup:
   - archived historical planning/progress docs under `docs/archive/2026-02/`
   - refreshed `docs/capnp_zig_additions.md` to current submodule revision.
@@ -51,3 +76,5 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   gate.
 - `RpcWireClient` now sends best-effort early-cancel `Finish` frames when a
   pending call aborts or times out.
+- `StreamSender.cancel()` now keeps draining accepted calls after cancellation
+  so in-flight counters are cleared before cancellation completes.
