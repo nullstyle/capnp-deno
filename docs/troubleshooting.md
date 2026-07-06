@@ -579,6 +579,21 @@ the configured timeout.
 - This is expected behavior when the caller explicitly aborts. If unintended,
   check the signal source.
 
+#### `stream canceled`
+
+**What it means:** A `StreamSender` was canceled via `cancel(reason?)`, or a
+configured abort signal fired.
+
+**How to fix:**
+
+- Treat this as normal control flow when the caller intentionally stops a
+  generated `-> stream` method.
+- Do not reuse the canceled sender. Create a new generated sender helper, such
+  as `createCounterSinkAddStreamSender(client, options)`, for subsequent
+  streaming calls.
+- On the server, observe `ctx.signal` in the generated streaming handler to stop
+  pending work promptly.
+
 #### `rpc wait rejected: question N is not awaiting a return`
 
 **What it means:** An attempt was made to await a Return for a question that was
@@ -670,6 +685,34 @@ recognized type.
 
 These are not runtime errors but compiler errors from generated code.
 
+#### Generated `-> stream` method returns the wrong type
+
+**What it means:** The generated code was produced by an older `capnpc-deno`
+that did not recognize the standard Cap'n Proto `StreamResult` type id.
+
+**How to fix:**
+
+- Regenerate the affected schema with the current codegen.
+- Generated client methods for `-> stream` return `Promise<void>`.
+- Generated server handlers return `void | Promise<void>` and receive
+  `RpcCallContext`.
+- Use the generated `create<Interface><Method>StreamSender(client, options?)`
+  helper for bounded in-flight sends and cancellation.
+
+#### Confusing RPC `-> stream` with transport byte streams
+
+**What it means:** `-> stream` is a Cap'n Proto RPC method shape. It is not the
+same thing as TCP bytes, WebSocket messages, or WebTransport streams.
+
+**How to fix:**
+
+- Use `connect()` / `serve()` with generated service tokens for application RPC
+  streaming.
+- Use `TcpTransport`, `WebSocketTransport`, or `WebTransportTransport` only to
+  carry the RPC frames.
+- Use transport APIs directly only when you are implementing or debugging the
+  transport layer itself.
+
 #### `T extends Record<string, unknown>` constraint failures
 
 **What it means:** Generated interfaces do not include an index signature, but
@@ -704,6 +747,15 @@ const client = new SessionRpcClientTransport(session, transport, {
   observability,
 });
 ```
+
+Useful generated-RPC lifecycle events include:
+
+- `rpc.client.capability_export` when a WASM-backed generated client exports a
+  local callback implementation.
+- `rpc.server.capability_export` and `rpc.server.capability_release` when the
+  server bridge registers or releases callback-capable server dispatches.
+- `rpc.server.call_cancel` when a `Finish` with early cancellation aborts an
+  in-flight server call context.
 
 ### Inspect error metadata
 

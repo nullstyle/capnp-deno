@@ -90,7 +90,12 @@ through the peer, and sends outbound responses. One session per connection.
 
 Client-side RPC API. Provides `bootstrap()`, `call()`, `callRaw()`, and
 `callRawPipelined()`. Drives an `RpcSession` through an
-`RpcSessionHarnessTransport`.
+`RpcSessionHarnessTransport`. It also supports `exportCapability(...)` for
+generated clients that pass local callback implementations as interface
+parameters; callback frames are dispatched through a local bridge while the
+client waits for the original result. Generated `-> stream` sender helpers can
+also use this transport; they are application-level RPC call flow control, not
+transport byte streams.
 
 ### `InMemoryRpcHarnessTransport`
 
@@ -109,6 +114,10 @@ Use this when connecting to a remote server from client code.
 Raw RPC client adapter that sends Bootstrap/Call/Finish/Release wire frames
 directly over a started transport. Use this when you want generated stubs over
 TCP, WebSocket, or WebTransport without running a local client-side WASM peer.
+It also supports `exportCapability(...)`, so generated clients can pass local
+callback implementations over real network transports. Generated `-> stream`
+sender helpers work over this adapter as ordinary RPC calls with bounded
+in-flight windows.
 
 ### `RpcServerRuntime`
 
@@ -405,6 +414,44 @@ const runtime = await RpcServerRuntime.create(serverTransport, bridge, {
   autoStart: true,
 });
 ```
+
+For generated high-level clients, bind one side as a single accepted server
+connection and connect the other side normally:
+
+```ts
+const channel = new MessageChannel();
+
+const serverTransport = new MessagePortTransport(channel.port1, {
+  closePortOnClose: true,
+});
+using server = await serveConnection(
+  Pinger,
+  {
+    transport: serverTransport,
+    localAddress: { transport: "messageport" },
+    remoteAddress: { transport: "messageport" },
+  },
+  new PingServer(),
+);
+
+const clientTransport = new MessagePortTransport(channel.port2, {
+  closePortOnClose: true,
+});
+using client = await connect(Pinger, clientTransport);
+```
+
+Generated callbacks and generated `-> stream` sender helpers work over this
+shape the same way they do over TCP, WebSocket, and WebTransport.
+
+## Generated RPC Transport Parity
+
+| Transport         | Generated `connect()` | Generated `serve()` / `serveConnection()`              | Local callback exports             | Generated `-> stream` helpers | Notes                                                  |
+| ----------------- | --------------------- | ------------------------------------------------------ | ---------------------------------- | ----------------------------- | ------------------------------------------------------ |
+| TCP               | Yes                   | Yes, via `TcpTransport.listen()`                       | Yes                                | Yes                           | Primary server/client path.                            |
+| WebSocket         | Yes                   | Yes, via `WebSocketTransport.listen()` or `.handler()` | Yes                                | Yes                           | Useful for browser/Deno RPC.                           |
+| WebTransport      | Yes                   | Yes, via `WebTransportTransport.listen()`              | Yes                                | Yes                           | Requires `--unstable-net` and certificate trust setup. |
+| MessagePort       | Yes                   | Yes, via `serveConnection()`                           | Yes                                | Yes                           | Use paired `MessagePortTransport` instances.           |
+| In-memory harness | Advanced              | Advanced                                               | Yes, with host-call bridge support | Yes                           | Test/runtime harness, not a production transport.      |
 
 ## Decision Guide
 

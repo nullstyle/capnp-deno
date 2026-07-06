@@ -150,6 +150,54 @@ serve(
 );
 ```
 
+Generated clients can pass local interface implementations as callback
+parameters. The runtime exports the local object as a temporary capability and
+serves callback calls while the original request is still pending:
+
+```ts
+await client.ping({
+  async pong(value) {
+    console.log("pong", value);
+  },
+});
+```
+
+Generated `-> stream` methods are also first-class. A schema method such as:
+
+```capnp
+interface CounterSink {
+  add @0 (value :UInt32) -> stream;
+  total @1 () -> (sum :UInt64, count :UInt32);
+}
+```
+
+generates a client method that returns `Promise<void>`, a server method that
+returns `void | Promise<void>`, and a typed sender helper:
+
+```ts
+import { connect, TcpTransport } from "@nullstyle/capnp";
+import {
+  CounterSink,
+  createCounterSinkAddStreamSender,
+} from "./generated/schema_types.ts";
+
+using counter = await connect(
+  CounterSink,
+  await TcpTransport.connect("127.0.0.1", 4010),
+);
+
+const sender = createCounterSinkAddStreamSender(counter, { maxInFlight: 4 });
+for (const value of [3, 5, 8, 13]) {
+  await sender.send(value);
+}
+await sender.flush();
+console.log(await counter.total());
+```
+
+Server streaming handlers receive `RpcCallContext`, including `ctx.signal`. When
+a caller cancels a stream sender, pending stream calls are aborted and server
+code can stop work by observing that signal.
+
 ## Transports, Resilience, and Ops
 
 Built-in transports:
@@ -180,7 +228,8 @@ Resilience and runtime helpers:
 - `ReconnectingRpcClientTransport`
 - `RpcConnectionPool` + `withConnection(...)`
 - `CircuitBreaker`
-- `createStreamSender(...)`
+- `createStreamSender(...)` for application-level RPC `-> stream` call flow
+  control
 
 Middleware and observability:
 
@@ -261,6 +310,16 @@ Real-WASM gate:
 just ci-real
 ```
 
+Release-candidate gate:
+
+```sh
+just release-check
+```
+
+This runs the fast gate, codegen tests, socket integration, WASM rebuild, smoke
+test, real-WASM tests, and JSR publish dry-run. Prefer the Just wrapper for WASM
+gates because it runs through `mise` and exposes the pinned Zig/Binaryen tools.
+
 Deno task equivalents:
 
 ```sh
@@ -268,6 +327,8 @@ deno task verify
 deno task test:integration
 deno task verify:real
 ```
+
+See `docs/release_checklist.md` before tagging a release.
 
 Run GitHub Actions locally:
 

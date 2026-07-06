@@ -18,6 +18,7 @@ class PingServer implements Pinger {
 
   async ping(p: Ponger | RpcStub<Ponger>): Promise<void> {
     this.pingCount++;
+    console.log(`calling client Ponger.pong(${this.pingCount})`);
     await p.pong(this.pingCount);
   }
 }

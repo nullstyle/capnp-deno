@@ -70,6 +70,79 @@ try {
 }
 ```
 
+## Generated Streaming RPC
+
+Methods declared as `-> stream` are generated as application-level streaming RPC
+calls. Client methods return `Promise<void>`, server handlers return
+`void | Promise<void>`, and codegen emits a typed stream sender helper for each
+streaming method.
+
+```capnp
+interface CounterSink {
+  add @0 (value :UInt32) -> stream;
+  total @1 () -> (sum :UInt64, count :UInt32);
+}
+```
+
+Server:
+
+```ts
+import { serve, TcpTransport } from "@nullstyle/capnp";
+import type { RpcCallContext } from "@nullstyle/capnp";
+import {
+  CounterSink,
+  type CounterSinkService,
+} from "../generated/schema_types.ts";
+
+class CounterServer implements CounterSinkService {
+  #sum = 0n;
+  #count = 0;
+
+  add(value: number, ctx: RpcCallContext): void {
+    if (ctx.signal.aborted) return;
+    this.#sum += BigInt(value);
+    this.#count++;
+  }
+
+  total() {
+    return { sum: this.#sum, count: this.#count };
+  }
+}
+
+serve(
+  CounterSink,
+  TcpTransport.listen({ hostname: "127.0.0.1", port: 4010 }),
+  () => new CounterServer(),
+);
+```
+
+Client:
+
+```ts
+import { connect, TcpTransport } from "@nullstyle/capnp";
+import {
+  CounterSink,
+  createCounterSinkAddStreamSender,
+} from "../generated/schema_types.ts";
+
+using counter = await connect(
+  CounterSink,
+  await TcpTransport.connect("127.0.0.1", 4010),
+);
+
+const sender = createCounterSinkAddStreamSender(counter, { maxInFlight: 4 });
+for (const value of [1, 2, 3, 5, 8]) {
+  await sender.send(value);
+}
+await sender.flush();
+
+console.log(await counter.total());
+```
+
+Use `sender.cancel(reason?)` to abort pending stream calls. The generated helper
+forwards cancellation to the underlying RPC call, and server handlers can
+observe it through `ctx.signal`.
+
 ## Explicit Finish/Release Lifecycle
 
 Generated method calls auto-finish by default. Use low-level lifecycle control
