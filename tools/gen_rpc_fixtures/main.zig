@@ -2,7 +2,7 @@ const std = @import("std");
 const capnpc = @import("capnpc-zig-core");
 const fixture_tool = @import("rpc-fixture-tool");
 
-const protocol = capnpc.rpc.protocol;
+const protocol = capnpc.rpc.wire.protocol;
 
 fn printArray(writer: *std.Io.Writer, name: []const u8, bytes: []const u8) !void {
     try writer.print("export const {s} = new Uint8Array([", .{name});
