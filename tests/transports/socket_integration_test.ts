@@ -18,6 +18,8 @@ import {
   WebSocketTransport,
   WebTransportTransport,
   type WebTransportTransportConnectOptions,
+  type WebTransportTransportListener,
+  type WebTransportTransportListenOptions,
 } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
 import {
@@ -322,6 +324,32 @@ function createWebTransportConnectOptions(): WebTransportTransportConnectOptions
     connectTimeoutMs: 2000,
     streamOpenTimeoutMs: 2000,
   };
+}
+
+type WebTransportLoopbackListenOptions = Omit<
+  WebTransportTransportListenOptions,
+  "hostname" | "port" | "cert" | "key"
+>;
+
+function listenWebTransportLoopback(
+  options: WebTransportLoopbackListenOptions = {},
+): WebTransportTransportListener {
+  const { path = "/rpc", ...rest } = options;
+  return WebTransportTransport.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    path,
+    cert: TEST_WEBTRANSPORT_CERT_PEM,
+    key: TEST_WEBTRANSPORT_KEY_PEM,
+    ...rest,
+  });
+}
+
+function webTransportLoopbackUrl(
+  listener: WebTransportTransportListener,
+  path = "/rpc",
+): string {
+  return `https://127.0.0.1:${listener.addr.port}${path}`;
 }
 
 const WEBTRANSPORT_RUNTIME_AVAILABLE =
@@ -1225,14 +1253,7 @@ Deno.test({
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
     const probe = createGeneratedCallbackProbe();
-    const port = reserveTcpPort();
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
-    });
+    const listener = listenWebTransportLoopback();
     const handle = serve(
       Pinger,
       listener,
@@ -1246,7 +1267,7 @@ Deno.test({
           await connect(
             Pinger,
             await WebTransportTransport.connect(
-              `https://127.0.0.1:${port}/rpc`,
+              webTransportLoopbackUrl(listener),
               createWebTransportConnectOptions(),
             ),
           ))(),
@@ -1956,21 +1977,14 @@ Deno.test({
         }, options),
     });
 
-    const port = reserveTcpPort();
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
-    });
+    const listener = listenWebTransportLoopback();
     const handle = serve(service, listener, {});
 
     const client = await withTimeout(
       connect(
         service,
         await WebTransportTransport.connect(
-          `https://127.0.0.1:${port}/rpc`,
+          webTransportLoopbackUrl(listener),
           createWebTransportConnectOptions(),
         ),
       ),
@@ -1990,19 +2004,13 @@ Deno.test({
   name: "WebTransport listener reports first stream timeout over loopback",
   ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
   fn: async () => {
-    const port = reserveTcpPort();
     const reported = deferred<unknown>();
     const events: Array<{
       name: string;
       attributes: Record<string, unknown>;
       error?: unknown;
     }> = [];
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
+    const listener = listenWebTransportLoopback({
       transport: {
         streamOpenTimeoutMs: 25,
       },
@@ -2024,7 +2032,7 @@ Deno.test({
     let clientClosed: Promise<void> | null = null;
     try {
       client = new WebTransport(
-        `https://127.0.0.1:${port}/rpc`,
+        webTransportLoopbackUrl(listener),
         createWebTransportConnectOptions().webTransport,
       );
       void client.ready.catch(() => {});
@@ -2087,14 +2095,7 @@ Deno.test({
         }, options),
     });
 
-    const port = reserveTcpPort();
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
-    });
+    const listener = listenWebTransportLoopback();
     const handle = serve(service, listener, {});
 
     let slowClient: WebTransport | null = null;
@@ -2103,7 +2104,7 @@ Deno.test({
       | null = null;
     try {
       slowClient = new WebTransport(
-        `https://127.0.0.1:${port}/rpc`,
+        webTransportLoopbackUrl(listener),
         createWebTransportConnectOptions().webTransport,
       );
       await withTimeout(slowClient.ready, 4000, "slow wt ready");
@@ -2113,7 +2114,7 @@ Deno.test({
         connect(
           service,
           await WebTransportTransport.connect(
-            `https://127.0.0.1:${port}/rpc`,
+            webTransportLoopbackUrl(listener),
             createWebTransportConnectOptions(),
           ),
           {
@@ -2166,20 +2167,13 @@ Deno.test({
       registerServer: () => ({ capabilityIndex: 0 }),
     });
 
-    const port = reserveTcpPort();
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
-    });
+    const listener = listenWebTransportLoopback();
     const handle = serve(service, listener, DisposableServer);
 
     let client: WebTransport | null = null;
     try {
       client = new WebTransport(
-        `https://127.0.0.1:${port}/rpc`,
+        webTransportLoopbackUrl(listener),
         createWebTransportConnectOptions().webTransport,
       );
       await withTimeout(client.ready, 4000, "wt ready");
@@ -2233,14 +2227,7 @@ Deno.test({
         }, options),
     });
 
-    const port = reserveTcpPort();
-    const listener = WebTransportTransport.listen({
-      hostname: "127.0.0.1",
-      port,
-      path: "/rpc",
-      cert: TEST_WEBTRANSPORT_CERT_PEM,
-      key: TEST_WEBTRANSPORT_KEY_PEM,
-    });
+    const listener = listenWebTransportLoopback();
     const handle = serve(service, listener, {});
 
     let transport: WebTransportTransport | null = null;
@@ -2248,7 +2235,7 @@ Deno.test({
     try {
       transport = await withTimeout(
         WebTransportTransport.connect(
-          `https://127.0.0.1:${port}/rpc`,
+          webTransportLoopbackUrl(listener),
           createWebTransportConnectOptions(),
         ),
         4000,

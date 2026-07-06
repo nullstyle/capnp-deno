@@ -88,14 +88,22 @@ export interface RpcConnectionPoolConnectContext {
  * Pool statistics returned by {@link RpcConnectionPool.stats}.
  */
 export interface RpcConnectionPoolStats {
+  /** Whether the pool has been closed and rejects new acquires. */
+  closed: boolean;
   /** Total number of connections managed by the pool (idle + active). */
   total: number;
+  /** Number of connection attempts currently in progress. */
+  connecting: number;
   /** Number of idle connections available for acquisition. */
   idle: number;
   /** Number of connections currently in use. */
   active: number;
   /** Number of pending acquire requests waiting for a connection. */
   pending: number;
+  /** Configured minimum number of idle/warm connections to retain. */
+  minConnections: number;
+  /** Configured maximum number of managed or connecting connections. */
+  maxConnections: number;
 }
 
 /**
@@ -262,10 +270,14 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
    */
   get stats(): RpcConnectionPoolStats {
     return {
+      closed: this.#closed,
       total: this.#idle.size + this.#active.size,
+      connecting: this.#connecting,
       idle: this.#idle.size,
       active: this.#active.size,
       pending: this.#pending.length - this.#pendingSettled,
+      minConnections: this.#minConnections,
+      maxConnections: this.#maxConnections,
     };
   }
 

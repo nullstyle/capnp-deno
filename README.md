@@ -322,7 +322,8 @@ Resilience and runtime helpers:
 `withConnection(pool, fn, { signal, timeoutMs })` let request-scoped callers
 cancel queued acquires or override the pool default acquire timeout. Connection
 factories receive `{ signal }` and should pass it into network dials when
-possible.
+possible. `pool.stats` reports closed, idle, active, pending, connecting, and
+configured capacity values for saturation dashboards.
 
 `ReconnectingRpcClientTransport.stats` exposes connection attempts, reconnect
 attempts, retry outcomes, queued operations, and the current bootstrap

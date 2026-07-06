@@ -553,21 +553,27 @@ Deno.test("withConnection forwards acquire options", async () => {
 Deno.test("RpcConnectionPool stats are accurate throughout lifecycle", async () => {
   const factory = makeConnFactory();
   const pool = new RpcConnectionPool(factory, {
+    minConnections: 0,
     maxConnections: 3,
     acquireTimeoutMs: 2000,
   });
 
   try {
+    assertEquals(pool.stats.closed, false);
     assertEquals(pool.stats.total, 0);
+    assertEquals(pool.stats.connecting, 0);
     assertEquals(pool.stats.idle, 0);
     assertEquals(pool.stats.active, 0);
     assertEquals(pool.stats.pending, 0);
+    assertEquals(pool.stats.minConnections, 0);
+    assertEquals(pool.stats.maxConnections, 3);
 
     const c1 = await pool.acquire();
     const c2 = await pool.acquire();
     assertEquals(pool.stats.total, 2);
     assertEquals(pool.stats.active, 2);
     assertEquals(pool.stats.idle, 0);
+    assertEquals(pool.stats.connecting, 0);
 
     const c3 = await pool.acquire();
     assertEquals(pool.stats.total, 3);
@@ -590,6 +596,35 @@ Deno.test("RpcConnectionPool stats are accurate throughout lifecycle", async () 
     assertEquals(pool.stats.idle, 3);
     assertEquals(pool.stats.total, 3);
   } finally {
+    await pool.close();
+  }
+  assertEquals(pool.stats.closed, true);
+});
+
+Deno.test("RpcConnectionPool stats expose in-flight connection attempts", async () => {
+  const connectStarted = deferred<void>();
+  const releaseConnect = deferred<void>();
+  const pool = new RpcConnectionPool(async () => {
+    connectStarted.resolve();
+    await releaseConnect.promise;
+    return makeConn(1);
+  }, { maxConnections: 1 });
+
+  try {
+    const pending = pool.acquire();
+    await withTimeout(connectStarted.promise, 1000, "connect started");
+    assertEquals(pool.stats.connecting, 1);
+    assertEquals(pool.stats.total, 0);
+    assertEquals(pool.stats.active, 0);
+
+    releaseConnect.resolve();
+    const conn = await withTimeout(pending, 1000, "connect finished");
+    assertEquals(pool.stats.connecting, 0);
+    assertEquals(pool.stats.total, 1);
+    assertEquals(pool.stats.active, 1);
+    pool.release(conn);
+  } finally {
+    releaseConnect.resolve();
     await pool.close();
   }
 });

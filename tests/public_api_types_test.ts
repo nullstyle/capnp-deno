@@ -457,6 +457,14 @@ type AssertRpcConnectionPoolStatsTotal = Assert<
   IsEqual<RpcConnectionPoolStats["total"], number>
 >;
 
+type AssertRpcConnectionPoolStatsConnecting = Assert<
+  IsEqual<RpcConnectionPoolStats["connecting"], number>
+>;
+
+type AssertRpcConnectionPoolStatsClosed = Assert<
+  IsEqual<RpcConnectionPoolStats["closed"], boolean>
+>;
+
 type AssertCircuitBreakerStatsState = Assert<
   IsEqual<CircuitBreakerStats["state"], CircuitBreakerState>
 >;
@@ -719,6 +727,8 @@ type StaticAssertions = [
   AssertRpcConnectionPoolAcquireSignal,
   AssertRpcConnectionPoolConnectContextSignal,
   AssertRpcConnectionPoolStatsTotal,
+  AssertRpcConnectionPoolStatsConnecting,
+  AssertRpcConnectionPoolStatsClosed,
   AssertCircuitBreakerStatsState,
   AssertCircuitBreakerStateChangeError,
   AssertCreateRpcDebugTracerReturn,
@@ -825,8 +835,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 63);
+  assert(STATIC_ASSERTIONS.length === 65);
 });

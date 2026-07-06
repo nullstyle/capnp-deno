@@ -564,6 +564,9 @@ connections can be created.
 **How to fix:**
 
 - Increase the pool's maximum size, or release idle connections.
+- Inspect `pool.stats.connecting`, `pool.stats.active`, `pool.stats.pending`,
+  `pool.stats.maxConnections`, and `pool.stats.closed` to separate slow
+  connection dials from checked-out connection saturation or shutdown.
 
 #### `connection pool acquire timed out after Nms`
 
