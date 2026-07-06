@@ -21,8 +21,11 @@ deno task test:unit
 deno task test:integration
 
 # Run real WASM tests (requires WASM build)
-deno task build:wasm
+just build-wasm
 deno task test:real
+
+# Run the release-candidate gate
+just release-check
 
 # Run benchmarks
 deno task bench
@@ -55,7 +58,10 @@ deno task bench
   `assertBytes`, `deferred`, `withTimeout`).
 - Clean up resources in `try/finally` blocks.
 - Use deterministic clocks for timing-sensitive tests.
-- All tests must pass before merging: `deno task verify`.
+- All fast tests must pass before merging: `deno task verify`.
+- Changes touching generated RPC, transports, WASM, or release artifacts should
+  also pass the relevant release checklist entries in
+  `docs/release_checklist.md`.
 
 ## Commits
 

@@ -116,8 +116,11 @@ cp "$wasm_src" "$artifacts_dir/capnp_deno.wasm"
 
 # Optionally post-optimize with Binaryen when available.
 if command -v wasm-opt >/dev/null 2>&1; then
+  wasm_opt_bin="$(command -v wasm-opt)"
+  wasm_opt_version="$("$wasm_opt_bin" --version 2>/dev/null || true)"
+  echo "Using wasm-opt: $wasm_opt_bin${wasm_opt_version:+ ($wasm_opt_version)}"
   wasm_tmp="$artifacts_dir/capnp_deno.wasm.tmp"
-  if wasm-opt --enable-bulk-memory -Oz --strip-debug \
+  if "$wasm_opt_bin" --enable-bulk-memory -Oz --strip-debug \
     -o "$wasm_tmp" \
     "$artifacts_dir/capnp_deno.wasm"; then
     mv "$wasm_tmp" "$artifacts_dir/capnp_deno.wasm"

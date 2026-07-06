@@ -38,10 +38,10 @@ jobs:
           fi
 
       - name: Format, lint, type-check, unit tests
-        run: deno task verify
+        run: just verify
 
       - name: Codegen tests
-        run: deno task test:codegen
+        run: just test-codegen
 
       - name: Generate coverage report
         run: |
@@ -86,7 +86,7 @@ jobs:
           fi
 
       - name: Socket integration tests
-        run: deno task test:integration
+        run: just test-integration
 
   # ── Real WASM: build wasm from capnp-zig, run real-wasm tests ─────
   real-wasm:
@@ -135,13 +135,13 @@ jobs:
             zig-cache-${{ runner.os }}-
 
       - name: Build WASM
-        run: CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
+        run: just build-wasm
 
       - name: Smoke test
-        run: deno task smoke:real
+        run: just smoke-real
 
       - name: Real WASM tests
-        run: deno task test:real
+        run: just test-real
 
   # ── Performance benchmarks ────────────────────────────────────────
   bench:

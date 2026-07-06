@@ -1,4 +1,5 @@
 [tools]
 deno = "2.6.8"
+"github:WebAssembly/binaryen" = { version = "latest", extract_all = true, bin_path = "bin" }
 just = "1.46.0"
 zig = "master"

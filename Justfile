@@ -34,10 +34,13 @@ test-real:
     deno task test:real
 
 build-wasm:
-    CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
+    mise x -- env CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
 
 smoke-real:
     deno task smoke:real
+
+publish-dry-run:
+    deno publish --dry-run --allow-dirty
 
 bench:
     deno task bench
@@ -65,20 +68,29 @@ verify:
     deno task verify
 
 verify-real:
-    CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task verify:real
+    mise x -- env CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task verify:real
 
 ci-fast:
     just verify
 
 ci-integration:
     just verify
-    just verify-integration
+    just test-integration
 
 ci-real:
     just verify-real
 
 ci:
     just ci-integration
+
+release-check:
+    just verify
+    just test-codegen
+    just test-integration
+    just build-wasm
+    just smoke-real
+    just test-real
+    just publish-dry-run
 
 # List CI workflow jobs as seen by `act`
 act-list:
