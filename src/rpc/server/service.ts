@@ -159,6 +159,29 @@ export interface RpcServiceConnectOptions
 }
 
 /**
+ * Live statistics for a generated RPC service listener.
+ *
+ * @example
+ * ```ts
+ * const listener = TcpTransport.listen({ port: 4000 });
+ * using handle = serve(Pinger, listener, new PingServer());
+ * console.log(handle.stats.activeConnections);
+ * ```
+ */
+export interface RpcServiceStats {
+  /** Whether the service listener has been closed. */
+  readonly closed: boolean;
+  /** The number of currently active accepted connections. */
+  readonly activeConnections: number;
+  /** The number of connections accepted by this listener. */
+  readonly acceptedConnections: number;
+  /** The number of connections refused before runtime creation. */
+  readonly refusedConnections: number;
+  /** The configured active connection limit, when one is set. */
+  readonly maxActiveConnections?: number;
+}
+
+/**
  * Options for generic typed service serving.
  */
 export interface RpcServiceServeOptions {
@@ -184,6 +207,29 @@ export interface RpcServiceServeOptions {
    */
   onConnectionError?: (error: unknown) => void | Promise<void>;
   /**
+   * Maximum number of active accepted connections to serve at once.
+   *
+   * Additional accepted transports are closed immediately and reported through
+   * `onConnectionError` and observability.
+   *
+   * @example
+   * ```ts
+   * serve(Pinger, listener, new PingServer(), { maxActiveConnections: 128 });
+   * ```
+   */
+  maxActiveConnections?: number;
+  /**
+   * Observability sink for service-level lifecycle events.
+   *
+   * @example
+   * ```ts
+   * serve(Pinger, listener, new PingServer(), {
+   *   observability: { onEvent: (event) => console.log(event.name) },
+   * });
+   * ```
+   */
+  observability?: RpcObservability;
+  /**
    * Optional generated-RPC debug tracer or tracer options.
    */
   debug?: RpcDebugTracer | RpcDebugTracerOptions;
@@ -194,6 +240,10 @@ export interface RpcServiceServeOptions {
  */
 export interface RpcServiceHandle {
   readonly closed: boolean;
+  /**
+   * Snapshot of listener or connection lifecycle statistics.
+   */
+  readonly stats: RpcServiceStats;
   close(): Promise<void>;
   [Symbol.dispose](): void;
   [Symbol.asyncDispose](): Promise<void>;
@@ -418,6 +468,15 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
     return this.#closed;
   }
 
+  get stats(): RpcServiceStats {
+    return {
+      closed: this.#closed,
+      activeConnections: this.#closed ? 0 : 1,
+      acceptedConnections: 1,
+      refusedConnections: 0,
+    };
+  }
+
   [Symbol.dispose](): void {
     void this.close();
   }
@@ -451,7 +510,13 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   readonly #implementation: RpcServiceBinding<TServer>;
   readonly #options: RpcServiceServeOptions;
   readonly #active = new Set<RpcServiceConnectionHandleImpl>();
+  readonly #maxActiveConnections: number | undefined;
+  readonly #tracer: RpcDebugTracer | null;
+  readonly #observability: RpcObservability | undefined;
+  readonly #connectionOptions: RpcServiceServeOptions;
   readonly #acceptLoop: Promise<void>;
+  #acceptedConnections = 0;
+  #refusedConnections = 0;
   #closed = false;
 
   constructor(
@@ -464,11 +529,37 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     this.#acceptor = acceptor;
     this.#implementation = implementation;
     this.#options = options;
+    this.#maxActiveConnections = normalizeMaxActiveConnections(
+      options.maxActiveConnections,
+      service,
+    );
+    this.#tracer = resolveDebugTracer(options.debug);
+    this.#observability = composeObservability(
+      options.observability,
+      this.#tracer?.observability,
+    );
+    this.#connectionOptions = {
+      ...options,
+      ...(this.#tracer ? { debug: this.#tracer } : {}),
+      observability: this.#observability,
+    };
     this.#acceptLoop = this.#runAcceptLoop();
   }
 
   get closed(): boolean {
     return this.#closed;
+  }
+
+  get stats(): RpcServiceStats {
+    const stats = {
+      closed: this.#closed,
+      activeConnections: this.#active.size,
+      acceptedConnections: this.#acceptedConnections,
+      refusedConnections: this.#refusedConnections,
+    };
+    return this.#maxActiveConnections === undefined
+      ? stats
+      : { ...stats, maxActiveConnections: this.#maxActiveConnections };
   }
 
   [Symbol.dispose](): void {
@@ -506,6 +597,10 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
           await Promise.resolve(accepted.transport.close()).catch(() => {});
           continue;
         }
+        if (this.#shouldRefuseConnection()) {
+          await this.#refuseConnection(accepted);
+          continue;
+        }
         await this.#acceptConnection(accepted);
       }
     } catch (error) {
@@ -514,13 +609,65 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     }
   }
 
+  #shouldRefuseConnection(): boolean {
+    return this.#maxActiveConnections !== undefined &&
+      this.#active.size >= this.#maxActiveConnections;
+  }
+
+  async #refuseConnection(accepted: RpcAcceptedTransport): Promise<void> {
+    this.#refusedConnections++;
+    const error = new SessionError(
+      `generated RPC service ${this.#service.interfaceName} refused a connection: active connection limit ${this.#maxActiveConnections} reached`,
+      {
+        metadata: {
+          phase: "service_serve",
+          serviceName: this.#service.interfaceName,
+          interfaceId: this.#service.interfaceId,
+          peerId: accepted.id,
+          transport: accepted.remoteAddress?.transport ??
+            accepted.localAddress?.transport,
+        },
+      },
+    );
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.service.connection_refused",
+      attributes: {
+        "rpc.service_name": this.#service.interfaceName,
+        "rpc.interface_id": this.#service.interfaceId,
+        "rpc.active_connections": this.#active.size,
+        ...(this.#maxActiveConnections === undefined
+          ? {}
+          : { "rpc.max_active_connections": this.#maxActiveConnections }),
+        ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
+      },
+      error,
+    });
+    await reportConnectionError(this.#options.onConnectionError, error);
+    await Promise.resolve(accepted.transport.close()).catch((closeError) =>
+      reportConnectionError(this.#options.onConnectionError, closeError)
+    );
+  }
+
   async #acceptConnection(accepted: RpcAcceptedTransport): Promise<void> {
     let handle: RpcServiceConnectionHandleImpl | null = null;
+    this.#acceptedConnections++;
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.service.connection_accepted",
+      attributes: {
+        "rpc.service_name": this.#service.interfaceName,
+        "rpc.interface_id": this.#service.interfaceId,
+        "rpc.active_connections": this.#active.size + 1,
+        ...(this.#maxActiveConnections === undefined
+          ? {}
+          : { "rpc.max_active_connections": this.#maxActiveConnections }),
+        ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
+      },
+    });
     handle = await createServiceConnectionHandle(
       this.#service,
       accepted,
       this.#implementation,
-      this.#options,
+      this.#connectionOptions,
       () => {
         if (handle) {
           this.#active.delete(handle);
@@ -538,6 +685,27 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
       });
     }
   }
+}
+
+function normalizeMaxActiveConnections(
+  value: number | undefined,
+  service: Pick<
+    RpcServiceToken<object, object>,
+    "interfaceId" | "interfaceName"
+  >,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  throw new SessionError(
+    "maxActiveConnections must be a positive safe integer",
+    {
+      metadata: {
+        phase: "service_serve",
+        serviceName: service.interfaceName,
+        interfaceId: service.interfaceId,
+      },
+    },
+  );
 }
 
 async function createServiceConnectionHandle<

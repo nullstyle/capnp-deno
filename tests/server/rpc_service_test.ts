@@ -1,10 +1,12 @@
 import {
   connect,
   createRpcServiceToken,
+  type RpcObservabilityEvent,
   RpcPeer,
   RpcServerRuntime,
   serve,
   serveConnection,
+  SessionError,
   WebTransportTransport,
 } from "../../src/mod.ts";
 import { AcceptedWebSocketTransport } from "../../src/rpc/transports/websocket.ts";
@@ -379,7 +381,14 @@ Deno.test("serve supervises accepted connections through the generic binder", as
     );
     const peer = await withTimeout(connectedPeer.promise, 1000, "serve peer");
     assertEquals(peer.remoteAddress?.port, 41235);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(handle.stats.closed, false);
+    assertEquals(handle.stats.activeConnections, 1);
+    assertEquals(handle.stats.acceptedConnections, 1);
+    assertEquals(handle.stats.refusedConnections, 0);
     await handle.close();
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.activeConnections, 0);
   } finally {
     (RpcServerRuntime as unknown as {
       createWithRoot: typeof RpcServerRuntime.createWithRoot;
@@ -388,6 +397,165 @@ Deno.test("serve supervises accepted connections through the generic binder", as
 
   assert(events.includes("runtime.close"));
   assert(events.includes("transport.close"));
+});
+
+Deno.test("serve refuses accepted connections above maxActiveConnections", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const acceptClosed = deferred<void>();
+  const runtimeCreated = deferred<void>();
+  const refusedClosed = deferred<void>();
+  const errors: unknown[] = [];
+  const observabilityEvents: RpcObservabilityEvent[] = [];
+  const transportCloseCounts = new Map<string, number>();
+  let runtimeCreateCount = 0;
+
+  function createTransport(name: string) {
+    return {
+      start(): void {
+        // no-op
+      },
+      send(): Promise<void> {
+        return Promise.resolve();
+      },
+      close(): Promise<void> {
+        transportCloseCounts.set(
+          name,
+          (transportCloseCounts.get(name) ?? 0) + 1,
+        );
+        if (name === "refused") {
+          refusedClosed.resolve();
+        }
+        return Promise.resolve();
+      },
+    };
+  }
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = (transport) => {
+    runtimeCreateCount += 1;
+    runtimeCreated.resolve();
+    return Promise.resolve({
+      close: async (): Promise<void> => {
+        await transport.close();
+      },
+    } as RpcServerRuntime);
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x178n,
+    interfaceName: "ServeLimitProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: createTransport("active"),
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41236,
+        },
+        id: "active-peer",
+      };
+      yield {
+        transport: createTransport("refused"),
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41237,
+        },
+        id: "refused-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  try {
+    using handle = serve(service, acceptor, {}, {
+      maxActiveConnections: 1,
+      onConnectionError(error) {
+        errors.push(error);
+      },
+      observability: {
+        onEvent(event) {
+          observabilityEvents.push(event);
+        },
+      },
+    });
+
+    await withTimeout(runtimeCreated.promise, 1000, "runtime created");
+    await withTimeout(refusedClosed.promise, 1000, "refused transport closed");
+
+    assertEquals(runtimeCreateCount, 1);
+    assertEquals(transportCloseCounts.get("refused"), 1);
+    assertEquals(handle.stats.activeConnections, 1);
+    assertEquals(handle.stats.acceptedConnections, 1);
+    assertEquals(handle.stats.refusedConnections, 1);
+    assertEquals(handle.stats.maxActiveConnections, 1);
+
+    const limitError = errors.find((error) => error instanceof SessionError);
+    assert(limitError instanceof SessionError);
+    assert(limitError.metadata !== undefined);
+    assertEquals(limitError.metadata.serviceName, "ServeLimitProbe");
+    assertEquals(limitError.metadata.peerId, "refused-peer");
+    assertEquals(limitError.metadata.transport, "tcp");
+
+    const refusedEvent = observabilityEvents.find((event) =>
+      event.name === "rpc.service.connection_refused"
+    );
+    assert(refusedEvent !== undefined);
+    assertEquals(
+      refusedEvent.attributes?.["rpc.service_name"],
+      "ServeLimitProbe",
+    );
+    assertEquals(refusedEvent.attributes?.["rpc.max_active_connections"], 1);
+
+    await handle.close();
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.activeConnections, 0);
+  } finally {
+    acceptClosed.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve rejects invalid maxActiveConnections", () => {
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x179n,
+    interfaceName: "ServeInvalidLimitProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      // no accepted transports
+    },
+    close(): void {
+      // no-op
+    },
+  };
+
+  let thrown: unknown;
+  try {
+    serve(service, acceptor, {}, { maxActiveConnections: 0 });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(thrown instanceof SessionError);
+  assert(thrown.metadata !== undefined);
+  assertEquals(thrown.metadata.serviceName, "ServeInvalidLimitProbe");
 });
 
 async function withPatchedWebTransportServePrimitives(

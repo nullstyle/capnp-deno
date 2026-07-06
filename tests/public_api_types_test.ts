@@ -110,6 +110,7 @@ import type {
   RpcServiceHandle,
   RpcServiceImplementation,
   RpcServiceServeOptions,
+  RpcServiceStats,
   RpcServiceToken,
   RpcServiceTokenCreateOptions,
   RpcSessionCreateOptions,
@@ -243,6 +244,7 @@ type PublicTypeExportSmoke = {
   rpcServiceConstructor: RpcServiceConstructor<{ ping(): Promise<void> }>;
   rpcServiceImplementation: RpcServiceImplementation<{ ping(): Promise<void> }>;
   rpcServiceServeOptions: RpcServiceServeOptions;
+  rpcServiceStats: RpcServiceStats;
   rpcServiceToken: RpcServiceToken<{ ping(): Promise<void> }>;
   rpcServiceTokenCreateOptions: RpcServiceTokenCreateOptions<{
     ping(): Promise<void>;
@@ -448,6 +450,18 @@ type AssertRpcServiceServeDebugOption = Assert<
     RpcServiceServeOptions["debug"],
     RpcDebugTracer | RpcDebugTracerOptions | undefined
   >
+>;
+
+type AssertRpcServiceServeMaxActiveConnectionsOption = Assert<
+  IsEqual<RpcServiceServeOptions["maxActiveConnections"], number | undefined>
+>;
+
+type AssertRpcServiceHandleStats = Assert<
+  IsEqual<RpcServiceHandle["stats"], RpcServiceStats>
+>;
+
+type AssertRpcServiceStatsActiveConnections = Assert<
+  IsEqual<RpcServiceStats["activeConnections"], number>
 >;
 
 type AssertCreateWebTransportCertificateHashReturn = Assert<

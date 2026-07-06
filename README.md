@@ -280,6 +280,10 @@ Typed service helpers:
 - `serve(service, acceptor, implementation, options?)`
 - `serveConnection(service, accepted, implementation, options?)`
 
+Use `serve(..., { maxActiveConnections })` to apply listener-level admission
+control. The returned handle exposes `handle.stats` with active, accepted, and
+refused connection counts for operational checks.
+
 Resilience and runtime helpers:
 
 - `createExponentialBackoffReconnectPolicy(...)`

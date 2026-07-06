@@ -328,6 +328,9 @@ the same server-side contract for browser and Deno clients:
    - Per-connection transport errors are reported via `transport.onError`.
    - Closing the `serve(...)` handle stops accepting new upgrades and closes
      active runtimes.
+   - Use `serve(..., { maxActiveConnections })` to cap active runtimes at the
+     listener. Surplus accepted transports are closed immediately, reported via
+     `onConnectionError`, and reflected in `handle.stats.refusedConnections`.
 6. Fallback order and reconnect layering:
    - Browser clients should prefer `connect(...)` over
      `WebSocketTransport.connect(...)` when they want typed service stubs.

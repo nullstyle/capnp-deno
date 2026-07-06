@@ -44,6 +44,7 @@ export {
   type RpcServiceHandle,
   type RpcServiceImplementation,
   type RpcServiceServeOptions,
+  type RpcServiceStats,
   type RpcServiceToken,
   type RpcServiceTokenCreateOptions,
   type RpcStub,
