@@ -9,7 +9,11 @@
  */
 
 import type { WasmHostCallRecord } from "../../wasm/abi.ts";
-import { ProtocolError, SessionError } from "../../errors.ts";
+import {
+  annotateCapnpError,
+  ProtocolError,
+  SessionError,
+} from "../../errors.ts";
 import {
   emitObservabilityEvent,
   type RpcObservability,
@@ -581,6 +585,13 @@ export class RpcServerBridge {
     if (this.#dispatchByCapability.has(capabilityIndex)) {
       throw new ProtocolError(
         `capability ${capabilityIndex} already has a registered server dispatch`,
+        {
+          metadata: {
+            phase: "capability_resolve",
+            capabilityIndex,
+            interfaceId: dispatch.interfaceId,
+          },
+        },
       );
     }
 
@@ -588,6 +599,13 @@ export class RpcServerBridge {
     if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
       throw new ProtocolError(
         `referenceCount must be a positive integer, got ${referenceCount}`,
+        {
+          metadata: {
+            phase: "capability_resolve",
+            capabilityIndex,
+            interfaceId: dispatch.interfaceId,
+          },
+        },
       );
     }
 
@@ -610,16 +628,27 @@ export class RpcServerBridge {
     capability: number | CapabilityPointer,
     referenceCount = 1,
   ): void {
+    const capabilityIndex = normalizeCapability(capability);
     if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
       throw new ProtocolError(
         `referenceCount must be a positive integer, got ${referenceCount}`,
+        {
+          metadata: {
+            phase: "capability_resolve",
+            capabilityIndex,
+          },
+        },
       );
     }
 
-    const capabilityIndex = normalizeCapability(capability);
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
-      throw new ProtocolError(`unknown capability ${capabilityIndex}`);
+      throw new ProtocolError(`unknown capability ${capabilityIndex}`, {
+        metadata: {
+          phase: "capability_resolve",
+          capabilityIndex,
+        },
+      });
     }
     registered.refCount += referenceCount;
   }
@@ -628,13 +657,19 @@ export class RpcServerBridge {
     capability: number | CapabilityPointer,
     referenceCount = 1,
   ): boolean {
+    const capabilityIndex = normalizeCapability(capability);
     if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
       throw new ProtocolError(
         `referenceCount must be a positive integer, got ${referenceCount}`,
+        {
+          metadata: {
+            phase: "capability_resolve",
+            capabilityIndex,
+          },
+        },
       );
     }
 
-    const capabilityIndex = normalizeCapability(capability);
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
       return false;
@@ -643,6 +678,12 @@ export class RpcServerBridge {
     if (referenceCount > registered.refCount) {
       throw new ProtocolError(
         `release referenceCount ${referenceCount} exceeds current refCount ${registered.refCount} for capability ${capabilityIndex}`,
+        {
+          metadata: {
+            phase: "capability_resolve",
+            capabilityIndex,
+          },
+        },
       );
     }
 
@@ -726,7 +767,11 @@ export class RpcServerBridge {
         ) {
           entry.abortController.abort(
             new SessionError("rpc call canceled by finish", {
-              metadata: { questionId: finish.questionId },
+              metadata: {
+                phase: "dispatch",
+                questionId: finish.questionId,
+                messageName: "Finish",
+              },
             }),
           );
           emitObservabilityEvent(this.#observability, {
@@ -760,6 +805,15 @@ export class RpcServerBridge {
       if (!this.#onBootstrap) {
         throw new ProtocolError(
           "bootstrap not configured \u2014 provide onBootstrap in RpcServerBridgeOptions",
+          {
+            metadata: {
+              phase: "bootstrap",
+              questionId: bootstrap.questionId,
+              messageTag: tag,
+              messageName: "Bootstrap",
+              frameBytes: currentFrame.byteLength,
+            },
+          },
         );
       }
       const result = await this.#onBootstrap({
@@ -774,6 +828,14 @@ export class RpcServerBridge {
     if (tag !== RPC_MESSAGE_TAG_CALL) {
       throw new ProtocolError(
         `unsupported rpc message tag for server bridge: ${tag}`,
+        {
+          metadata: {
+            phase: "frame_decode",
+            messageTag: tag,
+            messageName: `Unknown(${tag})`,
+            frameBytes: currentFrame.byteLength,
+          },
+        },
       );
     }
 
@@ -796,6 +858,7 @@ export class RpcServerBridge {
         `maxCalls must be a positive integer when provided, got ${
           String(maxCalls)
         }`,
+        { metadata: { phase: "dispatch" } },
       );
     }
 
@@ -1002,6 +1065,16 @@ export class RpcServerBridge {
     try {
       call = decodeCallRequestFrame(hostCall.frame);
     } catch (error) {
+      const annotated = annotateCapnpError(error, {
+        phase: "frame_decode",
+        questionId: hostCall.questionId,
+        frameBytes: hostCall.frame.byteLength,
+        messageName: "Call",
+      });
+      emitObservabilityEvent(this.#observability, {
+        name: "rpc.server.host_call_decode_error",
+        error: annotated,
+      });
       const reason = error instanceof Error
         ? error.message
         : `invalid host call frame: ${String(error)}`;
@@ -1192,6 +1265,15 @@ export class RpcServerBridge {
           transform,
         );
       } catch (error) {
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.server.promised_answer_resolve_error",
+          error: annotateCapnpError(error, {
+            phase: "capability_resolve",
+            questionId: call.questionId,
+            interfaceId: call.interfaceId,
+            methodId: call.methodId,
+          }),
+        });
         const reason = error instanceof Error ? error.message : String(error);
         return { kind: "exception", reason };
       }
@@ -1302,11 +1384,18 @@ export class RpcServerBridge {
 
       return { kind: "results", response };
     } catch (error) {
+      const annotated = annotateCapnpError(error, {
+        phase: "handler",
+        questionId: call.questionId,
+        interfaceId: call.interfaceId,
+        methodId: call.methodId,
+        capabilityIndex,
+      });
       // Run onError middleware chain.
       for (const mw of this.#middleware) {
         if (mw.onError) {
           try {
-            await mw.onError(error, mwCtx);
+            await mw.onError(annotated, mwCtx);
           } catch (mwError) {
             // Errors from onError middleware are swallowed to avoid
             // masking the original dispatch error, but reported via
@@ -1326,13 +1415,17 @@ export class RpcServerBridge {
 
       if (this.#onUnhandledError) {
         try {
-          await this.#onUnhandledError(error, call);
+          await this.#onUnhandledError(annotated, call);
         } catch (_handlerError) {
           // Error handler itself failed — nothing more we can do.
           // The original error has already been handled/logged by the caller.
         }
       }
-      const reason = error instanceof Error ? error.message : String(error);
+      emitObservabilityEvent(this.#observability, {
+        name: "rpc.server.dispatch_error",
+        error: annotated,
+      });
+      const reason = annotated.message;
       return { kind: "exception", reason };
     }
   }

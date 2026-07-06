@@ -14,21 +14,44 @@ export interface ErrorMetadata {
   /** Phase where the error occurred. */
   phase?:
     | "frame_decode"
+    | "client_call"
+    | "client_wait"
     | "dispatch"
     | "handler"
     | "response_encode"
     | "bootstrap"
-    | "capability_resolve";
+    | "capability_resolve"
+    | "service_connect"
+    | "service_serve"
+    | "transport";
   /** Symbolic error type name (e.g. "InvalidInlineCompositePointer", "UnknownQuestion"). */
   errorType?: string;
+  /** Raw RPC frame size involved in the failure. */
+  frameBytes?: number;
+  /** Numeric RPC message union tag involved in the failure. */
+  messageTag?: number;
+  /** Human-readable RPC message kind involved in the failure. */
+  messageName?: string;
   /** RPC question ID involved. */
   questionId?: number;
+  /** RPC answer ID involved. */
+  answerId?: number;
   /** Cap'n Proto interface ID involved. */
   interfaceId?: bigint;
   /** Method ordinal involved. */
   methodId?: number;
   /** Capability index involved. */
   capabilityIndex?: number;
+  /** Generated interface name involved. */
+  interfaceName?: string;
+  /** Generated method name involved. */
+  methodName?: string;
+  /** Generated service token name involved. */
+  serviceName?: string;
+  /** Transport kind or address label involved. */
+  transport?: string;
+  /** Peer identifier involved. */
+  peerId?: string;
 }
 
 /**
@@ -236,6 +259,52 @@ function createCapnpError(
     case "instantiate":
       return new InstantiationError(message, options);
   }
+}
+
+/**
+ * Annotates an unknown error with structured diagnostic metadata.
+ *
+ * Existing {@link CapnpError} instances keep their error kind and cause while
+ * receiving merged metadata. Non-Cap'n Proto errors are wrapped in a
+ * {@link SessionError} because they are most commonly surfaced through runtime
+ * session/client/server boundaries.
+ *
+ * @param error - Error value to annotate.
+ * @param metadata - Metadata to merge into the returned error.
+ * @param context - Optional message prefix for the returned error.
+ * @returns A typed Cap'n Proto error with merged metadata.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await client.ping();
+ * } catch (error) {
+ *   throw annotateCapnpError(error, {
+ *     serviceName: "Pinger",
+ *     methodName: "ping",
+ *   }, "generated call failed");
+ * }
+ * ```
+ */
+export function annotateCapnpError(
+  error: unknown,
+  metadata: ErrorMetadata,
+  context?: string,
+): CapnpError {
+  if (error instanceof CapnpError) {
+    const message = composeErrorMessage(context, error.message);
+    const cause = (error as Error & { cause?: unknown }).cause;
+    return createCapnpError(error.kind as CapnpErrorKind, message, {
+      cause,
+      metadata: { ...(error.metadata ?? {}), ...metadata },
+    });
+  }
+
+  const message = composeErrorMessage(context, formatUnknownError(error));
+  return new SessionError(message, {
+    cause: error,
+    metadata,
+  });
 }
 
 /**

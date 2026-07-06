@@ -3,9 +3,9 @@
  */
 
 import {
-  STREAM_RESULT_TYPE_ID,
   type InterfaceMethodModel,
   type NodeModel,
+  STREAM_RESULT_TYPE_ID,
 } from "./model.ts";
 import type { InterfaceInfo, StructInfo } from "./emitter_helpers.ts";
 import {
@@ -125,9 +125,13 @@ export function emitRpcModule(
       };`,
     );
   }
+  const rpcRuntimeImports = ["ProtocolError", "annotateCapnpError"];
   if (hasStreamingMethods) {
-    out.push('import { EMPTY_STRUCT_MESSAGE } from "@nullstyle/capnp/rpc";');
+    rpcRuntimeImports.push("EMPTY_STRUCT_MESSAGE");
   }
+  out.push(
+    `import { ${rpcRuntimeImports.join(", ")} } from "@nullstyle/capnp/rpc";`,
+  );
   out.push("");
   out.push(
     `export type { ${sharedRpcTypeNames.join(", ")} } from ${
@@ -211,42 +215,72 @@ function emitInterfaceCode(
         quoteIfNeeded(resolved.methodName)
       }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${returnType}> => {`,
     );
+    out.push("      try {");
     // Encode params with cap table support (handles capability parameters)
     out.push(
-      `      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params);`,
+      `        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params);`,
     );
-    out.push("      let questionId: number | undefined;");
+    out.push("        let questionId: number | undefined;");
     out.push(
-      "      const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {",
+      "        const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {",
     );
-    out.push("        ...(options ?? {}),");
+    out.push("          ...(options ?? {}),");
     out.push(
-      `        interfaceId: options?.interfaceId ?? ${
+      `          interfaceId: options?.interfaceId ?? ${
         formatBigint(resolved.sourceInterfaceId)
       },`,
     );
-    out.push("        onQuestionId: (value: number): void => {");
-    out.push("          questionId = value;");
-    out.push("          options?.onQuestionId?.(value);");
-    out.push("        },");
+    out.push("          onQuestionId: (value: number): void => {");
+    out.push("            questionId = value;");
+    out.push("            options?.onQuestionId?.(value);");
+    out.push("          },");
     out.push(
-      "        ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),",
+      "          ...(encoded.capTable.length > 0 ? { paramsCapTable: encoded.capTable } : {}),",
     );
-    out.push("      };");
+    out.push("        };");
     // Use callRaw when available (provides cap table in response)
-    out.push("      if (transport.callRaw) {");
+    out.push("        if (transport.callRaw) {");
     out.push(
-      `        const raw = await transport.callRaw(capability, ${info.typeName}MethodOrdinals[${
+      `          const raw = await transport.callRaw(capability, ${info.typeName}MethodOrdinals[${
+        JSON.stringify(resolved.methodName)
+      }], encoded.content, callOptions);`,
+    );
+    out.push("          try {");
+    if (resolved.isStreaming) {
+      out.push("            void raw;");
+      out.push("            return;");
+    } else {
+      out.push(
+        `            return decodeStructMessageWithCaps(${
+          resolved.results!.descriptorConst
+        }, raw.contentBytes, raw.capTable) as ${resolved.results!.typeName};`,
+      );
+    }
+    out.push("          } finally {");
+    out.push(
+      "            if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
+    );
+    out.push(
+      "              await transport.finish(questionId, options?.finish);",
+    );
+    out.push("            }");
+    out.push("          }");
+    out.push("        }");
+    // Fallback to call() for transports without callRaw
+    out.push(
+      `        const response = await transport.call(capability, ${info.typeName}MethodOrdinals[${
         JSON.stringify(resolved.methodName)
       }], encoded.content, callOptions);`,
     );
     out.push("        try {");
     if (resolved.isStreaming) {
-      out.push("          void raw;");
+      out.push("          void response;");
       out.push("          return;");
     } else {
       out.push(
-        `          return decodeStructMessageWithCaps(${resolved.results!.descriptorConst}, raw.contentBytes, raw.capTable) as ${resolved.results!.typeName};`,
+        `          return decodeStructMessageWithCaps(${
+          resolved.results!.descriptorConst
+        }, response, []) as ${resolved.results!.typeName};`,
       );
     }
     out.push("        } finally {");
@@ -258,28 +292,20 @@ function emitInterfaceCode(
     );
     out.push("          }");
     out.push("        }");
-    out.push("      }");
-    // Fallback to call() for transports without callRaw
+    out.push("      } catch (error) {");
+    out.push("        throw annotateCapnpError(error, {");
+    out.push('          phase: "client_call",');
+    out.push(`          interfaceName: ${JSON.stringify(info.typeName)},`);
     out.push(
-      `      const response = await transport.call(capability, ${info.typeName}MethodOrdinals[${
-        JSON.stringify(resolved.methodName)
-      }], encoded.content, callOptions);`,
+      `          interfaceId: ${formatBigint(resolved.sourceInterfaceId)},`,
     );
-    out.push("      try {");
-    if (resolved.isStreaming) {
-      out.push("        void response;");
-      out.push("        return;");
-    } else {
-      out.push(
-        `        return decodeStructMessageWithCaps(${resolved.results!.descriptorConst}, response, []) as ${resolved.results!.typeName};`,
-      );
-    }
-    out.push("      } finally {");
+    out.push(`          methodName: ${JSON.stringify(resolved.methodName)},`);
+    out.push(`          methodId: ${resolved.method.codeOrder},`);
     out.push(
-      "        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
+      `        }, ${
+        JSON.stringify(`${info.typeName}.${resolved.methodName} failed`)
+      });`,
     );
-    out.push("          await transport.finish(questionId, options?.finish);");
-    out.push("        }");
     out.push("      }");
     out.push("    },");
   }
@@ -290,8 +316,18 @@ function emitInterfaceCode(
   out.push("  transport: RpcBootstrapClientTransport,");
   out.push("  options?: RpcCallOptions,");
   out.push(`): Promise<${info.typeName}Client> {`);
-  out.push("  const capability = await transport.bootstrap(options);");
-  out.push(`  return create${info.typeName}Client(transport, capability);`);
+  out.push("  try {");
+  out.push("    const capability = await transport.bootstrap(options);");
+  out.push(`    return create${info.typeName}Client(transport, capability);`);
+  out.push("  } catch (error) {");
+  out.push("    throw annotateCapnpError(error, {");
+  out.push('      phase: "bootstrap",');
+  out.push(`      interfaceName: ${JSON.stringify(info.typeName)},`);
+  out.push(`      interfaceId: ${info.typeName}InterfaceId,`);
+  out.push(
+    `    }, ${JSON.stringify(`bootstrap ${info.typeName} failed`)});`,
+  );
+  out.push("  }");
   out.push("}");
   out.push("");
 
@@ -337,7 +373,7 @@ function emitInterfaceCode(
     }
     out.push("        default:");
     out.push(
-      '          throw new Error("unknown interface id: " + String(resolvedInterfaceId));',
+      '          throw new ProtocolError("unknown interface id: " + String(resolvedInterfaceId), { metadata: { phase: "dispatch", interfaceId: resolvedInterfaceId } });',
     );
     out.push("      }");
   } else {
@@ -518,7 +554,9 @@ function emitServerMethodSwitch(
       out.push(`${indent}    return new Uint8Array(EMPTY_STRUCT_MESSAGE);`);
     } else {
       out.push(
-        `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results!.descriptorConst}, result);`,
+        `${indent}    const encoded = encodeStructMessageWithCaps(${
+          resolved.results!.descriptorConst
+        }, result);`,
       );
       out.push(`${indent}    if (encoded.capTable.length > 0) {`);
       out.push(
@@ -531,7 +569,7 @@ function emitServerMethodSwitch(
   }
   out.push(`${indent}  default:`);
   out.push(
-    `${indent}    throw new Error("unknown method ordinal: " + methodId);`,
+    `${indent}    throw new ProtocolError("unknown method ordinal: " + methodId, { metadata: { phase: "dispatch", interfaceId: ctx.interfaceId, methodId } });`,
   );
   out.push(`${indent}}`);
 }

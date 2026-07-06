@@ -7,6 +7,7 @@ export type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
   RpcServerDispatch,
@@ -29,6 +30,7 @@ import type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcServerDispatch,
   RpcServerDispatchResult,
@@ -36,7 +38,12 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "../../server/rpc_runtime.ts";
-import { createRpcServiceToken } from "../../server/rpc_runtime.ts";
+import {
+  annotateCapnpError,
+  createRpcServiceToken,
+  ProtocolError,
+  SessionError,
+} from "../../server/rpc_runtime.ts";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -93,7 +100,11 @@ function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
 
 function requireRpcStubCapability(value: unknown): CapabilityPointer {
   const capability = parseCapabilityPointer(value);
-  if (!capability) throw new Error("expected RpcStub capability");
+  if (!capability) {
+    throw new SessionError("expected RpcStub capability", {
+      metadata: { phase: "capability_resolve" },
+    });
+  }
   return capability;
 }
 
@@ -141,8 +152,9 @@ function capabilityToServiceStub<TClient extends object>(
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error(
+    throw new SessionError(
       "rpc outbound client is unavailable for capability callbacks",
+      { metadata: { phase: "capability_resolve" } },
     );
   }
   return ctx.outboundClient;
@@ -161,7 +173,16 @@ function exportCapabilityFromTransport<
   const host = transport as RpcClientTransportWithCapabilityExport;
   const exportCapability = host.exportCapability;
   if (!exportCapability) {
-    throw new Error("transport does not support exporting local capabilities");
+    throw new SessionError(
+      "transport does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+        },
+      },
+    );
   }
   return service.registerServer(
     {
@@ -184,8 +205,17 @@ function exportCapabilityFromContext<
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error(
+    throw new SessionError(
       "rpc call context does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+          questionId: ctx.questionId,
+          methodId: ctx.methodId,
+        },
+      },
     );
   }
   return service.registerServer(

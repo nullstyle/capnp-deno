@@ -825,7 +825,7 @@ Deno.test("RpcServerBridge string dispatch throws become exception reasons", asy
   }
   assertEquals(seenUnhandled.length, 1);
   assertEquals(seenUnhandled[0].questionId, 23);
-  assertEquals(seenUnhandled[0].message, "string explosion");
+  assertEquals(seenUnhandled[0].message, "SessionError: string explosion");
 });
 
 // --- Promise Pipelining (Level 2 RPC) Tests ---

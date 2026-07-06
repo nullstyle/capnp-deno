@@ -1,4 +1,5 @@
 import { generateTypescriptFiles } from "../../tools/capnpc-deno/emitter.ts";
+import { ProtocolError, SessionError } from "../../src/errors.ts";
 import {
   type CodeGeneratorRequestModel,
   STREAM_RESULT_TYPE_ID,
@@ -156,9 +157,17 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   );
   assert(
     source.includes(
-      'import { createRpcServiceToken } from "@nullstyle/capnp/rpc";',
+      "annotateCapnpError",
     ),
-    "expected generated service token factory import",
+    "expected generated diagnostic annotation import",
+  );
+  assert(
+    source.includes("ProtocolError") && source.includes("SessionError"),
+    "expected generated typed error imports",
+  );
+  assert(
+    source.includes("RpcDebugSchemaMethod"),
+    "expected generated debug schema metadata type import",
   );
   assert(
     source.includes("export interface Pinger {"),
@@ -181,6 +190,12 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   assert(
     source.includes("RpcServiceToken<Pinger>"),
     "expected generated service token type annotation",
+  );
+  assert(
+    source.includes("export const PingerDebugMethods = [") &&
+      source.includes('methodName: "ping"') &&
+      source.includes("methods: PingerDebugMethods"),
+    "expected generated service token debug method metadata",
   );
   assert(
     source.includes(
@@ -400,12 +415,15 @@ Deno.test("capnpc-deno generated rpc server dispatch decodes and encodes methods
     thrown = error;
   }
   if (
-    !(thrown instanceof Error) || !/unknown method ordinal/.test(thrown.message)
+    !(thrown instanceof ProtocolError) ||
+    !/unknown method ordinal/.test(thrown.message)
   ) {
     throw new Error(
-      `expected unknown method ordinal error, got: ${String(thrown)}`,
+      `expected typed unknown method ordinal error, got: ${String(thrown)}`,
     );
   }
+  assertEquals(thrown.metadata?.phase, "dispatch");
+  assertEquals(thrown.metadata?.methodId, 999);
 });
 
 Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle hook", async () => {
@@ -717,6 +735,78 @@ Deno.test("capnpc-deno documents generated callback-capable params", () => {
     ),
     "expected generated callback params to export local capabilities",
   );
+  assert(
+    source.includes(
+      'new SessionError("transport does not support exporting local capabilities"',
+    ),
+    "expected generated unsupported callback export to throw SessionError",
+  );
+  assert(
+    source.includes("annotateCapnpError(error, {") &&
+      source.includes('serviceName: "Pinger"') &&
+      source.includes('methodName: "ping"'),
+    "expected generated callback method failures to be annotated",
+  );
+});
+
+Deno.test("capnpc-deno generated callback export failures are typed", async () => {
+  const generated = generateTypescriptFiles(makeCallbackRequest());
+  assertEquals(generated.length, 2);
+  const mod = await importGeneratedModule(
+    fileByPath(generated, "callback_codegen_types.ts").contents,
+  );
+
+  const Pinger = mod.Pinger as
+    | {
+      bootstrapClient(transport: {
+        bootstrap(): Promise<{ capabilityIndex: number }>;
+        call(
+          capability: unknown,
+          methodId: number,
+          params: Uint8Array,
+          options?: unknown,
+        ): Promise<Uint8Array>;
+      }): Promise<{
+        ping(value: unknown): Promise<void>;
+      }>;
+    }
+    | undefined;
+  assert(Pinger !== undefined, "expected generated Pinger service token");
+
+  const client = await Pinger.bootstrapClient({
+    bootstrap() {
+      return Promise.resolve({ capabilityIndex: 1 });
+    },
+    call() {
+      throw new Error("call should not be reached");
+    },
+  });
+
+  let thrown: unknown;
+  try {
+    await client.ping({
+      pong() {
+        return Promise.resolve();
+      },
+    });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError,
+    `expected SessionError, got: ${String(thrown)}`,
+  );
+  assert(
+    /transport does not support exporting local capabilities/.test(
+      thrown.message,
+    ),
+    `expected callback export failure message, got: ${thrown.message}`,
+  );
+  assertEquals(thrown.metadata?.phase, "client_call");
+  assertEquals(thrown.metadata?.serviceName, "Pinger");
+  assertEquals(thrown.metadata?.methodName, "ping");
+  assertEquals(thrown.metadata?.methodId, 0);
 });
 
 Deno.test("capnpc-deno generates first-class streaming RPC methods", () => {
@@ -772,6 +862,11 @@ Deno.test("capnpc-deno generates first-class streaming RPC methods", () => {
     "expected separate client/server service token types",
   );
   assert(
+    source.includes("export const CounterDebugMethods = [") &&
+      source.includes("methods: CounterDebugMethods"),
+    "expected generated streaming token debug method metadata",
+  );
+  assert(
     source.includes("export function createCounterAddStreamSender(") &&
       /StreamSender<\w*AddParams\["value"\], void>/.test(source) &&
       /createStreamSender<\w*AddParams\["value"\], void>/.test(source),
@@ -785,10 +880,12 @@ Deno.test("capnpc-deno generates first-class streaming RPC methods", () => {
   );
   assert(
     source.includes(
-      "import { EMPTY_STRUCT_MESSAGE, createRpcServiceToken, createStreamSender }",
+      "EMPTY_STRUCT_MESSAGE",
     ) &&
+      source.includes("createStreamSender") &&
+      source.includes("annotateCapnpError") &&
       source.includes("StreamSenderOptions,"),
-    "expected generated streaming imports",
+    "expected generated streaming and diagnostic imports",
   );
   assert(
     !source.includes("StreamResult"),

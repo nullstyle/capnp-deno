@@ -8,6 +8,7 @@ import type {
   CapabilityPointer,
   PreambleCapDescriptor,
 } from "../../encoding/runtime.ts";
+import type { RpcDebugSchemaMethod } from "../diagnostics.ts";
 
 export interface RpcFinishOptions {
   releaseResultCaps?: boolean;
@@ -165,6 +166,7 @@ export interface RpcServiceToken<
 > {
   interfaceId: bigint;
   interfaceName: string;
+  methods?: readonly RpcDebugSchemaMethod[];
   bootstrapClient: (
     transport: RpcBootstrapClientTransport,
     options?: RpcCallOptions,

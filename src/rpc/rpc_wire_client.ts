@@ -11,7 +11,11 @@
  * @module
  */
 
-import { ProtocolError, SessionError } from "../errors.ts";
+import { annotateCapnpError, ProtocolError, SessionError } from "../errors.ts";
+import {
+  emitObservabilityEvent,
+  type RpcObservability,
+} from "../observability/observability.ts";
 import type {
   RpcClientCallOptions,
   RpcClientCallResult,
@@ -71,6 +75,10 @@ export interface RpcWireClientOptions {
     frame: Uint8Array,
     tag: number,
   ) => void | Promise<void>;
+  /**
+   * Optional observability hook for diagnostics and tracing.
+   */
+  observability?: RpcObservability;
 }
 
 /**
@@ -87,6 +95,7 @@ export class RpcWireClient {
   #nextQuestionId: number;
   readonly #defaultTimeoutMs: number | undefined;
   readonly #onUnexpectedFrame: RpcWireClientOptions["onUnexpectedFrame"];
+  readonly #observability: RpcObservability | undefined;
 
   #closed = false;
   #startError: unknown = null;
@@ -103,14 +112,20 @@ export class RpcWireClient {
     this.#nextQuestionId = options.nextQuestionId ?? 1;
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
     this.#onUnexpectedFrame = options.onUnexpectedFrame;
+    this.#observability = options.observability;
 
     this.#startPromise = Promise.resolve(
       this.transport.start((frame) => this.#onFrame(frame)),
     ).catch((error) => {
       this.#startError = error;
+      emitObservabilityEvent(this.#observability, {
+        name: "rpc.wire_client.start_error",
+        error,
+      });
       this.#rejectAllPending(
         new SessionError("rpc wire client failed to start", {
           cause: error,
+          metadata: { phase: "transport" },
         }),
       );
     });
@@ -151,7 +166,14 @@ export class RpcWireClient {
       options,
     );
     if (response.kind === "exception") {
-      throw new ProtocolError(`rpc bootstrap failed: ${response.reason}`);
+      throw new ProtocolError(`rpc bootstrap failed: ${response.reason}`, {
+        metadata: {
+          phase: "bootstrap",
+          questionId,
+          answerId: response.answerId,
+          messageName: "Return",
+        },
+      });
     }
 
     if ((options.autoFinish ?? true) && !response.noFinishNeeded) {
@@ -219,7 +241,17 @@ export class RpcWireClient {
       options,
     );
     if (response.kind === "exception") {
-      throw new ProtocolError(`rpc call failed: ${response.reason}`);
+      throw new ProtocolError(`rpc call failed: ${response.reason}`, {
+        metadata: {
+          phase: "client_call",
+          questionId,
+          answerId: response.answerId,
+          interfaceId,
+          methodId,
+          capabilityIndex: capability.capabilityIndex,
+          messageName: "Return",
+        },
+      });
     }
 
     return {
@@ -274,9 +306,19 @@ export class RpcWireClient {
       throw new SessionError("rpc wire client is closed");
     }
     if (!this.#localBridge) {
-      this.#localBridge = new RpcServerBridge();
+      this.#localBridge = new RpcServerBridge({
+        observability: this.#observability,
+      });
     }
-    return this.#localBridge.exportCapability(dispatch, options);
+    const capability = this.#localBridge.exportCapability(dispatch, options);
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.wire_client.capability_export",
+      attributes: {
+        "rpc.capability_id": capability.capabilityIndex,
+        "rpc.interface_id": dispatch.interfaceId,
+      },
+    });
+    return capability;
   }
 
   /**
@@ -295,6 +337,16 @@ export class RpcWireClient {
     try {
       tag = decodeRpcMessageTag(frame);
     } catch {
+      emitObservabilityEvent(this.#observability, {
+        name: "rpc.wire_client.frame_decode_error",
+        attributes: { "rpc.frame_bytes": frame.byteLength },
+        error: new ProtocolError("failed to decode inbound frame tag", {
+          metadata: {
+            phase: "frame_decode",
+            frameBytes: frame.byteLength,
+          },
+        }),
+      });
       return;
     }
 
@@ -313,6 +365,12 @@ export class RpcWireClient {
           this.#rejectAllPending(
             new ProtocolError("failed to handle inbound callback frame", {
               cause: error,
+              metadata: {
+                phase: "dispatch",
+                messageTag: tag,
+                messageName: "Call",
+                frameBytes: frame.byteLength,
+              },
             }),
           );
         }
@@ -336,6 +394,12 @@ export class RpcWireClient {
       this.#rejectAllPending(
         new ProtocolError("failed to decode inbound return frame", {
           cause: error,
+          metadata: {
+            phase: "frame_decode",
+            messageTag: tag,
+            messageName: "Return",
+            frameBytes: frame.byteLength,
+          },
         }),
       );
       return;
@@ -354,6 +418,7 @@ export class RpcWireClient {
     if (this.#startError !== null) {
       throw new SessionError("rpc wire client failed to start", {
         cause: this.#startError,
+        metadata: { phase: "transport" },
       });
     }
   }
@@ -391,7 +456,11 @@ export class RpcWireClient {
       // Ensure the waiter promise does not leak as an unhandled rejection when
       // send fails before we can await `wait`.
       await wait.catch(() => {});
-      throw error;
+      throw annotateCapnpError(error, {
+        phase: "transport",
+        questionId,
+        frameBytes: frame.byteLength,
+      }, "rpc wire client send failed");
     }
     try {
       return await wait;
@@ -399,7 +468,10 @@ export class RpcWireClient {
       if (frameSent && (options.autoFinish ?? true)) {
         await this.#tryFinishAfterWaitFailure(questionId, options.finish);
       }
-      throw error;
+      throw annotateCapnpError(error, {
+        phase: "client_wait",
+        questionId,
+      });
     }
   }
 
@@ -435,7 +507,11 @@ export class RpcWireClient {
 
       if (options.signal?.aborted) {
         waiter.settled = true;
-        reject(new SessionError("rpc wait aborted"));
+        reject(
+          new SessionError("rpc wait aborted", {
+            metadata: { phase: "client_wait", questionId },
+          }),
+        );
         return;
       }
 
@@ -444,7 +520,9 @@ export class RpcWireClient {
           this.#settleWaiter(
             questionId,
             waiter,
-            new SessionError(`rpc wait timed out after ${timeoutMs}ms`),
+            new SessionError(`rpc wait timed out after ${timeoutMs}ms`, {
+              metadata: { phase: "client_wait", questionId },
+            }),
           );
         }, timeoutMs);
       }
@@ -455,7 +533,9 @@ export class RpcWireClient {
           this.#settleWaiter(
             questionId,
             waiter,
-            new SessionError("rpc wait aborted"),
+            new SessionError("rpc wait aborted", {
+              metadata: { phase: "client_wait", questionId },
+            }),
           );
         };
         waiter.signal.addEventListener("abort", waiter.onAbort, { once: true });

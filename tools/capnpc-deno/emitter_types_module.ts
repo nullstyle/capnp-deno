@@ -62,6 +62,7 @@ export function emitTypesModule(
   out.push("  RpcExportCapabilityOptions,");
   out.push("  RpcFinishOptions,");
   out.push("  RpcGeneratedServerDispatch as RpcServerDispatch,");
+  out.push("  RpcDebugSchemaMethod,");
   out.push("  RpcServerDispatchResult,");
   out.push("  RpcServerRegistry,");
   out.push("  RpcServiceToken,");
@@ -87,6 +88,7 @@ export function emitTypesModule(
   out.push("  RpcClientTransport,");
   out.push("  RpcExportCapabilityOptions,");
   out.push("  RpcGeneratedServerDispatch as RpcServerDispatch,");
+  out.push("  RpcDebugSchemaMethod,");
   out.push("  RpcServerDispatchResult,");
   out.push("  RpcServerRegistry,");
   out.push("  RpcServiceToken,");
@@ -96,12 +98,17 @@ export function emitTypesModule(
     out.push("  StreamSenderOptions,");
   }
   out.push('} from "@nullstyle/capnp/rpc";');
+  const rpcValueImports = [
+    "ProtocolError",
+    "SessionError",
+    "annotateCapnpError",
+    "createRpcServiceToken",
+  ];
+  if (hasStreamingMethods) {
+    rpcValueImports.push("EMPTY_STRUCT_MESSAGE", "createStreamSender");
+  }
   out.push(
-    `import { ${
-      hasStreamingMethods
-        ? "EMPTY_STRUCT_MESSAGE, createRpcServiceToken, createStreamSender"
-        : "createRpcServiceToken"
-    } } from "@nullstyle/capnp/rpc";`,
+    `import { ${rpcValueImports.join(", ")} } from "@nullstyle/capnp/rpc";`,
   );
   out.push("import {");
   out.push("  decodeStructMessage,");
@@ -222,7 +229,7 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   );
   out.push("  const capability = parseCapabilityPointer(value);");
   out.push(
-    '  if (!capability) throw new Error("expected RpcStub capability");',
+    '  if (!capability) throw new SessionError("expected RpcStub capability", { metadata: { phase: "capability_resolve" } });',
   );
   out.push("  return capability;");
   out.push("}");
@@ -271,7 +278,7 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   );
   out.push("  if (!ctx.outboundClient) {");
   out.push(
-    '    throw new Error("rpc outbound client is unavailable for capability callbacks");',
+    '    throw new SessionError("rpc outbound client is unavailable for capability callbacks", { metadata: { phase: "capability_resolve" } });',
   );
   out.push("  }");
   out.push("  return ctx.outboundClient;");
@@ -292,7 +299,7 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("  const exportCapability = host.exportCapability;");
   out.push("  if (!exportCapability) {");
   out.push(
-    '    throw new Error("transport does not support exporting local capabilities");',
+    '    throw new SessionError("transport does not support exporting local capabilities", { metadata: { phase: "capability_resolve", serviceName: service.interfaceName, interfaceId: service.interfaceId } });',
   );
   out.push("  }");
   out.push("  return service.registerServer(");
@@ -316,7 +323,7 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("  if (existing) return existing;");
   out.push("  if (!ctx.exportCapability) {");
   out.push(
-    '    throw new Error("rpc call context does not support exporting local capabilities");',
+    '    throw new SessionError("rpc call context does not support exporting local capabilities", { metadata: { phase: "capability_resolve", serviceName: service.interfaceName, interfaceId: service.interfaceId, questionId: ctx.questionId, methodId: ctx.methodId } });',
   );
   out.push("  }");
   out.push("  return service.registerServer(");
@@ -542,8 +549,9 @@ function emitClientAdapter(
       }
     })();
     out.push(`    ${methodName}: async (${argList}) => {`);
+    out.push("      try {");
     out.push(
-      `      const result = await ${methodAccess}(${
+      `        const result = await ${methodAccess}(${
         emitClientParamConstruction(
           method,
           shape,
@@ -557,8 +565,22 @@ function emitClientAdapter(
       interfaceById,
     );
     if (resultEmit.length > 0) {
-      out.push(`      ${resultEmit}`);
+      out.push(`        ${resultEmit}`);
     }
+    out.push("      } catch (error) {");
+    out.push("        throw annotateCapnpError(error, {");
+    out.push('          phase: "client_call",');
+    out.push(`          serviceName: ${JSON.stringify(typeName)},`);
+    out.push(`          interfaceName: ${JSON.stringify(typeName)},`);
+    out.push(`          interfaceId: ${typeName}InterfaceId,`);
+    out.push(`          methodName: ${JSON.stringify(method.methodName)},`);
+    out.push(`          methodId: ${method.method.codeOrder},`);
+    out.push(
+      `        }, ${
+        JSON.stringify(`${typeName}.${method.methodName} failed`)
+      });`,
+    );
+    out.push("      }");
     out.push("    },");
   }
   out.push("  };");
@@ -594,6 +616,7 @@ function emitServerAdapter(
     out.push(
       `    ${methodName}: async (params: ${method.params.typeName}, _ctx: RpcCallContext) => {`,
     );
+    out.push("      try {");
     const invocation = `${methodAccess}(${
       emitServerInvocationArguments(
         method,
@@ -604,23 +627,23 @@ function emitServerAdapter(
       )
     })`;
     if (method.isStreaming) {
-      out.push("      const run = async (): Promise<void> => {");
-      out.push(`        await ${invocation};`);
-      out.push("      };");
+      out.push("        const run = async (): Promise<void> => {");
+      out.push(`          await ${invocation};`);
+      out.push("        };");
       out.push(
-        `      const pending = ${method.methodName}StreamChain.then(run, run);`,
+        `        const pending = ${method.methodName}StreamChain.then(run, run);`,
       );
       out.push(
-        `      ${method.methodName}StreamChain = pending.catch(() => {});`,
+        `        ${method.methodName}StreamChain = pending.catch(() => {});`,
       );
-      out.push("      await pending;");
-      out.push("      return;");
+      out.push("        await pending;");
+      out.push("        return;");
     } else {
       out.push(
-        `      const result = await ${invocation};`,
+        `        const result = await ${invocation};`,
       );
       out.push(
-        `      ${
+        `        ${
           emitServerResultConstruction(
             method,
             shape,
@@ -629,6 +652,21 @@ function emitServerAdapter(
         }`,
       );
     }
+    out.push("      } catch (error) {");
+    out.push("        throw annotateCapnpError(error, {");
+    out.push('          phase: "handler",');
+    out.push(`          serviceName: ${JSON.stringify(typeName)},`);
+    out.push(`          interfaceName: ${JSON.stringify(typeName)},`);
+    out.push(`          interfaceId: ${typeName}InterfaceId,`);
+    out.push(`          methodName: ${JSON.stringify(method.methodName)},`);
+    out.push(`          methodId: ${method.method.codeOrder},`);
+    out.push("          questionId: _ctx.questionId,");
+    out.push(
+      `        }, ${
+        JSON.stringify(`${typeName}.${method.methodName} handler failed`)
+      });`,
+    );
+    out.push("      }");
     out.push("    },");
   }
   out.push("  };");
@@ -647,10 +685,29 @@ function emitServiceToken(
     ? `RpcServiceToken<${typeName}>`
     : `RpcServiceToken<${typeName}, ${serverTypeName}>`;
   out.push(
+    `export const ${typeName}DebugMethods = [`,
+  );
+  for (const method of resolved.methods) {
+    out.push("  {");
+    out.push(`    interfaceId: ${typeName}InterfaceId,`);
+    out.push(`    interfaceName: ${JSON.stringify(typeName)},`);
+    out.push(`    serviceName: ${JSON.stringify(typeName)},`);
+    out.push(
+      `    methodId: ${typeName}MethodOrdinals[${
+        JSON.stringify(method.methodName)
+      }],`,
+    );
+    out.push(`    methodName: ${JSON.stringify(method.methodName)},`);
+    out.push("  },");
+  }
+  out.push("] as const satisfies readonly RpcDebugSchemaMethod[];");
+  out.push("");
+  out.push(
     `export const ${typeName}: ${tokenType} = createRpcServiceToken({`,
   );
   out.push(`  interfaceId: ${typeName}InterfaceId,`);
   out.push(`  interfaceName: ${JSON.stringify(typeName)},`);
+  out.push(`  methods: ${typeName}DebugMethods,`);
   out.push(
     "  bootstrapClient: async (transport: RpcBootstrapClientTransport, options?: RpcCallOptions) =>",
   );
@@ -992,7 +1049,9 @@ function emitClientResultExtraction(
           interfaceById,
         );
         if (!tokenName) {
-          return `throw new Error("cannot decode non-local capability result for method ${method.methodName}");`;
+          return `throw new ProtocolError("cannot decode non-local capability result for method ${method.methodName}", { metadata: { phase: "capability_resolve", methodName: ${
+            JSON.stringify(method.methodName)
+          }, methodId: ${method.method.codeOrder} } });`;
         }
         return `return capabilityToServiceStub(${
           accessProperty("result", shape.resultFieldName!)

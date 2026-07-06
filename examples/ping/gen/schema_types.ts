@@ -7,6 +7,7 @@ export type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
@@ -29,6 +30,7 @@ import type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
   RpcServerDispatchResult,
@@ -36,7 +38,12 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "@nullstyle/capnp/rpc";
-import { createRpcServiceToken } from "@nullstyle/capnp/rpc";
+import {
+  annotateCapnpError,
+  createRpcServiceToken,
+  ProtocolError,
+  SessionError,
+} from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -93,7 +100,11 @@ function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
 
 function requireRpcStubCapability(value: unknown): CapabilityPointer {
   const capability = parseCapabilityPointer(value);
-  if (!capability) throw new Error("expected RpcStub capability");
+  if (!capability) {
+    throw new SessionError("expected RpcStub capability", {
+      metadata: { phase: "capability_resolve" },
+    });
+  }
   return capability;
 }
 
@@ -141,8 +152,9 @@ function capabilityToServiceStub<TClient extends object>(
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error(
+    throw new SessionError(
       "rpc outbound client is unavailable for capability callbacks",
+      { metadata: { phase: "capability_resolve" } },
     );
   }
   return ctx.outboundClient;
@@ -161,7 +173,16 @@ function exportCapabilityFromTransport<
   const host = transport as RpcClientTransportWithCapabilityExport;
   const exportCapability = host.exportCapability;
   if (!exportCapability) {
-    throw new Error("transport does not support exporting local capabilities");
+    throw new SessionError(
+      "transport does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+        },
+      },
+    );
   }
   return service.registerServer(
     {
@@ -184,8 +205,17 @@ function exportCapabilityFromContext<
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error(
+    throw new SessionError(
       "rpc call context does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+          questionId: ctx.questionId,
+          methodId: ctx.methodId,
+        },
+      },
     );
   }
   return service.registerServer(
@@ -313,26 +343,48 @@ export function createPingerClient(
       params: PingParams,
       options?: RpcCallOptions,
     ): Promise<PingResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        PingParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xfc4a3c8417f1ca81n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          PingParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xfc4a3c8417f1ca81n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            PingerMethodOrdinals["ping"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              PingResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as PingResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           PingerMethodOrdinals["ping"],
           encoded.content,
@@ -341,8 +393,8 @@ export function createPingerClient(
         try {
           return decodeStructMessageWithCaps(
             PingResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as PingResults;
         } finally {
           if (
@@ -352,26 +404,14 @@ export function createPingerClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        PingerMethodOrdinals["ping"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          PingResultsStruct,
-          response,
-          [],
-        ) as PingResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Pinger",
+          interfaceId: 0xfc4a3c8417f1ca81n,
+          methodName: "ping",
+          methodId: 0,
+        }, "Pinger.ping failed");
       }
     },
   };
@@ -381,8 +421,16 @@ export async function bootstrapPingerClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<PingerClient> {
-  const capability = await transport.bootstrap(options);
-  return createPingerClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createPingerClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "Pinger",
+      interfaceId: PingerInterfaceId,
+    }, "bootstrap Pinger failed");
+  }
 }
 
 export function createPingerServer(server: PingerServer): RpcServerDispatch {
@@ -411,7 +459,13 @@ export function createPingerServer(server: PingerServer): RpcServerDispatch {
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -451,26 +505,48 @@ export function createPongerClient(
       params: PongParams,
       options?: RpcCallOptions,
     ): Promise<PongResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        PongParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xaa1902b73645b149n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          PongParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xaa1902b73645b149n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            PongerMethodOrdinals["pong"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              PongResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as PongResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           PongerMethodOrdinals["pong"],
           encoded.content,
@@ -479,8 +555,8 @@ export function createPongerClient(
         try {
           return decodeStructMessageWithCaps(
             PongResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as PongResults;
         } finally {
           if (
@@ -490,26 +566,14 @@ export function createPongerClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        PongerMethodOrdinals["pong"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          PongResultsStruct,
-          response,
-          [],
-        ) as PongResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Ponger",
+          interfaceId: 0xaa1902b73645b149n,
+          methodName: "pong",
+          methodId: 0,
+        }, "Ponger.pong failed");
       }
     },
   };
@@ -519,8 +583,16 @@ export async function bootstrapPongerClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<PongerClient> {
-  const capability = await transport.bootstrap(options);
-  return createPongerClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createPongerClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "Ponger",
+      interfaceId: PongerInterfaceId,
+    }, "bootstrap Ponger failed");
+  }
 }
 
 export function createPongerServer(server: PongerServer): RpcServerDispatch {
@@ -549,7 +621,13 @@ export function createPongerServer(server: PongerServer): RpcServerDispatch {
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -586,10 +664,21 @@ function createPingerServiceClient(
 ): Pinger {
   return {
     ping: async (value: Ponger | RpcStub<Ponger>, options?: RpcCallOptions) => {
-      const result = await client.ping({
-        p: exportCapabilityFromTransport(transport, Ponger, value),
-      }, options);
-      return;
+      try {
+        const result = await client.ping({
+          p: exportCapabilityFromTransport(transport, Ponger, value),
+        }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Pinger",
+          interfaceName: "Pinger",
+          interfaceId: PingerInterfaceId,
+          methodName: "ping",
+          methodId: 0,
+        }, "Pinger.ping failed");
+      }
     },
   };
 }
@@ -599,25 +688,48 @@ function createPingerServiceServer(
 ): PingerServer {
   return {
     ping: async (params: PingParams, _ctx: RpcCallContext) => {
-      const result = await server.ping(
-        capabilityToServiceStub(
-          params.p,
-          requireOutboundClient(_ctx),
-          (nextTransport, nextCapability) =>
-            createPongerServiceClient(
-              createPongerClient(nextTransport, nextCapability),
-              nextTransport,
-            ),
-        ),
-      );
-      return {} as PingResults;
+      try {
+        const result = await server.ping(
+          capabilityToServiceStub(
+            params.p,
+            requireOutboundClient(_ctx),
+            (nextTransport, nextCapability) =>
+              createPongerServiceClient(
+                createPongerClient(nextTransport, nextCapability),
+                nextTransport,
+              ),
+          ),
+        );
+        return {} as PingResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Pinger",
+          interfaceName: "Pinger",
+          interfaceId: PingerInterfaceId,
+          methodName: "ping",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "Pinger.ping handler failed");
+      }
     },
   };
 }
 
+export const PingerDebugMethods = [
+  {
+    interfaceId: PingerInterfaceId,
+    interfaceName: "Pinger",
+    serviceName: "Pinger",
+    methodId: PingerMethodOrdinals["ping"],
+    methodName: "ping",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
+
 export const Pinger: RpcServiceToken<Pinger> = createRpcServiceToken({
   interfaceId: PingerInterfaceId,
   interfaceName: "Pinger",
+  methods: PingerDebugMethods,
   bootstrapClient: async (
     transport: RpcBootstrapClientTransport,
     options?: RpcCallOptions,
@@ -654,8 +766,19 @@ function createPongerServiceClient(
 ): Ponger {
   return {
     pong: async (value: PongParams["n"], options?: RpcCallOptions) => {
-      const result = await client.pong({ n: value }, options);
-      return;
+      try {
+        const result = await client.pong({ n: value }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Ponger",
+          interfaceName: "Ponger",
+          interfaceId: PongerInterfaceId,
+          methodName: "pong",
+          methodId: 0,
+        }, "Ponger.pong failed");
+      }
     },
   };
 }
@@ -665,15 +788,38 @@ function createPongerServiceServer(
 ): PongerServer {
   return {
     pong: async (params: PongParams, _ctx: RpcCallContext) => {
-      const result = await server.pong(params.n);
-      return {} as PongResults;
+      try {
+        const result = await server.pong(params.n);
+        return {} as PongResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Ponger",
+          interfaceName: "Ponger",
+          interfaceId: PongerInterfaceId,
+          methodName: "pong",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "Ponger.pong handler failed");
+      }
     },
   };
 }
 
+export const PongerDebugMethods = [
+  {
+    interfaceId: PongerInterfaceId,
+    interfaceName: "Ponger",
+    serviceName: "Ponger",
+    methodId: PongerMethodOrdinals["pong"],
+    methodName: "pong",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
+
 export const Ponger: RpcServiceToken<Ponger> = createRpcServiceToken({
   interfaceId: PongerInterfaceId,
   interfaceName: "Ponger",
+  methods: PongerDebugMethods,
   bootstrapClient: async (
     transport: RpcBootstrapClientTransport,
     options?: RpcCallOptions,

@@ -9,6 +9,7 @@
 
 export {
   AbiError,
+  annotateCapnpError,
   CapnpError,
   type CapnpErrorOptions,
   type ErrorMetadata,
@@ -179,6 +180,13 @@ export {
 } from "./rpc/transports/message_port.ts";
 
 export {
+  createWebTransportCertificateHash,
+  createWebTransportCertificateHashOptions,
+  getWebTransportRuntimeSupport,
+  type WebTransportCertificateHash,
+  type WebTransportCertificateHashInput,
+  type WebTransportCertificateHashOptions,
+  type WebTransportRuntimeSupport,
   WebTransportTransport,
   type WebTransportTransportAcceptOptions,
   type WebTransportTransportConnectOptions,
@@ -248,9 +256,22 @@ export {
   type StreamSendContext,
   type StreamSender,
   type StreamSenderOptions,
+  type StreamSenderState,
+  type StreamSenderWaitOptions,
 } from "./rpc/session/streaming.ts";
 
 // === Observability ===
+
+export {
+  createRpcDebugTracer,
+  formatRpcDebugEvent,
+  type RpcDebugEvent,
+  type RpcDebugEventFormatOptions,
+  type RpcDebugPayloadSummary,
+  type RpcDebugSchemaMethod,
+  type RpcDebugTracer,
+  type RpcDebugTracerOptions,
+} from "./rpc/diagnostics.ts";
 
 export {
   emitObservabilityEvent,

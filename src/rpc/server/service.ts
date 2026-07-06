@@ -10,8 +10,18 @@
  * @module
  */
 
-import { SessionError } from "../../errors.ts";
+import { annotateCapnpError, SessionError } from "../../errors.ts";
+import {
+  emitObservabilityEvent,
+  type RpcObservability,
+} from "../../observability/observability.ts";
 import type { CapabilityPointer } from "../../encoding/runtime.ts";
+import {
+  createRpcDebugTracer,
+  type RpcDebugSchemaMethod,
+  type RpcDebugTracer,
+  type RpcDebugTracerOptions,
+} from "../diagnostics.ts";
 import type {
   RpcBootstrapClientTransport,
   RpcCallOptions,
@@ -32,6 +42,7 @@ import type {
 } from "../transports/internal/accept.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
 import { TcpTransport } from "../transports/tcp.ts";
+import { MiddlewareTransport } from "../transports/middleware/rpc_middleware.ts";
 import { WebSocketTransport } from "../transports/websocket.ts";
 import { WebTransportTransport } from "../transports/webtransport.ts";
 import type { RpcServiceBinding, RpcStub } from "./service_types.ts";
@@ -56,6 +67,8 @@ export interface RpcServiceToken<
   readonly interfaceId: bigint;
   /** Human-readable interface name. */
   readonly interfaceName: string;
+  /** Generated method metadata used by debug tracers, when available. */
+  readonly methods?: readonly RpcDebugSchemaMethod[];
   /**
    * Generated typed bootstrap helper.
    *
@@ -90,6 +103,7 @@ export interface RpcServiceTokenCreateOptions<
 > {
   interfaceId: bigint;
   interfaceName: string;
+  methods?: readonly RpcDebugSchemaMethod[];
   bootstrapClient: RpcServiceToken<TClient, TServer>["bootstrapClient"];
   registerServer: RpcServiceToken<TClient, TServer>["registerServer"];
 }
@@ -106,6 +120,7 @@ export function createRpcServiceToken<
   return Object.freeze({
     interfaceId: options.interfaceId,
     interfaceName: options.interfaceName,
+    ...(options.methods ? { methods: options.methods } : {}),
     bootstrapClient: options.bootstrapClient,
     registerServer: options.registerServer,
   });
@@ -137,6 +152,10 @@ export interface RpcServiceConnectOptions
    * Bootstrap call options forwarded to the generated bootstrap helper.
    */
   bootstrap?: RpcCallOptions;
+  /**
+   * Optional generated-RPC debug tracer or tracer options.
+   */
+  debug?: RpcDebugTracer | RpcDebugTracerOptions;
 }
 
 /**
@@ -164,6 +183,10 @@ export interface RpcServiceServeOptions {
    * Optional callback invoked when a single connection fails to initialize.
    */
   onConnectionError?: (error: unknown) => void | Promise<void>;
+  /**
+   * Optional generated-RPC debug tracer or tracer options.
+   */
+  debug?: RpcDebugTracer | RpcDebugTracerOptions;
 }
 
 /**
@@ -212,6 +235,97 @@ function createPeerFromAcceptedTransport(
     remoteAddress: accepted.remoteAddress ?? null,
     id: accepted.id,
   });
+}
+
+function isRpcDebugTracer(value: unknown): value is RpcDebugTracer {
+  return !!value && typeof value === "object" &&
+    "middleware" in value && "observability" in value &&
+    "record" in value && "snapshot" in value && "clear" in value;
+}
+
+function resolveDebugTracer(
+  debug: RpcDebugTracer | RpcDebugTracerOptions | undefined,
+): RpcDebugTracer | null {
+  if (!debug) return null;
+  if (isRpcDebugTracer(debug)) return debug;
+  return createRpcDebugTracer(debug);
+}
+
+function composeObservability(
+  first: RpcObservability | undefined,
+  second: RpcObservability | undefined,
+): RpcObservability | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  return {
+    onEvent(event) {
+      emitObservabilityEvent(first, event);
+      emitObservabilityEvent(second, event);
+    },
+  };
+}
+
+function wrapDebugTransport(
+  transport: RpcTransport,
+  tracer: RpcDebugTracer | null,
+): RpcTransport {
+  return tracer
+    ? new MiddlewareTransport(transport, [tracer.middleware])
+    : transport;
+}
+
+function recordServiceDebugEvent<
+  TClient extends object,
+  TServer extends object,
+>(
+  tracer: RpcDebugTracer | null,
+  name: string,
+  service: RpcServiceToken<TClient, TServer>,
+  peer?: RpcPeer,
+): void {
+  if (!tracer) return;
+  tracer.registerSchema?.(service.methods ?? []);
+  tracer.record({
+    timestampMs: Date.now(),
+    kind: "observability",
+    eventName: name,
+    interfaceId: service.interfaceId,
+    attributes: {
+      "rpc.service_name": service.interfaceName,
+      "rpc.interface_id": service.interfaceId,
+      ...(peer
+        ? {
+          "rpc.peer_id": peer.id,
+          "rpc.peer_role": peer.role,
+        }
+        : {}),
+    },
+  });
+}
+
+function runtimeOptionsWithDebug(
+  runtime: RpcServiceServeOptions["runtime"] | undefined,
+  tracer: RpcDebugTracer | null,
+): RpcServiceServeOptions["runtime"] {
+  if (!tracer) return runtime;
+  const resolved = runtime ?? {};
+  return {
+    ...resolved,
+    session: {
+      ...(resolved.session ?? {}),
+      observability: composeObservability(
+        resolved.session?.observability,
+        tracer.observability,
+      ),
+    },
+    bridgeOptions: {
+      ...(resolved.bridgeOptions ?? {}),
+      observability: composeObservability(
+        resolved.bridgeOptions?.observability,
+        tracer.observability,
+      ),
+    },
+  };
 }
 
 function attachTransportLifecycle(
@@ -437,6 +551,13 @@ async function createServiceConnectionHandle<
   onClosed?: () => void,
 ): Promise<RpcServiceConnectionHandleImpl> {
   const peer = createPeerFromAcceptedTransport(accepted);
+  const tracer = resolveDebugTracer(options.debug);
+  recordServiceDebugEvent(
+    tracer,
+    "rpc.service.serve_connection",
+    service,
+    peer,
+  );
   let handle: RpcServiceConnectionHandleImpl | null = null;
   let closedBeforeActive = false;
   const detachTransportLifecycle = attachTransportLifecycle(
@@ -469,12 +590,12 @@ async function createServiceConnectionHandle<
       );
     }
     const runtime = await RpcServerRuntime.createWithRoot(
-      accepted.transport,
+      wrapDebugTransport(accepted.transport, tracer),
       (registry, server, rootOptions) =>
         service.registerServer(registry, server, rootOptions),
       resolved.server,
       {
-        ...(options.runtime ?? {}),
+        ...(runtimeOptionsWithDebug(options.runtime, tracer) ?? {}),
         rootCapabilityIndex: options.rootCapabilityIndex,
         rootReferenceCount: options.rootReferenceCount,
       },
@@ -496,7 +617,12 @@ async function createServiceConnectionHandle<
     detachTransportLifecycle();
     await Promise.resolve(accepted.transport.close()).catch(() => {});
     await resolved?.disposeInstance?.().catch(() => {});
-    throw error;
+    throw annotateCapnpError(error, {
+      phase: "service_serve",
+      serviceName: service.interfaceName,
+      interfaceId: service.interfaceId,
+      peerId: peer.id,
+    }, `serve(${service.interfaceName}) failed`);
   }
 }
 
@@ -520,7 +646,11 @@ async function bootstrapConnectedClient<
     return withStubLifecycle(client, close);
   } catch (error) {
     await close().catch(() => {});
-    throw error;
+    throw annotateCapnpError(error, {
+      phase: "service_connect",
+      serviceName: service.interfaceName,
+      interfaceId: service.interfaceId,
+    }, `connect(${service.interfaceName}) failed`);
   }
 }
 
@@ -545,8 +675,16 @@ export function connect<
   transport: RpcTransport,
   options: RpcServiceConnectOptions = {},
 ): Promise<RpcStub<TClient>> {
-  const { bootstrap, ...clientOptions } = options;
-  const clientTransport = new RpcWireClient(transport, clientOptions);
+  const { bootstrap, debug, observability, ...clientOptions } = options;
+  const tracer = resolveDebugTracer(debug);
+  recordServiceDebugEvent(tracer, "rpc.service.connect", service);
+  const clientTransport = new RpcWireClient(
+    wrapDebugTransport(transport, tracer),
+    {
+      ...clientOptions,
+      observability: composeObservability(observability, tracer?.observability),
+    },
+  );
   return bootstrapConnectedClient(service, clientTransport, bootstrap);
 }
 

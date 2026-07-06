@@ -7,6 +7,7 @@ export type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
@@ -29,6 +30,7 @@ import type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
   RpcServerDispatchResult,
@@ -36,7 +38,12 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "@nullstyle/capnp/rpc";
-import { createRpcServiceToken } from "@nullstyle/capnp/rpc";
+import {
+  annotateCapnpError,
+  createRpcServiceToken,
+  ProtocolError,
+  SessionError,
+} from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -93,7 +100,11 @@ function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
 
 function requireRpcStubCapability(value: unknown): CapabilityPointer {
   const capability = parseCapabilityPointer(value);
-  if (!capability) throw new Error("expected RpcStub capability");
+  if (!capability) {
+    throw new SessionError("expected RpcStub capability", {
+      metadata: { phase: "capability_resolve" },
+    });
+  }
   return capability;
 }
 
@@ -141,8 +152,9 @@ function capabilityToServiceStub<TClient extends object>(
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error(
+    throw new SessionError(
       "rpc outbound client is unavailable for capability callbacks",
+      { metadata: { phase: "capability_resolve" } },
     );
   }
   return ctx.outboundClient;
@@ -161,7 +173,16 @@ function exportCapabilityFromTransport<
   const host = transport as RpcClientTransportWithCapabilityExport;
   const exportCapability = host.exportCapability;
   if (!exportCapability) {
-    throw new Error("transport does not support exporting local capabilities");
+    throw new SessionError(
+      "transport does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+        },
+      },
+    );
   }
   return service.registerServer(
     {
@@ -184,8 +205,17 @@ function exportCapabilityFromContext<
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error(
+    throw new SessionError(
       "rpc call context does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+          questionId: ctx.questionId,
+          methodId: ctx.methodId,
+        },
+      },
     );
   }
   return service.registerServer(
@@ -1057,26 +1087,48 @@ export function createKvClientNotifierClient(
       params: KeysChangedParams,
       options?: RpcCallOptions,
     ): Promise<KeysChangedResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        KeysChangedParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          KeysChangedParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvClientNotifierMethodOrdinals["keysChanged"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              KeysChangedResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as KeysChangedResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvClientNotifierMethodOrdinals["keysChanged"],
           encoded.content,
@@ -1085,8 +1137,8 @@ export function createKvClientNotifierClient(
         try {
           return decodeStructMessageWithCaps(
             KeysChangedResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as KeysChangedResults;
         } finally {
           if (
@@ -1096,52 +1148,62 @@ export function createKvClientNotifierClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvClientNotifierMethodOrdinals["keysChanged"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          KeysChangedResultsStruct,
-          response,
-          [],
-        ) as KeysChangedResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvClientNotifier",
+          interfaceId: 0x86eb32e5c8fdeed1n,
+          methodName: "keysChanged",
+          methodId: 0,
+        }, "KvClientNotifier.keysChanged failed");
       }
     },
     stateResetRequired: async (
       params: StateResetRequiredParams,
       options?: RpcCallOptions,
     ): Promise<StateResetRequiredResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        StateResetRequiredParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          StateResetRequiredParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0x86eb32e5c8fdeed1n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvClientNotifierMethodOrdinals["stateResetRequired"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              StateResetRequiredResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as StateResetRequiredResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvClientNotifierMethodOrdinals["stateResetRequired"],
           encoded.content,
@@ -1150,8 +1212,8 @@ export function createKvClientNotifierClient(
         try {
           return decodeStructMessageWithCaps(
             StateResetRequiredResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as StateResetRequiredResults;
         } finally {
           if (
@@ -1161,26 +1223,14 @@ export function createKvClientNotifierClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvClientNotifierMethodOrdinals["stateResetRequired"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          StateResetRequiredResultsStruct,
-          response,
-          [],
-        ) as StateResetRequiredResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvClientNotifier",
+          interfaceId: 0x86eb32e5c8fdeed1n,
+          methodName: "stateResetRequired",
+          methodId: 1,
+        }, "KvClientNotifier.stateResetRequired failed");
       }
     },
   };
@@ -1190,8 +1240,16 @@ export async function bootstrapKvClientNotifierClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<KvClientNotifierClient> {
-  const capability = await transport.bootstrap(options);
-  return createKvClientNotifierClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createKvClientNotifierClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "KvClientNotifier",
+      interfaceId: KvClientNotifierInterfaceId,
+    }, "bootstrap KvClientNotifier failed");
+  }
 }
 
 export function createKvClientNotifierServer(
@@ -1238,7 +1296,13 @@ export function createKvClientNotifierServer(
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -1338,26 +1402,48 @@ export function createKvStoreClient(
       params: GetParams,
       options?: RpcCallOptions,
     ): Promise<GetResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        GetParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          GetParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["get"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              GetResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as GetResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["get"],
           encoded.content,
@@ -1366,8 +1452,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             GetResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as GetResults;
         } finally {
           if (
@@ -1377,52 +1463,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["get"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          GetResultsStruct,
-          response,
-          [],
-        ) as GetResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "get",
+          methodId: 0,
+        }, "KvStore.get failed");
       }
     },
     writeBatch: async (
       params: WriteBatchParams,
       options?: RpcCallOptions,
     ): Promise<WriteBatchResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        WriteBatchParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          WriteBatchParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["writeBatch"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              WriteBatchResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as WriteBatchResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["writeBatch"],
           encoded.content,
@@ -1431,8 +1527,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             WriteBatchResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as WriteBatchResults;
         } finally {
           if (
@@ -1442,52 +1538,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["writeBatch"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          WriteBatchResultsStruct,
-          response,
-          [],
-        ) as WriteBatchResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "writeBatch",
+          methodId: 1,
+        }, "KvStore.writeBatch failed");
       }
     },
     list: async (
       params: ListParams,
       options?: RpcCallOptions,
     ): Promise<ListResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        ListParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          ListParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["list"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              ListResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as ListResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["list"],
           encoded.content,
@@ -1496,8 +1602,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             ListResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as ListResults;
         } finally {
           if (
@@ -1507,52 +1613,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["list"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          ListResultsStruct,
-          response,
-          [],
-        ) as ListResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "list",
+          methodId: 2,
+        }, "KvStore.list failed");
       }
     },
     subscribe: async (
       params: SubscribeParams,
       options?: RpcCallOptions,
     ): Promise<SubscribeResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        SubscribeParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          SubscribeParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["subscribe"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              SubscribeResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as SubscribeResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["subscribe"],
           encoded.content,
@@ -1561,8 +1677,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             SubscribeResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as SubscribeResults;
         } finally {
           if (
@@ -1572,52 +1688,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["subscribe"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          SubscribeResultsStruct,
-          response,
-          [],
-        ) as SubscribeResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "subscribe",
+          methodId: 3,
+        }, "KvStore.subscribe failed");
       }
     },
     setWatchedKeys: async (
       params: SetWatchedKeysParams,
       options?: RpcCallOptions,
     ): Promise<SetWatchedKeysResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        SetWatchedKeysParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          SetWatchedKeysParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["setWatchedKeys"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              SetWatchedKeysResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as SetWatchedKeysResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["setWatchedKeys"],
           encoded.content,
@@ -1626,8 +1752,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             SetWatchedKeysResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as SetWatchedKeysResults;
         } finally {
           if (
@@ -1637,52 +1763,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["setWatchedKeys"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          SetWatchedKeysResultsStruct,
-          response,
-          [],
-        ) as SetWatchedKeysResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "setWatchedKeys",
+          methodId: 4,
+        }, "KvStore.setWatchedKeys failed");
       }
     },
     createBackup: async (
       params: CreateBackupParams,
       options?: RpcCallOptions,
     ): Promise<CreateBackupResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        CreateBackupParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          CreateBackupParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["createBackup"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              CreateBackupResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as CreateBackupResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["createBackup"],
           encoded.content,
@@ -1691,8 +1827,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             CreateBackupResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as CreateBackupResults;
         } finally {
           if (
@@ -1702,52 +1838,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["createBackup"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          CreateBackupResultsStruct,
-          response,
-          [],
-        ) as CreateBackupResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "createBackup",
+          methodId: 5,
+        }, "KvStore.createBackup failed");
       }
     },
     listBackups: async (
       params: ListBackupsParams,
       options?: RpcCallOptions,
     ): Promise<ListBackupsResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        ListBackupsParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          ListBackupsParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["listBackups"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              ListBackupsResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as ListBackupsResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["listBackups"],
           encoded.content,
@@ -1756,8 +1902,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             ListBackupsResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as ListBackupsResults;
         } finally {
           if (
@@ -1767,52 +1913,62 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["listBackups"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          ListBackupsResultsStruct,
-          response,
-          [],
-        ) as ListBackupsResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "listBackups",
+          methodId: 6,
+        }, "KvStore.listBackups failed");
       }
     },
     restoreFromBackup: async (
       params: RestoreFromBackupParams,
       options?: RpcCallOptions,
     ): Promise<RestoreFromBackupResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        RestoreFromBackupParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          RestoreFromBackupParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xdabb8fabf7a284bfn,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            KvStoreMethodOrdinals["restoreFromBackup"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              RestoreFromBackupResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as RestoreFromBackupResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           KvStoreMethodOrdinals["restoreFromBackup"],
           encoded.content,
@@ -1821,8 +1977,8 @@ export function createKvStoreClient(
         try {
           return decodeStructMessageWithCaps(
             RestoreFromBackupResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as RestoreFromBackupResults;
         } finally {
           if (
@@ -1832,26 +1988,14 @@ export function createKvStoreClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        KvStoreMethodOrdinals["restoreFromBackup"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          RestoreFromBackupResultsStruct,
-          response,
-          [],
-        ) as RestoreFromBackupResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "KvStore",
+          interfaceId: 0xdabb8fabf7a284bfn,
+          methodName: "restoreFromBackup",
+          methodId: 7,
+        }, "KvStore.restoreFromBackup failed");
       }
     },
   };
@@ -1861,8 +2005,16 @@ export async function bootstrapKvStoreClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<KvStoreClient> {
-  const capability = await transport.bootstrap(options);
-  return createKvStoreClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createKvStoreClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "KvStore",
+      interfaceId: KvStoreInterfaceId,
+    }, "bootstrap KvStore failed");
+  }
 }
 
 export function createKvStoreServer(server: KvStoreServer): RpcServerDispatch {
@@ -2000,7 +2152,13 @@ export function createKvStoreServer(server: KvStoreServer): RpcServerDispatch {
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -2051,15 +2209,37 @@ function createKvClientNotifierServiceClient(
       value: KeysChangedParams["changes"],
       options?: RpcCallOptions,
     ) => {
-      const result = await client.keysChanged({ changes: value }, options);
-      return;
+      try {
+        const result = await client.keysChanged({ changes: value }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvClientNotifier",
+          interfaceName: "KvClientNotifier",
+          interfaceId: KvClientNotifierInterfaceId,
+          methodName: "keysChanged",
+          methodId: 0,
+        }, "KvClientNotifier.keysChanged failed");
+      }
     },
     stateResetRequired: async (
       params: StateResetRequiredParams,
       options?: RpcCallOptions,
     ) => {
-      const result = await client.stateResetRequired(params, options);
-      return;
+      try {
+        const result = await client.stateResetRequired(params, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvClientNotifier",
+          interfaceName: "KvClientNotifier",
+          interfaceId: KvClientNotifierInterfaceId,
+          methodName: "stateResetRequired",
+          methodId: 1,
+        }, "KvClientNotifier.stateResetRequired failed");
+      }
     },
   };
 }
@@ -2069,23 +2249,65 @@ function createKvClientNotifierServiceServer(
 ): KvClientNotifierServer {
   return {
     keysChanged: async (params: KeysChangedParams, _ctx: RpcCallContext) => {
-      const result = await server.keysChanged(params.changes);
-      return {} as KeysChangedResults;
+      try {
+        const result = await server.keysChanged(params.changes);
+        return {} as KeysChangedResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvClientNotifier",
+          interfaceName: "KvClientNotifier",
+          interfaceId: KvClientNotifierInterfaceId,
+          methodName: "keysChanged",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "KvClientNotifier.keysChanged handler failed");
+      }
     },
     stateResetRequired: async (
       params: StateResetRequiredParams,
       _ctx: RpcCallContext,
     ) => {
-      const result = await server.stateResetRequired(params);
-      return {} as StateResetRequiredResults;
+      try {
+        const result = await server.stateResetRequired(params);
+        return {} as StateResetRequiredResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvClientNotifier",
+          interfaceName: "KvClientNotifier",
+          interfaceId: KvClientNotifierInterfaceId,
+          methodName: "stateResetRequired",
+          methodId: 1,
+          questionId: _ctx.questionId,
+        }, "KvClientNotifier.stateResetRequired handler failed");
+      }
     },
   };
 }
+
+export const KvClientNotifierDebugMethods = [
+  {
+    interfaceId: KvClientNotifierInterfaceId,
+    interfaceName: "KvClientNotifier",
+    serviceName: "KvClientNotifier",
+    methodId: KvClientNotifierMethodOrdinals["keysChanged"],
+    methodName: "keysChanged",
+  },
+  {
+    interfaceId: KvClientNotifierInterfaceId,
+    interfaceName: "KvClientNotifier",
+    serviceName: "KvClientNotifier",
+    methodId: KvClientNotifierMethodOrdinals["stateResetRequired"],
+    methodName: "stateResetRequired",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
 
 export const KvClientNotifier: RpcServiceToken<KvClientNotifier> =
   createRpcServiceToken({
     interfaceId: KvClientNotifierInterfaceId,
     interfaceName: "KvClientNotifier",
+    methods: KvClientNotifierDebugMethods,
     bootstrapClient: async (
       transport: RpcBootstrapClientTransport,
       options?: RpcCallOptions,
@@ -2199,60 +2421,151 @@ function createKvStoreServiceClient(
 ): KvStore {
   return {
     get: async (value: GetParams["key"], options?: RpcCallOptions) => {
-      const result = await client.get({ key: value }, options);
-      return result;
+      try {
+        const result = await client.get({ key: value }, options);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "get",
+          methodId: 0,
+        }, "KvStore.get failed");
+      }
     },
     writeBatch: async (
       value: WriteBatchParams["ops"],
       options?: RpcCallOptions,
     ) => {
-      const result = await client.writeBatch({ ops: value }, options);
-      return result;
+      try {
+        const result = await client.writeBatch({ ops: value }, options);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "writeBatch",
+          methodId: 1,
+        }, "KvStore.writeBatch failed");
+      }
     },
     list: async (params: ListParams, options?: RpcCallOptions) => {
-      const result = await client.list(params, options);
-      return result.entries;
+      try {
+        const result = await client.list(params, options);
+        return result.entries;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "list",
+          methodId: 2,
+        }, "KvStore.list failed");
+      }
     },
     subscribe: async (
       value: KvClientNotifier | RpcStub<KvClientNotifier>,
       options?: RpcCallOptions,
     ) => {
-      const result = await client.subscribe({
-        notifier: exportCapabilityFromTransport(
-          transport,
-          KvClientNotifier,
-          value,
-        ),
-      }, options);
-      return;
+      try {
+        const result = await client.subscribe({
+          notifier: exportCapabilityFromTransport(
+            transport,
+            KvClientNotifier,
+            value,
+          ),
+        }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "subscribe",
+          methodId: 3,
+        }, "KvStore.subscribe failed");
+      }
     },
     setWatchedKeys: async (
       value: SetWatchedKeysParams["keys"],
       options?: RpcCallOptions,
     ) => {
-      const result = await client.setWatchedKeys({ keys: value }, options);
-      return;
+      try {
+        const result = await client.setWatchedKeys({ keys: value }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "setWatchedKeys",
+          methodId: 4,
+        }, "KvStore.setWatchedKeys failed");
+      }
     },
     createBackup: async (
       value: CreateBackupParams["flushBeforeBackup"],
       options?: RpcCallOptions,
     ) => {
-      const result = await client.createBackup(
-        { flushBeforeBackup: value },
-        options,
-      );
-      return result;
+      try {
+        const result = await client.createBackup(
+          { flushBeforeBackup: value },
+          options,
+        );
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "createBackup",
+          methodId: 5,
+        }, "KvStore.createBackup failed");
+      }
     },
     listBackups: async (options?: RpcCallOptions) => {
-      const result = await client.listBackups({} as ListBackupsParams, options);
-      return result.backups;
+      try {
+        const result = await client.listBackups(
+          {} as ListBackupsParams,
+          options,
+        );
+        return result.backups;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "listBackups",
+          methodId: 6,
+        }, "KvStore.listBackups failed");
+      }
     },
     restoreFromBackup: async (
       params: RestoreFromBackupParams,
       options?: RpcCallOptions,
     ) => {
-      const result = await client.restoreFromBackup(params, options);
-      return result;
+      try {
+        const result = await client.restoreFromBackup(params, options);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "restoreFromBackup",
+          methodId: 7,
+        }, "KvStore.restoreFromBackup failed");
+      }
     },
   };
 }
@@ -2262,59 +2575,215 @@ function createKvStoreServiceServer(
 ): KvStoreServer {
   return {
     get: async (params: GetParams, _ctx: RpcCallContext) => {
-      const result = await server.get(params.key);
-      return result;
+      try {
+        const result = await server.get(params.key);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "get",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "KvStore.get handler failed");
+      }
     },
     writeBatch: async (params: WriteBatchParams, _ctx: RpcCallContext) => {
-      const result = await server.writeBatch(params.ops);
-      return result;
+      try {
+        const result = await server.writeBatch(params.ops);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "writeBatch",
+          methodId: 1,
+          questionId: _ctx.questionId,
+        }, "KvStore.writeBatch handler failed");
+      }
     },
     list: async (params: ListParams, _ctx: RpcCallContext) => {
-      const result = await server.list(params);
-      return { entries: result };
+      try {
+        const result = await server.list(params);
+        return { entries: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "list",
+          methodId: 2,
+          questionId: _ctx.questionId,
+        }, "KvStore.list handler failed");
+      }
     },
     subscribe: async (params: SubscribeParams, _ctx: RpcCallContext) => {
-      const result = await server.subscribe(
-        capabilityToServiceStub(
-          params.notifier,
-          requireOutboundClient(_ctx),
-          (nextTransport, nextCapability) =>
-            createKvClientNotifierServiceClient(
-              createKvClientNotifierClient(nextTransport, nextCapability),
-              nextTransport,
-            ),
-        ),
-      );
-      return {} as SubscribeResults;
+      try {
+        const result = await server.subscribe(
+          capabilityToServiceStub(
+            params.notifier,
+            requireOutboundClient(_ctx),
+            (nextTransport, nextCapability) =>
+              createKvClientNotifierServiceClient(
+                createKvClientNotifierClient(nextTransport, nextCapability),
+                nextTransport,
+              ),
+          ),
+        );
+        return {} as SubscribeResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "subscribe",
+          methodId: 3,
+          questionId: _ctx.questionId,
+        }, "KvStore.subscribe handler failed");
+      }
     },
     setWatchedKeys: async (
       params: SetWatchedKeysParams,
       _ctx: RpcCallContext,
     ) => {
-      const result = await server.setWatchedKeys(params.keys);
-      return {} as SetWatchedKeysResults;
+      try {
+        const result = await server.setWatchedKeys(params.keys);
+        return {} as SetWatchedKeysResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "setWatchedKeys",
+          methodId: 4,
+          questionId: _ctx.questionId,
+        }, "KvStore.setWatchedKeys handler failed");
+      }
     },
     createBackup: async (params: CreateBackupParams, _ctx: RpcCallContext) => {
-      const result = await server.createBackup(params.flushBeforeBackup);
-      return result;
+      try {
+        const result = await server.createBackup(params.flushBeforeBackup);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "createBackup",
+          methodId: 5,
+          questionId: _ctx.questionId,
+        }, "KvStore.createBackup handler failed");
+      }
     },
     listBackups: async (params: ListBackupsParams, _ctx: RpcCallContext) => {
-      const result = await server.listBackups();
-      return { backups: result };
+      try {
+        const result = await server.listBackups();
+        return { backups: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "listBackups",
+          methodId: 6,
+          questionId: _ctx.questionId,
+        }, "KvStore.listBackups handler failed");
+      }
     },
     restoreFromBackup: async (
       params: RestoreFromBackupParams,
       _ctx: RpcCallContext,
     ) => {
-      const result = await server.restoreFromBackup(params);
-      return result;
+      try {
+        const result = await server.restoreFromBackup(params);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "KvStore",
+          interfaceName: "KvStore",
+          interfaceId: KvStoreInterfaceId,
+          methodName: "restoreFromBackup",
+          methodId: 7,
+          questionId: _ctx.questionId,
+        }, "KvStore.restoreFromBackup handler failed");
+      }
     },
   };
 }
 
+export const KvStoreDebugMethods = [
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["get"],
+    methodName: "get",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["writeBatch"],
+    methodName: "writeBatch",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["list"],
+    methodName: "list",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["subscribe"],
+    methodName: "subscribe",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["setWatchedKeys"],
+    methodName: "setWatchedKeys",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["createBackup"],
+    methodName: "createBackup",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["listBackups"],
+    methodName: "listBackups",
+  },
+  {
+    interfaceId: KvStoreInterfaceId,
+    interfaceName: "KvStore",
+    serviceName: "KvStore",
+    methodId: KvStoreMethodOrdinals["restoreFromBackup"],
+    methodName: "restoreFromBackup",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
+
 export const KvStore: RpcServiceToken<KvStore> = createRpcServiceToken({
   interfaceId: KvStoreInterfaceId,
   interfaceName: "KvStore",
+  methods: KvStoreDebugMethods,
   bootstrapClient: async (
     transport: RpcBootstrapClientTransport,
     options?: RpcCallOptions,

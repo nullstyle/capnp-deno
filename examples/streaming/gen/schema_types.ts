@@ -7,6 +7,7 @@ export type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
@@ -31,6 +32,7 @@ import type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcGeneratedServerDispatch as RpcServerDispatch,
   RpcServerDispatchResult,
@@ -41,9 +43,12 @@ import type {
   StreamSenderOptions,
 } from "@nullstyle/capnp/rpc";
 import {
+  annotateCapnpError,
   createRpcServiceToken,
   createStreamSender,
   EMPTY_STRUCT_MESSAGE,
+  ProtocolError,
+  SessionError,
 } from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
@@ -101,7 +106,11 @@ function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
 
 function requireRpcStubCapability(value: unknown): CapabilityPointer {
   const capability = parseCapabilityPointer(value);
-  if (!capability) throw new Error("expected RpcStub capability");
+  if (!capability) {
+    throw new SessionError("expected RpcStub capability", {
+      metadata: { phase: "capability_resolve" },
+    });
+  }
   return capability;
 }
 
@@ -149,8 +158,9 @@ function capabilityToServiceStub<TClient extends object>(
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error(
+    throw new SessionError(
       "rpc outbound client is unavailable for capability callbacks",
+      { metadata: { phase: "capability_resolve" } },
     );
   }
   return ctx.outboundClient;
@@ -169,7 +179,16 @@ function exportCapabilityFromTransport<
   const host = transport as RpcClientTransportWithCapabilityExport;
   const exportCapability = host.exportCapability;
   if (!exportCapability) {
-    throw new Error("transport does not support exporting local capabilities");
+    throw new SessionError(
+      "transport does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+        },
+      },
+    );
   }
   return service.registerServer(
     {
@@ -192,8 +211,17 @@ function exportCapabilityFromContext<
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error(
+    throw new SessionError(
       "rpc call context does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+          questionId: ctx.questionId,
+          methodId: ctx.methodId,
+        },
+      },
     );
   }
   return service.registerServer(
@@ -311,33 +339,52 @@ export function createCounterSinkClient(
 ): CounterSinkClient {
   return {
     add: async (params: AddParams, options?: RpcCallOptions): Promise<void> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        AddParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xa1ee11f95f4c0bf5n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          AddParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xa1ee11f95f4c0bf5n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            CounterSinkMethodOrdinals["add"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            void raw;
+            return;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           CounterSinkMethodOrdinals["add"],
           encoded.content,
           callOptions,
         );
         try {
-          void raw;
+          void response;
           return;
         } finally {
           if (
@@ -347,49 +394,62 @@ export function createCounterSinkClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        CounterSinkMethodOrdinals["add"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        void response;
-        return;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "CounterSink",
+          interfaceId: 0xa1ee11f95f4c0bf5n,
+          methodName: "add",
+          methodId: 0,
+        }, "CounterSink.add failed");
       }
     },
     total: async (
       params: TotalParams,
       options?: RpcCallOptions,
     ): Promise<TotalResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        TotalParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xa1ee11f95f4c0bf5n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          TotalParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xa1ee11f95f4c0bf5n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            CounterSinkMethodOrdinals["total"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              TotalResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as TotalResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           CounterSinkMethodOrdinals["total"],
           encoded.content,
@@ -398,8 +458,8 @@ export function createCounterSinkClient(
         try {
           return decodeStructMessageWithCaps(
             TotalResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as TotalResults;
         } finally {
           if (
@@ -409,26 +469,14 @@ export function createCounterSinkClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        CounterSinkMethodOrdinals["total"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          TotalResultsStruct,
-          response,
-          [],
-        ) as TotalResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "CounterSink",
+          interfaceId: 0xa1ee11f95f4c0bf5n,
+          methodName: "total",
+          methodId: 1,
+        }, "CounterSink.total failed");
       }
     },
   };
@@ -438,8 +486,16 @@ export async function bootstrapCounterSinkClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<CounterSinkClient> {
-  const capability = await transport.bootstrap(options);
-  return createCounterSinkClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createCounterSinkClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "CounterSink",
+      interfaceId: CounterSinkInterfaceId,
+    }, "bootstrap CounterSink failed");
+  }
 }
 
 export function createCounterSinkServer(
@@ -480,7 +536,13 @@ export function createCounterSinkServer(
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -542,12 +604,34 @@ function createCounterSinkServiceClient(
 ): CounterSink {
   return {
     add: async (value: AddParams["value"], options?: RpcCallOptions) => {
-      const result = await client.add({ value: value }, options);
-      return;
+      try {
+        const result = await client.add({ value: value }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "CounterSink",
+          interfaceName: "CounterSink",
+          interfaceId: CounterSinkInterfaceId,
+          methodName: "add",
+          methodId: 0,
+        }, "CounterSink.add failed");
+      }
     },
     total: async (options?: RpcCallOptions) => {
-      const result = await client.total({} as TotalParams, options);
-      return result;
+      try {
+        const result = await client.total({} as TotalParams, options);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "CounterSink",
+          interfaceName: "CounterSink",
+          interfaceId: CounterSinkInterfaceId,
+          methodName: "total",
+          methodId: 1,
+        }, "CounterSink.total failed");
+      }
     },
   };
 }
@@ -558,25 +642,67 @@ function createCounterSinkServiceServer(
   let addStreamChain: Promise<void> = Promise.resolve();
   return {
     add: async (params: AddParams, _ctx: RpcCallContext) => {
-      const run = async (): Promise<void> => {
-        await server.add(params.value, _ctx);
-      };
-      const pending = addStreamChain.then(run, run);
-      addStreamChain = pending.catch(() => {});
-      await pending;
-      return;
+      try {
+        const run = async (): Promise<void> => {
+          await server.add(params.value, _ctx);
+        };
+        const pending = addStreamChain.then(run, run);
+        addStreamChain = pending.catch(() => {});
+        await pending;
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "CounterSink",
+          interfaceName: "CounterSink",
+          interfaceId: CounterSinkInterfaceId,
+          methodName: "add",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "CounterSink.add handler failed");
+      }
     },
     total: async (params: TotalParams, _ctx: RpcCallContext) => {
-      const result = await server.total(_ctx);
-      return result;
+      try {
+        const result = await server.total(_ctx);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "CounterSink",
+          interfaceName: "CounterSink",
+          interfaceId: CounterSinkInterfaceId,
+          methodName: "total",
+          methodId: 1,
+          questionId: _ctx.questionId,
+        }, "CounterSink.total handler failed");
+      }
     },
   };
 }
+
+export const CounterSinkDebugMethods = [
+  {
+    interfaceId: CounterSinkInterfaceId,
+    interfaceName: "CounterSink",
+    serviceName: "CounterSink",
+    methodId: CounterSinkMethodOrdinals["add"],
+    methodName: "add",
+  },
+  {
+    interfaceId: CounterSinkInterfaceId,
+    interfaceName: "CounterSink",
+    serviceName: "CounterSink",
+    methodId: CounterSinkMethodOrdinals["total"],
+    methodName: "total",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
 
 export const CounterSink: RpcServiceToken<CounterSink, CounterSinkService> =
   createRpcServiceToken({
     interfaceId: CounterSinkInterfaceId,
     interfaceName: "CounterSink",
+    methods: CounterSinkDebugMethods,
     bootstrapClient: async (
       transport: RpcBootstrapClientTransport,
       options?: RpcCallOptions,

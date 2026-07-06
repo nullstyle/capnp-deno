@@ -33,6 +33,7 @@ import type {
   ConnectWithReconnectOptions,
   CreateRpcSessionWithReconnectOptions,
   DenoOtelObservabilityOptions,
+  ErrorMetadata,
   ExponentialBackoffReconnectPolicyOptions,
   FrameSizeLimitMiddlewareOptions,
   LoggingMiddlewareOptions,
@@ -56,6 +57,12 @@ import type {
   RpcClientTransportLike,
   RpcConnectionPoolOptions,
   RpcConnectionPoolStats,
+  RpcDebugEvent,
+  RpcDebugEventFormatOptions,
+  RpcDebugPayloadSummary,
+  RpcDebugSchemaMethod,
+  RpcDebugTracer,
+  RpcDebugTracerOptions,
   RpcFinishOptions,
   RpcFinishRequest,
   RpcFrameDirection,
@@ -120,6 +127,8 @@ import type {
   StreamSendContext,
   StreamSender,
   StreamSenderOptions,
+  StreamSenderState,
+  StreamSenderWaitOptions,
   TcpTransportListener,
   TcpTransportListenOptions,
   TcpTransportOptions,
@@ -128,13 +137,26 @@ import type {
   WebSocketTransportListener,
   WebSocketTransportListenOptions,
   WebSocketTransportOptions,
+  WebTransportCertificateHash,
+  WebTransportCertificateHashInput,
+  WebTransportCertificateHashOptions,
+  WebTransportRuntimeSupport,
   WebTransportTransportAcceptOptions,
   WebTransportTransportConnectOptions,
   WebTransportTransportListener,
   WebTransportTransportListenOptions,
   WebTransportTransportOptions,
 } from "../src/mod.ts";
-import type { connect, serve } from "../src/mod.ts";
+import type {
+  annotateCapnpError,
+  connect,
+  createRpcDebugTracer,
+  createWebTransportCertificateHash,
+  createWebTransportCertificateHashOptions,
+  formatRpcDebugEvent,
+  getWebTransportRuntimeSupport,
+  serve,
+} from "../src/mod.ts";
 
 type Assert<T extends true> = T;
 type IsEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends
@@ -168,6 +190,7 @@ type PublicTypeExportSmoke = {
     RpcTransport
   >;
   denoOtelObservabilityOptions: DenoOtelObservabilityOptions;
+  errorMetadata: ErrorMetadata;
   exponentialBackoffReconnectPolicyOptions:
     ExponentialBackoffReconnectPolicyOptions;
   messagePortTransportOptions: MessagePortTransportOptions;
@@ -190,6 +213,12 @@ type PublicTypeExportSmoke = {
   rpcClientTransportLike: RpcClientTransportLike;
   rpcConnectionPoolOptions: RpcConnectionPoolOptions;
   rpcConnectionPoolStats: RpcConnectionPoolStats;
+  rpcDebugEvent: RpcDebugEvent;
+  rpcDebugEventFormatOptions: RpcDebugEventFormatOptions;
+  rpcDebugPayloadSummary: RpcDebugPayloadSummary;
+  rpcDebugSchemaMethod: RpcDebugSchemaMethod;
+  rpcDebugTracer: RpcDebugTracer;
+  rpcDebugTracerOptions: RpcDebugTracerOptions;
   rpcFinishOptions: RpcFinishOptions;
   rpcFinishRequest: RpcFinishRequest;
   rpcObservability: RpcObservability;
@@ -251,6 +280,8 @@ type PublicTypeExportSmoke = {
   streamSendContext: StreamSendContext;
   streamSender: StreamSender<number, void>;
   streamSenderOptions: StreamSenderOptions<void>;
+  streamSenderState: StreamSenderState;
+  streamSenderWaitOptions: StreamSenderWaitOptions;
   tcpTransportListenOptions: TcpTransportListenOptions;
   tcpTransportListener: TcpTransportListener;
   tcpTransportOptions: TcpTransportOptions;
@@ -259,6 +290,10 @@ type PublicTypeExportSmoke = {
   webSocketTransportListener: WebSocketTransportListener;
   webSocketTransportListenOptions: WebSocketTransportListenOptions;
   webSocketTransportOptions: WebSocketTransportOptions;
+  webTransportCertificateHash: WebTransportCertificateHash;
+  webTransportCertificateHashInput: WebTransportCertificateHashInput;
+  webTransportCertificateHashOptions: WebTransportCertificateHashOptions;
+  webTransportRuntimeSupport: WebTransportRuntimeSupport;
   webTransportTransportAcceptOptions: WebTransportTransportAcceptOptions;
   webTransportTransportListener: WebTransportTransportListener;
   webTransportTransportListenOptions: WebTransportTransportListenOptions;
@@ -304,6 +339,21 @@ type AssertStreamSendContextSignal = Assert<
 
 type AssertStreamSenderGenericSend = Assert<
   IsEqual<Parameters<StreamSender<number, void>["send"]>[0], number>
+>;
+
+type AssertStreamSenderWaitForCapacity = Assert<
+  IsEqual<
+    StreamSender<number, void>["waitForCapacity"],
+    (options?: StreamSenderWaitOptions) => Promise<void>
+  >
+>;
+
+type AssertStreamSenderState = Assert<
+  IsEqual<StreamSender<number, void>["state"], StreamSenderState>
+>;
+
+type AssertStreamSenderMaxInFlight = Assert<
+  IsEqual<StreamSender<number, void>["maxInFlight"], number>
 >;
 
 type AssertStreamSenderCancel = Assert<
@@ -365,6 +415,68 @@ type AssertRpcConnectionPoolOptionsMaxConnections = Assert<
 
 type AssertRpcConnectionPoolStatsTotal = Assert<
   IsEqual<RpcConnectionPoolStats["total"], number>
+>;
+
+type AssertCreateRpcDebugTracerReturn = Assert<
+  IsEqual<ReturnType<typeof createRpcDebugTracer>, RpcDebugTracer>
+>;
+
+type AssertRpcDebugTracerRegisterSchema = Assert<
+  IsEqual<
+    NonNullable<RpcDebugTracer["registerSchema"]>,
+    (methods: Iterable<RpcDebugSchemaMethod>) => void
+  >
+>;
+
+type AssertFormatRpcDebugEventReturn = Assert<
+  IsEqual<ReturnType<typeof formatRpcDebugEvent>, string>
+>;
+
+type AssertAnnotateCapnpErrorReturn = Assert<
+  IsAssignable<ReturnType<typeof annotateCapnpError>, Error>
+>;
+
+type AssertRpcServiceConnectDebugOption = Assert<
+  IsEqual<
+    RpcServiceConnectOptions["debug"],
+    RpcDebugTracer | RpcDebugTracerOptions | undefined
+  >
+>;
+
+type AssertRpcServiceServeDebugOption = Assert<
+  IsEqual<
+    RpcServiceServeOptions["debug"],
+    RpcDebugTracer | RpcDebugTracerOptions | undefined
+  >
+>;
+
+type AssertCreateWebTransportCertificateHashReturn = Assert<
+  IsEqual<
+    ReturnType<typeof createWebTransportCertificateHash>,
+    WebTransportCertificateHash
+  >
+>;
+
+type AssertCreateWebTransportCertificateHashOptionsReturn = Assert<
+  IsEqual<
+    ReturnType<typeof createWebTransportCertificateHashOptions>,
+    WebTransportOptions
+  >
+>;
+
+type AssertGetWebTransportRuntimeSupportReturn = Assert<
+  IsEqual<
+    ReturnType<typeof getWebTransportRuntimeSupport>,
+    WebTransportRuntimeSupport
+  >
+>;
+
+type AssertWebTransportCertificateHashAlgorithm = Assert<
+  IsEqual<WebTransportCertificateHash["algorithm"], "sha-256">
+>;
+
+type AssertWebTransportRuntimeSupportMissing = Assert<
+  IsEqual<WebTransportRuntimeSupport["missing"], readonly string[]>
 >;
 
 type AssertPingServiceTokenForConnect = Assert<
@@ -505,6 +617,17 @@ type StaticAssertions = [
   AssertClientCreateStartSession,
   AssertRpcConnectionPoolOptionsMaxConnections,
   AssertRpcConnectionPoolStatsTotal,
+  AssertCreateRpcDebugTracerReturn,
+  AssertRpcDebugTracerRegisterSchema,
+  AssertFormatRpcDebugEventReturn,
+  AssertAnnotateCapnpErrorReturn,
+  AssertRpcServiceConnectDebugOption,
+  AssertRpcServiceServeDebugOption,
+  AssertCreateWebTransportCertificateHashReturn,
+  AssertCreateWebTransportCertificateHashOptionsReturn,
+  AssertGetWebTransportRuntimeSupportReturn,
+  AssertWebTransportCertificateHashAlgorithm,
+  AssertWebTransportRuntimeSupportMissing,
   AssertPingServiceTokenForConnect,
   AssertPingServiceTokenForServe,
   AssertPingAcceptsLocalCallback,
@@ -580,8 +703,19 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 45);
+  assert(STATIC_ASSERTIONS.length === 56);
 });

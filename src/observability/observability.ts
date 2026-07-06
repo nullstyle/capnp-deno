@@ -7,6 +7,8 @@
  * @module
  */
 
+import { CapnpError, type ErrorMetadata } from "../errors.ts";
+
 /**
  * A single attribute value in an observability event.
  * Supports string, number, boolean, and bigint for Cap'n Proto interface IDs.
@@ -68,6 +70,42 @@ export interface RpcObservability {
   onEvent?: (event: RpcObservabilityEvent) => void;
 }
 
+const ERROR_METADATA_ATTRIBUTE_NAMES: Record<keyof ErrorMetadata, string> = {
+  phase: "rpc.phase",
+  errorType: "rpc.error_type",
+  frameBytes: "rpc.frame_bytes",
+  messageTag: "rpc.message_tag",
+  messageName: "rpc.message_name",
+  questionId: "rpc.question_id",
+  answerId: "rpc.answer_id",
+  interfaceId: "rpc.interface_id",
+  methodId: "rpc.method_id",
+  capabilityIndex: "rpc.capability_id",
+  interfaceName: "rpc.interface_name",
+  methodName: "rpc.method_name",
+  serviceName: "rpc.service_name",
+  transport: "rpc.transport",
+  peerId: "rpc.peer_id",
+};
+
+function metadataAttributes(
+  metadata: ErrorMetadata | undefined,
+): RpcObservabilityAttributes {
+  const out: RpcObservabilityAttributes = {};
+  if (!metadata) return out;
+  for (
+    const [key, attributeName] of Object.entries(
+      ERROR_METADATA_ATTRIBUTE_NAMES,
+    ) as Array<[keyof ErrorMetadata, string]>
+  ) {
+    const value = metadata[key];
+    if (value !== undefined) {
+      out[attributeName] = value;
+    }
+  }
+  return out;
+}
+
 /**
  * Safely emits an observability event, swallowing any errors thrown by the
  * observer to ensure observability failures never affect runtime behavior.
@@ -81,7 +119,13 @@ export function emitObservabilityEvent(
 ): void {
   if (!observability?.onEvent) return;
   try {
-    observability.onEvent(event);
+    const attributes = event.error instanceof CapnpError
+      ? {
+        ...metadataAttributes(event.error.metadata),
+        ...(event.attributes ?? {}),
+      }
+      : event.attributes;
+    observability.onEvent({ ...event, attributes });
   } catch {
     // Never allow observability failures to affect runtime behavior.
   }

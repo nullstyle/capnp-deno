@@ -7,6 +7,7 @@ export type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
   RpcServerDispatch,
@@ -29,6 +30,7 @@ import type {
   RpcCallContext,
   RpcCallOptions,
   RpcClientTransport,
+  RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcServerDispatch,
   RpcServerDispatchResult,
@@ -36,7 +38,12 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "../../server/rpc_runtime.ts";
-import { createRpcServiceToken } from "../../server/rpc_runtime.ts";
+import {
+  annotateCapnpError,
+  createRpcServiceToken,
+  ProtocolError,
+  SessionError,
+} from "../../server/rpc_runtime.ts";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -93,7 +100,11 @@ function parseCapabilityPointer(value: unknown): CapabilityPointer | null {
 
 function requireRpcStubCapability(value: unknown): CapabilityPointer {
   const capability = parseCapabilityPointer(value);
-  if (!capability) throw new Error("expected RpcStub capability");
+  if (!capability) {
+    throw new SessionError("expected RpcStub capability", {
+      metadata: { phase: "capability_resolve" },
+    });
+  }
   return capability;
 }
 
@@ -141,8 +152,9 @@ function capabilityToServiceStub<TClient extends object>(
 
 function requireOutboundClient(ctx: RpcCallContext): RpcClientTransport {
   if (!ctx.outboundClient) {
-    throw new Error(
+    throw new SessionError(
       "rpc outbound client is unavailable for capability callbacks",
+      { metadata: { phase: "capability_resolve" } },
     );
   }
   return ctx.outboundClient;
@@ -161,7 +173,16 @@ function exportCapabilityFromTransport<
   const host = transport as RpcClientTransportWithCapabilityExport;
   const exportCapability = host.exportCapability;
   if (!exportCapability) {
-    throw new Error("transport does not support exporting local capabilities");
+    throw new SessionError(
+      "transport does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+        },
+      },
+    );
   }
   return service.registerServer(
     {
@@ -184,8 +205,17 @@ function exportCapabilityFromContext<
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
   if (!ctx.exportCapability) {
-    throw new Error(
+    throw new SessionError(
       "rpc call context does not support exporting local capabilities",
+      {
+        metadata: {
+          phase: "capability_resolve",
+          serviceName: service.interfaceName,
+          interfaceId: service.interfaceId,
+          questionId: ctx.questionId,
+          methodId: ctx.methodId,
+        },
+      },
     );
   }
   return service.registerServer(
@@ -277,26 +307,48 @@ export function createPersistentClient(
       params: SaveParams,
       options?: RpcCallOptions,
     ): Promise<SaveResults> => {
-      const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
-        SaveParamsStruct,
-        params,
-      );
-      let questionId: number | undefined;
-      const callOptions: RpcCallOptions & {
-        paramsCapTable?: PreambleCapDescriptor[];
-      } = {
-        ...(options ?? {}),
-        interfaceId: options?.interfaceId ?? 0xc8cb212fcd9f5691n,
-        onQuestionId: (value: number): void => {
-          questionId = value;
-          options?.onQuestionId?.(value);
-        },
-        ...(encoded.capTable.length > 0
-          ? { paramsCapTable: encoded.capTable }
-          : {}),
-      };
-      if (transport.callRaw) {
-        const raw = await transport.callRaw(
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          SaveParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xc8cb212fcd9f5691n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            PersistentMethodOrdinals["save"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              SaveResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as SaveResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
           capability,
           PersistentMethodOrdinals["save"],
           encoded.content,
@@ -305,8 +357,8 @@ export function createPersistentClient(
         try {
           return decodeStructMessageWithCaps(
             SaveResultsStruct,
-            raw.contentBytes,
-            raw.capTable,
+            response,
+            [],
           ) as SaveResults;
         } finally {
           if (
@@ -316,26 +368,14 @@ export function createPersistentClient(
             await transport.finish(questionId, options?.finish);
           }
         }
-      }
-      const response = await transport.call(
-        capability,
-        PersistentMethodOrdinals["save"],
-        encoded.content,
-        callOptions,
-      );
-      try {
-        return decodeStructMessageWithCaps(
-          SaveResultsStruct,
-          response,
-          [],
-        ) as SaveResults;
-      } finally {
-        if (
-          (options?.autoFinish ?? true) && questionId !== undefined &&
-          transport.finish
-        ) {
-          await transport.finish(questionId, options?.finish);
-        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Persistent",
+          interfaceId: 0xc8cb212fcd9f5691n,
+          methodName: "save",
+          methodId: 0,
+        }, "Persistent.save failed");
       }
     },
   };
@@ -345,8 +385,16 @@ export async function bootstrapPersistentClient(
   transport: RpcBootstrapClientTransport,
   options?: RpcCallOptions,
 ): Promise<PersistentClient> {
-  const capability = await transport.bootstrap(options);
-  return createPersistentClient(transport, capability);
+  try {
+    const capability = await transport.bootstrap(options);
+    return createPersistentClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "Persistent",
+      interfaceId: PersistentInterfaceId,
+    }, "bootstrap Persistent failed");
+  }
 }
 
 export function createPersistentServer(
@@ -377,7 +425,13 @@ export function createPersistentServer(
           return encoded.content;
         }
         default:
-          throw new Error("unknown method ordinal: " + methodId);
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
       }
     },
   };
@@ -414,8 +468,19 @@ function createPersistentServiceClient(
 ): Persistent {
   return {
     save: async (value: SaveParams["sealFor"], options?: RpcCallOptions) => {
-      const result = await client.save({ sealFor: value }, options);
-      return result.sturdyRef;
+      try {
+        const result = await client.save({ sealFor: value }, options);
+        return result.sturdyRef;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Persistent",
+          interfaceName: "Persistent",
+          interfaceId: PersistentInterfaceId,
+          methodName: "save",
+          methodId: 0,
+        }, "Persistent.save failed");
+      }
     },
   };
 }
@@ -425,15 +490,38 @@ function createPersistentServiceServer(
 ): PersistentServer {
   return {
     save: async (params: SaveParams, _ctx: RpcCallContext) => {
-      const result = await server.save(params.sealFor);
-      return { sturdyRef: result };
+      try {
+        const result = await server.save(params.sealFor);
+        return { sturdyRef: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Persistent",
+          interfaceName: "Persistent",
+          interfaceId: PersistentInterfaceId,
+          methodName: "save",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "Persistent.save handler failed");
+      }
     },
   };
 }
 
+export const PersistentDebugMethods = [
+  {
+    interfaceId: PersistentInterfaceId,
+    interfaceName: "Persistent",
+    serviceName: "Persistent",
+    methodId: PersistentMethodOrdinals["save"],
+    methodName: "save",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
+
 export const Persistent: RpcServiceToken<Persistent> = createRpcServiceToken({
   interfaceId: PersistentInterfaceId,
   interfaceName: "Persistent",
+  methods: PersistentDebugMethods,
   bootstrapClient: async (
     transport: RpcBootstrapClientTransport,
     options?: RpcCallOptions,
