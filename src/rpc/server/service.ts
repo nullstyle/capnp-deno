@@ -173,10 +173,14 @@ export interface RpcServiceStats {
   readonly closed: boolean;
   /** Whether the service listener is waiting for active connections to finish. */
   readonly draining: boolean;
+  /** The number of accepted connections still building their service runtime. */
+  readonly initializingConnections: number;
   /** The number of currently active accepted connections. */
   readonly activeConnections: number;
   /** The number of connections accepted by this listener. */
   readonly acceptedConnections: number;
+  /** The number of accepted connections that failed before becoming active. */
+  readonly failedConnections: number;
   /** The number of connections refused before runtime creation. */
   readonly refusedConnections: number;
   /** The number of active connections force-closed by drain or close. */
@@ -239,6 +243,19 @@ export interface RpcServiceServeOptions {
    * ```
    */
   maxActiveConnections?: number;
+  /**
+   * Maximum time to wait for a service instance and runtime to initialize for a
+   * newly accepted connection. When omitted, initialization may wait
+   * indefinitely.
+   *
+   * @example
+   * ```ts
+   * serve(Pinger, listener, new PingServer(), {
+   *   connectionInitTimeoutMs: 10_000,
+   * });
+   * ```
+   */
+  connectionInitTimeoutMs?: number;
   /**
    * Observability sink for service-level lifecycle events.
    *
@@ -501,8 +518,10 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
     return {
       closed: this.#closed,
       draining: this.#draining,
+      initializingConnections: 0,
       activeConnections: this.#closed ? 0 : 1,
       acceptedConnections: 1,
+      failedConnections: 0,
       refusedConnections: 0,
       forcedClosedConnections: this.#forcedClosedConnections,
     };
@@ -589,12 +608,15 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   readonly #options: RpcServiceServeOptions;
   readonly #active = new Set<RpcServiceConnectionHandleImpl>();
   readonly #maxActiveConnections: number | undefined;
+  readonly #connectionInitTimeoutMs: number | undefined;
   readonly #tracer: RpcDebugTracer | null;
   readonly #observability: RpcObservability | undefined;
   readonly #connectionOptions: RpcServiceServeOptions;
   readonly #acceptLoop: Promise<void>;
   readonly #activeWaiters = new Set<() => void>();
   #acceptedConnections = 0;
+  #initializingConnections = 0;
+  #failedConnections = 0;
   #refusedConnections = 0;
   #forcedClosedConnections = 0;
   #draining = false;
@@ -614,6 +636,10 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     this.#options = options;
     this.#maxActiveConnections = normalizeMaxActiveConnections(
       options.maxActiveConnections,
+      service,
+    );
+    this.#connectionInitTimeoutMs = normalizeConnectionInitTimeoutMs(
+      options.connectionInitTimeoutMs,
       service,
     );
     this.#tracer = resolveDebugTracer(options.debug);
@@ -637,8 +663,10 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     const stats = {
       closed: this.#closed,
       draining: this.#draining,
+      initializingConnections: this.#initializingConnections,
       activeConnections: this.#active.size,
       acceptedConnections: this.#acceptedConnections,
+      failedConnections: this.#failedConnections,
       refusedConnections: this.#refusedConnections,
       forcedClosedConnections: this.#forcedClosedConnections,
     };
@@ -738,7 +766,8 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
 
   #shouldRefuseConnection(): boolean {
     return this.#maxActiveConnections !== undefined &&
-      this.#active.size >= this.#maxActiveConnections;
+      (this.#active.size + this.#initializingConnections) >=
+        this.#maxActiveConnections;
   }
 
   async #refuseConnection(accepted: RpcAcceptedTransport): Promise<void> {
@@ -762,6 +791,7 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
         "rpc.service_name": this.#service.interfaceName,
         "rpc.interface_id": this.#service.interfaceId,
         "rpc.active_connections": this.#active.size,
+        "rpc.initializing_connections": this.#initializingConnections,
         ...(this.#maxActiveConnections === undefined
           ? {}
           : { "rpc.max_active_connections": this.#maxActiveConnections }),
@@ -778,19 +808,21 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   async #acceptConnection(accepted: RpcAcceptedTransport): Promise<void> {
     let handle: RpcServiceConnectionHandleImpl | null = null;
     this.#acceptedConnections++;
+    this.#initializingConnections++;
     emitObservabilityEvent(this.#observability, {
       name: "rpc.service.connection_accepted",
       attributes: {
         "rpc.service_name": this.#service.interfaceName,
         "rpc.interface_id": this.#service.interfaceId,
         "rpc.active_connections": this.#active.size + 1,
+        "rpc.initializing_connections": this.#initializingConnections,
         ...(this.#maxActiveConnections === undefined
           ? {}
           : { "rpc.max_active_connections": this.#maxActiveConnections }),
         ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
       },
     });
-    handle = await createServiceConnectionHandle(
+    const createPromise = createServiceConnectionHandle(
       this.#service,
       accepted,
       this.#implementation,
@@ -801,10 +833,19 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
           this.#notifyActiveChanged();
         }
       },
-    ).catch(async (error) => {
+    );
+    try {
+      handle = await this.#awaitConnectionInitialization(
+        accepted,
+        createPromise,
+      );
+      this.#initializingConnections--;
+    } catch (error) {
+      this.#failedConnections++;
+      this.#initializingConnections--;
       await reportConnectionError(this.#options.onConnectionError, error);
-      return null;
-    });
+      return;
+    }
     if (!handle || handle.closed) return;
     this.#active.add(handle);
     if (this.#closed && !this.#draining) {
@@ -817,6 +858,61 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
         reportConnectionError(this.#options.onConnectionError, error)
       );
     }
+  }
+
+  async #awaitConnectionInitialization(
+    accepted: RpcAcceptedTransport,
+    createPromise: Promise<RpcServiceConnectionHandleImpl>,
+  ): Promise<RpcServiceConnectionHandleImpl> {
+    const timeoutMs = this.#connectionInitTimeoutMs;
+    if (timeoutMs === undefined) {
+      return await createPromise;
+    }
+
+    const result = await raceTimeoutValue(createPromise, timeoutMs);
+    if (result !== "timeout") {
+      return result;
+    }
+
+    const error = new SessionError(
+      `generated RPC service ${this.#service.interfaceName} connection initialization timed out after ${timeoutMs}ms`,
+      {
+        metadata: {
+          phase: "service_serve",
+          serviceName: this.#service.interfaceName,
+          interfaceId: this.#service.interfaceId,
+          peerId: accepted.id,
+          transport: accepted.remoteAddress?.transport ??
+            accepted.localAddress?.transport,
+        },
+      },
+    );
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.service.connection_init_timeout",
+      attributes: {
+        "rpc.service_name": this.#service.interfaceName,
+        "rpc.interface_id": this.#service.interfaceId,
+        "rpc.connection_init_timeout_ms": timeoutMs,
+        "rpc.active_connections": this.#active.size,
+        "rpc.initializing_connections": this.#initializingConnections,
+        ...(accepted.id ? { "rpc.peer_id": accepted.id } : {}),
+      },
+      error,
+    });
+    await Promise.resolve(accepted.transport.close()).catch((closeError) =>
+      reportConnectionError(this.#options.onConnectionError, closeError)
+    );
+    void createPromise.then((lateHandle) => {
+      this.#forcedClosedConnections++;
+      this.#emitServiceEvent("rpc.service.connections_force_close", {
+        "rpc.force_close_reason": "rpc service init timeout late cleanup",
+        "rpc.force_close_count": 1,
+      });
+      return lateHandle.close();
+    }).catch(() => {
+      // createServiceConnectionHandle already closes/disposes failed attempts.
+    });
+    throw error;
   }
 
   async #closeAcceptor(): Promise<void> {
@@ -896,6 +992,27 @@ function normalizeMaxActiveConnections(
   );
 }
 
+function normalizeConnectionInitTimeoutMs(
+  value: number | undefined,
+  service: Pick<
+    RpcServiceToken<object, object>,
+    "interfaceId" | "interfaceName"
+  >,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  throw new SessionError(
+    "connectionInitTimeoutMs must be a non-negative safe integer",
+    {
+      metadata: {
+        phase: "service_serve",
+        serviceName: service.interfaceName,
+        interfaceId: service.interfaceId,
+      },
+    },
+  );
+}
+
 function normalizeForceAfterMs(value: number | undefined): number | undefined {
   if (value === undefined) return undefined;
   if (Number.isSafeInteger(value) && value >= 0) return value;
@@ -912,6 +1029,22 @@ function raceTimeout(
   });
   return Promise.race([
     promise.then(() => "completed" as const),
+    timeout,
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+function raceTimeoutValue<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  return Promise.race([
+    promise,
     timeout,
   ]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);

@@ -493,6 +493,126 @@ Deno.test("serve close waits for runtimes that finish initializing during shutdo
   }
 });
 
+Deno.test("serve times out stalled connection initialization and cleans up late runtimes", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const runtimeCreateStarted = deferred<void>();
+  const releaseRuntimeCreate = deferred<void>();
+  const lateRuntimeClosed = deferred<void>();
+  const initTimedOut = deferred<SessionError>();
+  const acceptClosed = deferred<void>();
+  const events: RpcObservabilityEvent[] = [];
+  let transportCloseCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = async (transport) => {
+    runtimeCreateStarted.resolve();
+    await releaseRuntimeCreate.promise;
+    return {
+      close: async (): Promise<void> => {
+        await transport.close();
+        lateRuntimeClosed.resolve();
+      },
+    } as RpcServerRuntime;
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x184n,
+    interfaceName: "ServeInitTimeoutProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const transport = {
+    start(): void {
+      // no-op
+    },
+    send(): Promise<void> {
+      return Promise.resolve();
+    },
+    close(): Promise<void> {
+      transportCloseCount += 1;
+      return Promise.resolve();
+    },
+  };
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport,
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41240,
+        },
+        id: "stalled-init-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  try {
+    using handle = serve(service, acceptor, {}, {
+      connectionInitTimeoutMs: 1,
+      onConnectionError(error) {
+        if (error instanceof SessionError) {
+          initTimedOut.resolve(error);
+        }
+      },
+      observability: {
+        onEvent(event) {
+          events.push(event);
+        },
+      },
+    });
+
+    await withTimeout(
+      runtimeCreateStarted.promise,
+      1000,
+      "runtime creation started",
+    );
+    const timeoutError = await withTimeout(
+      initTimedOut.promise,
+      1000,
+      "connection init timeout",
+    );
+
+    assert(
+      /connection initialization timed out/i.test(timeoutError.message),
+      `expected init timeout error, got: ${String(timeoutError)}`,
+    );
+    assertEquals(timeoutError.metadata?.serviceName, "ServeInitTimeoutProbe");
+    assertEquals(timeoutError.metadata?.peerId, "stalled-init-peer");
+    assertEquals(timeoutError.metadata?.transport, "tcp");
+    assertEquals(transportCloseCount, 1);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.acceptedConnections, 1);
+    assertEquals(handle.stats.failedConnections, 1);
+    assert(
+      events.some((event) =>
+        event.name === "rpc.service.connection_init_timeout"
+      ),
+    );
+
+    releaseRuntimeCreate.resolve();
+    await withTimeout(lateRuntimeClosed.promise, 1000, "late runtime cleanup");
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assertEquals(transportCloseCount, 2);
+  } finally {
+    acceptClosed.resolve();
+    releaseRuntimeCreate.resolve();
+    await Promise.resolve().then(() => {});
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
 Deno.test("serve refuses accepted connections above maxActiveConnections", async () => {
   const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
   const acceptClosed = deferred<void>();
@@ -650,6 +770,36 @@ Deno.test("serve rejects invalid maxActiveConnections", () => {
   assert(thrown instanceof SessionError);
   assert(thrown.metadata !== undefined);
   assertEquals(thrown.metadata.serviceName, "ServeInvalidLimitProbe");
+});
+
+Deno.test("serve rejects invalid connectionInitTimeoutMs", () => {
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x185n,
+    interfaceName: "ServeInvalidInitTimeoutProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      // no accepted transports
+    },
+    close(): void {
+      // no-op
+    },
+  };
+
+  let thrown: unknown;
+  try {
+    serve(service, acceptor, {}, { connectionInitTimeoutMs: -1 });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(thrown instanceof SessionError);
+  assert(thrown.metadata !== undefined);
+  assertEquals(thrown.metadata.serviceName, "ServeInvalidInitTimeoutProbe");
 });
 
 Deno.test("serve drain waits for active websocket connections to close naturally", async () => {

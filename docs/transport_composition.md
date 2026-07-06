@@ -334,6 +334,10 @@ the same server-side contract for browser and Deno clients:
    - Use `serve(..., { maxActiveConnections })` to cap active runtimes at the
      listener. Surplus accepted transports are closed immediately, reported via
      `onConnectionError`, and reflected in `handle.stats.refusedConnections`.
+   - Use `serve(..., { connectionInitTimeoutMs })` to bound per-connection
+     service factory and runtime initialization. Timeouts close the accepted
+     transport, report through `onConnectionError`, and increment
+     `handle.stats.failedConnections`.
 6. Fallback order and reconnect layering:
    - Browser clients should prefer `connect(...)` over
      `WebSocketTransport.connect(...)` when they want typed service stubs.

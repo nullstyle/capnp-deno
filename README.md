@@ -284,6 +284,15 @@ Use `serve(..., { maxActiveConnections })` to apply listener-level admission
 control. The returned handle exposes `handle.stats` with active, accepted, and
 refused connection counts for operational checks.
 
+Set `connectionInitTimeoutMs` when service factories or runtime initialization
+must be bounded:
+
+```ts
+const handle = serve(Pinger, listener, new PingServer(), {
+  connectionInitTimeoutMs: 10_000,
+});
+```
+
 For rolling deploys or process shutdown, call `await handle.drain()` to stop
 accepting new connections and wait for active connections to finish. Add
 `forceAfterMs` when shutdown must be bounded:

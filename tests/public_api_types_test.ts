@@ -458,6 +458,13 @@ type AssertRpcServiceServeMaxActiveConnectionsOption = Assert<
   IsEqual<RpcServiceServeOptions["maxActiveConnections"], number | undefined>
 >;
 
+type AssertRpcServiceServeConnectionInitTimeoutOption = Assert<
+  IsEqual<
+    RpcServiceServeOptions["connectionInitTimeoutMs"],
+    number | undefined
+  >
+>;
+
 type AssertRpcServiceHandleStats = Assert<
   IsEqual<RpcServiceHandle["stats"], RpcServiceStats>
 >;
@@ -471,6 +478,14 @@ type AssertRpcServiceHandleDrain = Assert<
 
 type AssertRpcServiceStatsActiveConnections = Assert<
   IsEqual<RpcServiceStats["activeConnections"], number>
+>;
+
+type AssertRpcServiceStatsInitializingConnections = Assert<
+  IsEqual<RpcServiceStats["initializingConnections"], number>
+>;
+
+type AssertRpcServiceStatsFailedConnections = Assert<
+  IsEqual<RpcServiceStats["failedConnections"], number>
 >;
 
 type AssertRpcServiceStatsDraining = Assert<
