@@ -171,14 +171,35 @@ export interface RpcServiceConnectOptions
 export interface RpcServiceStats {
   /** Whether the service listener has been closed. */
   readonly closed: boolean;
+  /** Whether the service listener is waiting for active connections to finish. */
+  readonly draining: boolean;
   /** The number of currently active accepted connections. */
   readonly activeConnections: number;
   /** The number of connections accepted by this listener. */
   readonly acceptedConnections: number;
   /** The number of connections refused before runtime creation. */
   readonly refusedConnections: number;
+  /** The number of active connections force-closed by drain or close. */
+  readonly forcedClosedConnections: number;
   /** The configured active connection limit, when one is set. */
   readonly maxActiveConnections?: number;
+}
+
+/**
+ * Options for gracefully draining a generated RPC service listener.
+ */
+export interface RpcServiceDrainOptions {
+  /**
+   * Maximum time to wait for active connections to close naturally before
+   * force-closing the remaining runtimes. When omitted, drain waits
+   * indefinitely.
+   *
+   * @example
+   * ```ts
+   * await handle.drain({ forceAfterMs: 30_000 });
+   * ```
+   */
+  readonly forceAfterMs?: number;
 }
 
 /**
@@ -244,6 +265,10 @@ export interface RpcServiceHandle {
    * Snapshot of listener or connection lifecycle statistics.
    */
   readonly stats: RpcServiceStats;
+  /**
+   * Stop accepting new connections and wait for active connections to finish.
+   */
+  drain(options?: RpcServiceDrainOptions): Promise<void>;
   close(): Promise<void>;
   [Symbol.dispose](): void;
   [Symbol.asyncDispose](): Promise<void>;
@@ -449,8 +474,12 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
 
   readonly #disposeInstance: (() => Promise<void>) | null;
   readonly #onClosed: (() => void) | undefined;
+  readonly #closedWaiters = new Set<() => void>();
+  #forcedClosedConnections = 0;
+  #draining = false;
   #closed = false;
   #closePromise: Promise<void> | null = null;
+  #drainPromise: Promise<void> | null = null;
 
   constructor(
     peer: RpcPeer,
@@ -471,9 +500,11 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
   get stats(): RpcServiceStats {
     return {
       closed: this.#closed,
+      draining: this.#draining,
       activeConnections: this.#closed ? 0 : 1,
       acceptedConnections: 1,
       refusedConnections: 0,
+      forcedClosedConnections: this.#forcedClosedConnections,
     };
   }
 
@@ -483,6 +514,38 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
 
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
+  }
+
+  drain(options: RpcServiceDrainOptions = {}): Promise<void> {
+    if (this.#drainPromise) return this.#drainPromise;
+    const promise = this.#drain(options).catch((error) => {
+      if (this.#drainPromise === promise) {
+        this.#drainPromise = null;
+      }
+      throw error;
+    });
+    this.#drainPromise = promise;
+    return this.#drainPromise;
+  }
+
+  async #drain(options: RpcServiceDrainOptions): Promise<void> {
+    const forceAfterMs = normalizeForceAfterMs(options.forceAfterMs);
+    if (this.#closed) return;
+    this.#draining = true;
+    try {
+      const closed = this.#waitClosed();
+      if (forceAfterMs === undefined) {
+        await closed;
+        return;
+      }
+      const outcome = await raceTimeout(closed, forceAfterMs);
+      if (outcome === "timeout" && !this.#closed) {
+        this.#forcedClosedConnections++;
+        await this.close();
+      }
+    } finally {
+      this.#draining = false;
+    }
   }
 
   close(): Promise<void> {
@@ -497,10 +560,25 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
           await this.#disposeInstance?.();
         } finally {
           this.#onClosed?.();
+          this.#notifyClosed();
         }
       }
     })();
     return this.#closePromise;
+  }
+
+  #waitClosed(): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#closedWaiters.add(resolve);
+    });
+  }
+
+  #notifyClosed(): void {
+    for (const resolve of this.#closedWaiters) {
+      resolve();
+    }
+    this.#closedWaiters.clear();
   }
 }
 
@@ -515,9 +593,14 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   readonly #observability: RpcObservability | undefined;
   readonly #connectionOptions: RpcServiceServeOptions;
   readonly #acceptLoop: Promise<void>;
+  readonly #activeWaiters = new Set<() => void>();
   #acceptedConnections = 0;
   #refusedConnections = 0;
+  #forcedClosedConnections = 0;
+  #draining = false;
   #closed = false;
+  #closePromise: Promise<void> | null = null;
+  #drainPromise: Promise<void> | null = null;
 
   constructor(
     service: RpcServiceToken<object, TServer>,
@@ -553,9 +636,11 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   get stats(): RpcServiceStats {
     const stats = {
       closed: this.#closed,
+      draining: this.#draining,
       activeConnections: this.#active.size,
       acceptedConnections: this.#acceptedConnections,
       refusedConnections: this.#refusedConnections,
+      forcedClosedConnections: this.#forcedClosedConnections,
     };
     return this.#maxActiveConnections === undefined
       ? stats
@@ -570,24 +655,65 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
     return this.close();
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
+  drain(options: RpcServiceDrainOptions = {}): Promise<void> {
+    if (this.#drainPromise) return this.#drainPromise;
+    const promise = this.#drain(options).catch((error) => {
+      if (this.#drainPromise === promise) {
+        this.#drainPromise = null;
+      }
+      throw error;
+    });
+    this.#drainPromise = promise;
+    return this.#drainPromise;
+  }
 
-    const closeResults = await Promise.allSettled(
-      [...this.#active].map((handle) => handle.close()),
-    );
-    this.#active.clear();
-
-    await Promise.resolve(this.#acceptor.close()).catch(() => {});
-    await this.#acceptLoop;
-
-    const failure = closeResults.find((result) => result.status === "rejected");
-    if (failure && failure.status === "rejected") {
-      throw new SessionError("rpc service close failed", {
-        cause: failure.reason,
-      });
+  async #drain(options: RpcServiceDrainOptions): Promise<void> {
+    const forceAfterMs = normalizeForceAfterMs(options.forceAfterMs);
+    if (this.#closePromise) {
+      await this.#closePromise;
+      return;
     }
+    if (this.#closed && this.#active.size === 0) return;
+
+    this.#closed = true;
+    this.#draining = true;
+    this.#emitServiceEvent("rpc.service.drain_start");
+    try {
+      await this.#closeAcceptor();
+      await this.#acceptLoop;
+
+      if (this.#active.size > 0) {
+        const waitForDrain = this.#waitForNoActiveConnections();
+        if (forceAfterMs === undefined) {
+          await waitForDrain;
+        } else if (
+          await raceTimeout(waitForDrain, forceAfterMs) === "timeout"
+        ) {
+          await this.#forceCloseActiveConnections(
+            "rpc service drain timed out",
+          );
+        }
+      }
+      this.#emitServiceEvent("rpc.service.drain_complete");
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise;
+    this.#closePromise = this.#closeNow();
+    return this.#closePromise;
+  }
+
+  async #closeNow(): Promise<void> {
+    if (this.#closed && this.#active.size === 0) return;
+    this.#closed = true;
+    this.#draining = false;
+
+    await this.#forceCloseActiveConnections("rpc service close");
+    await this.#closeAcceptor();
+    await this.#acceptLoop;
   }
 
   async #runAcceptLoop(): Promise<void> {
@@ -671,6 +797,7 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
       () => {
         if (handle) {
           this.#active.delete(handle);
+          this.#notifyActiveChanged();
         }
       },
     ).catch(async (error) => {
@@ -684,6 +811,61 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
         void reportConnectionError(this.#options.onConnectionError, error);
       });
     }
+  }
+
+  async #closeAcceptor(): Promise<void> {
+    await Promise.resolve(this.#acceptor.close()).catch((error) => {
+      void reportConnectionError(this.#options.onConnectionError, error);
+    });
+  }
+
+  async #forceCloseActiveConnections(reason: string): Promise<void> {
+    const handles = [...this.#active];
+    if (handles.length === 0) return;
+    this.#forcedClosedConnections += handles.length;
+    this.#emitServiceEvent("rpc.service.connections_force_close", {
+      "rpc.force_close_reason": reason,
+      "rpc.force_close_count": handles.length,
+    });
+    const closeResults = await Promise.allSettled(
+      handles.map((handle) => handle.close()),
+    );
+    const failure = closeResults.find((result) => result.status === "rejected");
+    if (failure && failure.status === "rejected") {
+      throw new SessionError("rpc service close failed", {
+        cause: failure.reason,
+      });
+    }
+  }
+
+  #waitForNoActiveConnections(): Promise<void> {
+    if (this.#active.size === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#activeWaiters.add(resolve);
+    });
+  }
+
+  #notifyActiveChanged(): void {
+    if (this.#active.size > 0) return;
+    for (const resolve of this.#activeWaiters) {
+      resolve();
+    }
+    this.#activeWaiters.clear();
+  }
+
+  #emitServiceEvent(
+    name: string,
+    attributes: Record<string, string | number | boolean | bigint> = {},
+  ): void {
+    emitObservabilityEvent(this.#observability, {
+      name,
+      attributes: {
+        "rpc.service_name": this.#service.interfaceName,
+        "rpc.interface_id": this.#service.interfaceId,
+        "rpc.active_connections": this.#active.size,
+        ...attributes,
+      },
+    });
   }
 }
 
@@ -706,6 +888,28 @@ function normalizeMaxActiveConnections(
       },
     },
   );
+}
+
+function normalizeForceAfterMs(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  throw new SessionError("forceAfterMs must be a non-negative safe integer");
+}
+
+function raceTimeout(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<"completed" | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  return Promise.race([
+    promise.then(() => "completed" as const),
+    timeout,
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 async function createServiceConnectionHandle<

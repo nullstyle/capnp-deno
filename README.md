@@ -284,6 +284,14 @@ Use `serve(..., { maxActiveConnections })` to apply listener-level admission
 control. The returned handle exposes `handle.stats` with active, accepted, and
 refused connection counts for operational checks.
 
+For rolling deploys or process shutdown, call `await handle.drain()` to stop
+accepting new connections and wait for active connections to finish. Add
+`forceAfterMs` when shutdown must be bounded:
+
+```ts
+await handle.drain({ forceAfterMs: 30_000 });
+```
+
 Resilience and runtime helpers:
 
 - `createExponentialBackoffReconnectPolicy(...)`

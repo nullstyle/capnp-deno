@@ -558,6 +558,236 @@ Deno.test("serve rejects invalid maxActiveConnections", () => {
   assertEquals(thrown.metadata.serviceName, "ServeInvalidLimitProbe");
 });
 
+Deno.test("serve drain waits for active websocket connections to close naturally", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const acceptClosed = deferred<void>();
+  const runtimeCreated = deferred<void>();
+  const runtimeClosed = deferred<void>();
+  const events: RpcObservabilityEvent[] = [];
+  let runtimeCloseCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = (transport) => {
+    runtimeCreated.resolve();
+    return Promise.resolve({
+      close: async (): Promise<void> => {
+        runtimeCloseCount += 1;
+        await transport.close();
+        runtimeClosed.resolve();
+      },
+    } as RpcServerRuntime);
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x180n,
+    interfaceName: "ServeDrainProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const socket = new FakeWebSocket();
+  const accepted = new AcceptedWebSocketTransport(
+    socket as unknown as WebSocket,
+    {
+      remoteAddress: { transport: "websocket" },
+      id: "drain-peer",
+    },
+  );
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield accepted;
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  try {
+    using handle = serve(service, acceptor, {}, {
+      observability: {
+        onEvent(event) {
+          events.push(event);
+        },
+      },
+    });
+
+    await withTimeout(runtimeCreated.promise, 1000, "runtime created");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(handle.stats.activeConnections, 1);
+
+    const drained = handle.drain();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.draining, true);
+    assertEquals(handle.stats.activeConnections, 1);
+    assertEquals(runtimeCloseCount, 0);
+
+    await accepted.close();
+
+    await withTimeout(runtimeClosed.promise, 1000, "runtime closed");
+    await withTimeout(drained, 1000, "service drained");
+
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.forcedClosedConnections, 0);
+    assertEquals(handle.stats.draining, false);
+    assert(
+      events.some((event) => event.name === "rpc.service.drain_start"),
+    );
+    assert(
+      events.some((event) => event.name === "rpc.service.drain_complete"),
+    );
+  } finally {
+    acceptClosed.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve drain force-closes active connections after grace window", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const acceptClosed = deferred<void>();
+  const runtimeCreated = deferred<void>();
+  const events: RpcObservabilityEvent[] = [];
+  const transportEvents: string[] = [];
+  let runtimeCloseCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = (transport) => {
+    runtimeCreated.resolve();
+    return Promise.resolve({
+      close: async (): Promise<void> => {
+        runtimeCloseCount += 1;
+        await transport.close();
+      },
+    } as RpcServerRuntime);
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x181n,
+    interfaceName: "ServeDrainTimeoutProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: {
+          start(): void {
+            // no-op
+          },
+          send(): Promise<void> {
+            return Promise.resolve();
+          },
+          close(): Promise<void> {
+            transportEvents.push("transport.close");
+            return Promise.resolve();
+          },
+        },
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41238,
+        },
+        id: "slow-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  try {
+    using handle = serve(service, acceptor, {}, {
+      observability: {
+        onEvent(event) {
+          events.push(event);
+        },
+      },
+    });
+
+    await withTimeout(runtimeCreated.promise, 1000, "runtime created");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await handle.drain({ forceAfterMs: 1 });
+
+    assertEquals(runtimeCloseCount, 1);
+    assertEquals(transportEvents.includes("transport.close"), true);
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assert(
+      events.some((event) =>
+        event.name === "rpc.service.connections_force_close"
+      ),
+    );
+  } finally {
+    acceptClosed.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve drain rejects invalid forceAfterMs", async () => {
+  const acceptClosed = deferred<void>();
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x182n,
+    interfaceName: "ServeDrainInvalidProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+  const handle = serve(service, {
+    closed: false,
+    async *accept() {
+      await acceptClosed.promise;
+      if (Date.now() < 0) {
+        yield {
+          transport: {
+            start(): void {
+              // no-op
+            },
+            send(): Promise<void> {
+              return Promise.resolve();
+            },
+            close(): Promise<void> {
+              return Promise.resolve();
+            },
+          },
+        };
+      }
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  }, {});
+
+  let thrown: unknown;
+  try {
+    try {
+      await handle.drain({ forceAfterMs: -1 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(thrown instanceof SessionError);
+    assert(
+      /forceAfterMs must be a non-negative safe integer/i.test(thrown.message),
+    );
+    await handle.drain({ forceAfterMs: 0 });
+    assertEquals(handle.stats.closed, true);
+  } finally {
+    await handle.close();
+  }
+});
+
 async function withPatchedWebTransportServePrimitives(
   fn: (
     events: string[],

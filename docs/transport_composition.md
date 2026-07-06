@@ -328,6 +328,9 @@ the same server-side contract for browser and Deno clients:
    - Per-connection transport errors are reported via `transport.onError`.
    - Closing the `serve(...)` handle stops accepting new upgrades and closes
      active runtimes.
+   - `await handle.drain({ forceAfterMs })` stops accepting new upgrades, waits
+     for active runtimes to close naturally, and force-closes the remaining
+     runtimes after the grace window.
    - Use `serve(..., { maxActiveConnections })` to cap active runtimes at the
      listener. Surplus accepted transports are closed immediately, reported via
      `onConnectionError`, and reflected in `handle.stats.refusedConnections`.

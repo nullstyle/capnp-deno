@@ -106,6 +106,7 @@ import type {
   RpcServiceConnectOptions,
   RpcServiceConstructor,
   RpcServiceContext,
+  RpcServiceDrainOptions,
   RpcServiceFactory,
   RpcServiceHandle,
   RpcServiceImplementation,
@@ -239,6 +240,7 @@ type PublicTypeExportSmoke = {
   rpcServiceConnectOptions: RpcServiceConnectOptions;
   rpcServiceConnectionHandle: RpcServiceConnectionHandle;
   rpcServiceContext: RpcServiceContext;
+  rpcServiceDrainOptions: RpcServiceDrainOptions;
   rpcServiceFactory: RpcServiceFactory<{ ping(): Promise<void> }>;
   rpcServiceHandle: RpcServiceHandle;
   rpcServiceConstructor: RpcServiceConstructor<{ ping(): Promise<void> }>;
@@ -460,8 +462,23 @@ type AssertRpcServiceHandleStats = Assert<
   IsEqual<RpcServiceHandle["stats"], RpcServiceStats>
 >;
 
+type AssertRpcServiceHandleDrain = Assert<
+  IsEqual<
+    RpcServiceHandle["drain"],
+    (options?: RpcServiceDrainOptions) => Promise<void>
+  >
+>;
+
 type AssertRpcServiceStatsActiveConnections = Assert<
   IsEqual<RpcServiceStats["activeConnections"], number>
+>;
+
+type AssertRpcServiceStatsDraining = Assert<
+  IsEqual<RpcServiceStats["draining"], boolean>
+>;
+
+type AssertRpcServiceDrainForceAfter = Assert<
+  IsEqual<RpcServiceDrainOptions["forceAfterMs"], number | undefined>
 >;
 
 type AssertCreateWebTransportCertificateHashReturn = Assert<

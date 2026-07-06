@@ -37,6 +37,7 @@ error metadata, and log formatting.
 | `RpcSession is closed`                                                                     | Session       | Operating on a session after `close()` was called                                               | Ensure session lifecycle ordering; see [Session Errors](#session-errors)                                                                                   |
 | `rpc wait timed out after Nms`                                                             | Session       | No response received within the configured timeout                                              | Check server health and increase `timeoutMs` or `defaultTimeoutMs`; see [Timeout and Abort](#timeout-and-abort-errors)                                     |
 | `stream canceled`                                                                          | Streaming     | A generated stream sender was canceled, or its configured abort signal fired                    | Create a fresh sender for later calls and observe `ctx.signal` on the server; see [Timeout and Abort](#timeout-and-abort-errors)                           |
+| `handle.stats.forcedClosedConnections > 0`                                                 | Service       | Service drain grace window elapsed while connections were still active                          | Increase `forceAfterMs`, fix long-running handlers, or let `drain()` wait indefinitely; see [Service Shutdown](#service-shutdown)                          |
 | `transport is closed` / `transport is not started`                                         | Session       | Client transport used before `start()` or after `close()`                                       | Call `start()` or set `autoStart: true`; see [Session Errors](#session-errors)                                                                             |
 | `host-call pump was explicitly enabled, but wasm host-call bridge exports are unavailable` | Runtime       | WASM module does not support the host-call bridge, but `hostCallPump.enabled` was set to `true` | Set `hostCallPump.enabled: false` or use a WASM module with host-call support; see [Server Runtime Warnings](#server-runtime-warnings)                     |
 | `unsupported BufferSource`                                                                 | Instantiation | `instantiatePeer` received a value that is not a URL, string, Response, or BufferSource         | Pass a valid source; see [Instantiation Errors](#instantiation-errors)                                                                                     |
@@ -676,6 +677,26 @@ never registered or has already been observed.
 
 - This is usually an internal state error. File a bug if you see it in normal
   usage.
+
+## Service Shutdown
+
+#### `handle.stats.forcedClosedConnections > 0`
+
+**What it means:** `handle.drain({ forceAfterMs })` stopped accepting new
+connections and waited for active runtimes to close, but at least one runtime
+was still active when the grace window elapsed. The service force-closed those
+connections so shutdown could finish.
+
+**How to fix:**
+
+- Increase `forceAfterMs` to match realistic request, callback, and streaming
+  durations during deploys.
+- Use `await handle.drain()` without `forceAfterMs` when the process can wait
+  indefinitely for active connections to finish.
+- Check long-running generated handlers and streaming handlers for missing
+  `ctx.signal` handling.
+- Watch `rpc.service.connections_force_close` observability events and
+  `handle.stats.activeConnections` during shutdown drills.
 
 ### Server Runtime Warnings
 

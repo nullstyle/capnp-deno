@@ -58,6 +58,7 @@ export {
   type RpcServiceConnectOptions,
   type RpcServiceConstructor,
   type RpcServiceContext,
+  type RpcServiceDrainOptions,
   type RpcServiceFactory,
   type RpcServiceHandle,
   type RpcServiceImplementation,
