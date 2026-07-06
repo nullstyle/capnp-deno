@@ -167,30 +167,53 @@ Deno.test("connectWithReconnect normalizes shouldRetry and nextDelayMs hook fail
   );
 });
 
-Deno.test("connectWithReconnect normalizes onRetry and sleep failures", async () => {
-  let thrownOnRetry: unknown;
-  try {
-    await connectWithReconnect(
-      () => Promise.reject(new Error("dial failed")),
-      {
-        policy: {
-          shouldRetry: () => true,
-          nextDelayMs: () => 1,
-        },
-        onRetry: () => {
-          throw "retry-hook-failed";
-        },
+Deno.test("connectWithReconnect isolates onRetry observer failures", async () => {
+  const retryObserverErrors: Array<{
+    error: unknown;
+    attempt: number;
+    delayMs: number;
+  }> = [];
+  let attempts = 0;
+
+  const result = await connectWithReconnect(
+    () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return Promise.reject(new Error("dial failed"));
+      }
+      return Promise.resolve("connected");
+    },
+    {
+      policy: {
+        shouldRetry: () => true,
+        nextDelayMs: () => 1,
       },
-    );
-  } catch (error) {
-    thrownOnRetry = error;
-  }
-  assert(
-    thrownOnRetry instanceof TransportError &&
-      /reconnect onRetry hook failed/i.test(thrownOnRetry.message),
-    `expected onRetry normalization, got: ${String(thrownOnRetry)}`,
+      onRetry: () => {
+        throw "retry-hook-failed";
+      },
+      onRetryError: (error, info) => {
+        retryObserverErrors.push({
+          error,
+          attempt: info.attempt,
+          delayMs: info.delayMs,
+        });
+        throw new Error("secondary observer failed");
+      },
+      sleep: async () => {
+        // no-op for deterministic tests
+      },
+    },
   );
 
+  assertEquals(result, "connected");
+  assertEquals(attempts, 2);
+  assertEquals(retryObserverErrors.length, 1);
+  assertEquals(retryObserverErrors[0].error, "retry-hook-failed");
+  assertEquals(retryObserverErrors[0].attempt, 1);
+  assertEquals(retryObserverErrors[0].delayMs, 1);
+});
+
+Deno.test("connectWithReconnect normalizes sleep failures", async () => {
   let thrownSleep: unknown;
   try {
     await connectWithReconnect(

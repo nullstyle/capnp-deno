@@ -552,7 +552,9 @@ signal or because `close()` was called).
 When using `ReconnectingRpcClientTransport`, inspect
 `client.stats.reconnectAttempts`, `client.stats.retryFailures`,
 `client.stats.queuedOperations`, and `client.stats.operationInFlight` to
-separate transport churn from serialized client-side saturation.
+separate transport churn from serialized client-side saturation. Throwing from
+`onRetry` does not cancel reconnect progress; use `onRetryError` to report
+observer failures and pass an `AbortSignal` when the reconnect loop should stop.
 
 #### `connection pool is at capacity`
 

@@ -327,7 +327,9 @@ possible.
 `ReconnectingRpcClientTransport.stats` exposes connection attempts, reconnect
 attempts, retry outcomes, queued operations, and the current bootstrap
 capability index so long-lived clients can publish health and saturation
-signals.
+signals. Retry observer hooks are isolated: use `onRetry` for logs/metrics,
+`onRetryError` to observe observer failures, and `AbortSignal` when reconnect
+should actually stop.
 
 `CircuitBreaker.stats` exposes state, failure counts, cooldown remaining, and
 half-open probe activity for health checks and metrics. `onStateChange` is an

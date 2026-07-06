@@ -415,6 +415,14 @@ type AssertReconnectOnRetrySignature = Assert<
   >
 >;
 
+type AssertReconnectOnRetryErrorSignature = Assert<
+  IsEqual<
+    ConnectWithReconnectOptions["onRetryError"],
+    | ((error: unknown, info: ReconnectRetryInfo) => void | Promise<void>)
+    | undefined
+  >
+>;
+
 type AssertCreateSessionAutoStart = Assert<
   IsEqual<
     CreateRpcSessionWithReconnectOptions<RpcTransport>["autoStart"],
@@ -703,6 +711,7 @@ type StaticAssertions = [
   AssertRemapReturnAssignable,
   AssertReconnectingClientStatsClosed,
   AssertReconnectOnRetrySignature,
+  AssertReconnectOnRetryErrorSignature,
   AssertCreateSessionAutoStart,
   AssertSessionCreateAutoStart,
   AssertClientCreateStartSession,
@@ -815,8 +824,9 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 62);
+  assert(STATIC_ASSERTIONS.length === 63);
 });

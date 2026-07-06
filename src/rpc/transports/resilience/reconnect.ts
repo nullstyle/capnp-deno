@@ -84,6 +84,14 @@ export interface ConnectWithReconnectOptions {
    */
   onRetry?: (info: ReconnectRetryInfo) => void | Promise<void>;
   /**
+   * Optional callback invoked when `onRetry` throws. Errors from this callback
+   * are swallowed so observer failures cannot stop reconnect progress.
+   */
+  onRetryError?: (
+    error: unknown,
+    info: ReconnectRetryInfo,
+  ) => void | Promise<void>;
+  /**
    * Custom async sleep function. Defaults to `setTimeout`-based sleep.
    * Useful for testing to control time progression.
    */
@@ -294,17 +302,19 @@ export async function connectWithReconnect<T>(
       assertNonNegativeFinite(rawDelayMs, "reconnect delay");
       const delayMs = Math.round(rawDelayMs);
 
+      const retryInfo: ReconnectRetryInfo = {
+        ...context,
+        delayMs,
+      };
       if (options.onRetry) {
         try {
-          await options.onRetry({
-            ...context,
-            delayMs,
-          });
+          await options.onRetry(retryInfo);
         } catch (onRetryError) {
-          throw normalizeTransportError(
-            onRetryError,
-            "reconnect onRetry hook failed",
-          );
+          try {
+            await options.onRetryError?.(onRetryError, retryInfo);
+          } catch {
+            // Observer failures must not stop reconnect progress.
+          }
         }
       }
 
