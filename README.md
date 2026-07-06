@@ -293,6 +293,10 @@ const handle = serve(Pinger, listener, new PingServer(), {
 });
 ```
 
+Connection factories receive `{ peer, signal }`; observe `signal` during async
+auth, discovery, or resource setup so initialization timeouts and forced drains
+can cancel work before the runtime becomes active.
+
 For rolling deploys or process shutdown, call `await handle.drain()` to stop
 accepting new connections and wait for active connections to finish. Add
 `forceAfterMs` when shutdown must be bounded:

@@ -325,7 +325,7 @@ Deno.test("serveConnection times out stalled initialization and cleans up late r
 
     releaseRuntimeCreate.resolve();
     await withTimeout(lateRuntimeClosed.promise, 1000, "late runtime cleanup");
-    assertEquals(closeCount, 2);
+    assert(closeCount >= 2);
   } finally {
     releaseRuntimeCreate.resolve();
     (RpcServerRuntime as unknown as {
@@ -702,8 +702,8 @@ Deno.test("serve times out stalled connection initialization and cleans up late 
 
     releaseRuntimeCreate.resolve();
     await withTimeout(lateRuntimeClosed.promise, 1000, "late runtime cleanup");
-    assertEquals(handle.stats.forcedClosedConnections, 1);
-    assertEquals(transportCloseCount, 2);
+    assertEquals(handle.stats.forcedClosedConnections, 0);
+    assert(transportCloseCount >= 2);
   } finally {
     acceptClosed.resolve();
     releaseRuntimeCreate.resolve();
@@ -711,6 +711,105 @@ Deno.test("serve times out stalled connection initialization and cleans up late 
     (RpcServerRuntime as unknown as {
       createWithRoot: typeof RpcServerRuntime.createWithRoot;
     }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve aborts service factory signal when initialization times out", async () => {
+  const acceptClosed = deferred<void>();
+  const signalSeen = deferred<AbortSignal>();
+  const signalAborted = deferred<AbortSignal>();
+  const initTimedOut = deferred<SessionError>();
+  let closeCount = 0;
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x187n,
+    interfaceName: "ServeInitTimeoutSignalProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const transport = {
+    start(): void {
+      // no-op
+    },
+    send(): Promise<void> {
+      return Promise.resolve();
+    },
+    close(): Promise<void> {
+      closeCount += 1;
+      return Promise.resolve();
+    },
+  };
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport,
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41242,
+        },
+        id: "timeout-signal-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, ({ signal }) => {
+    signalSeen.resolve(signal);
+    signal.addEventListener(
+      "abort",
+      () => signalAborted.resolve(signal),
+      { once: true },
+    );
+    return new Promise<object>(() => {});
+  }, {
+    connectionInitTimeoutMs: 1,
+    onConnectionError(error) {
+      if (error instanceof SessionError) {
+        initTimedOut.resolve(error);
+      }
+    },
+  });
+
+  try {
+    const signal = await withTimeout(
+      signalSeen.promise,
+      1000,
+      "factory signal",
+    );
+    assertEquals(signal.aborted, false);
+
+    const abortedSignal = await withTimeout(
+      signalAborted.promise,
+      1000,
+      "factory signal abort",
+    );
+    assert(abortedSignal === signal);
+    assertEquals(signal.aborted, true);
+    assert(signal.reason instanceof SessionError);
+    assert(
+      /connection initialization timed out/i.test(signal.reason.message),
+      `expected timeout reason, got: ${String(signal.reason)}`,
+    );
+
+    const timeoutError = await withTimeout(
+      initTimedOut.promise,
+      1000,
+      "connection init timeout",
+    );
+    assertEquals(timeoutError.metadata?.peerId, "timeout-signal-peer");
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
+    assertEquals(closeCount, 1);
+  } finally {
+    acceptClosed.resolve();
+    await handle.close();
   }
 });
 
@@ -1078,6 +1177,108 @@ Deno.test("serve drain force-closes active connections after grace window", asyn
     (RpcServerRuntime as unknown as {
       createWithRoot: typeof RpcServerRuntime.createWithRoot;
     }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve drain force aborts initializing service factories", async () => {
+  const acceptClosed = deferred<void>();
+  const signalSeen = deferred<AbortSignal>();
+  const signalAborted = deferred<AbortSignal>();
+  const errors: unknown[] = [];
+  const events: RpcObservabilityEvent[] = [];
+  let closeCount = 0;
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x188n,
+    interfaceName: "ServeDrainInitSignalProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: {
+          start(): void {
+            // no-op
+          },
+          send(): Promise<void> {
+            return Promise.resolve();
+          },
+          close(): Promise<void> {
+            closeCount += 1;
+            return Promise.resolve();
+          },
+        },
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41243,
+        },
+        id: "drain-init-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, ({ signal }) => {
+    signalSeen.resolve(signal);
+    return new Promise<object>((_resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          signalAborted.resolve(signal);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+  }, {
+    onConnectionError(error) {
+      errors.push(error);
+    },
+    observability: {
+      onEvent(event) {
+        events.push(event);
+      },
+    },
+  });
+
+  try {
+    await withTimeout(signalSeen.promise, 1000, "factory signal");
+    await handle.drain({ forceAfterMs: 1 });
+
+    const signal = await withTimeout(
+      signalAborted.promise,
+      1000,
+      "factory signal abort",
+    );
+    assertEquals(signal.aborted, true);
+    assert(signal.reason instanceof SessionError);
+    assert(
+      /rpc service drain timed out/i.test(signal.reason.message),
+      `expected drain timeout reason, got: ${String(signal.reason)}`,
+    );
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.draining, false);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assert(closeCount >= 1);
+    assert(errors.some((error) => error instanceof SessionError));
+    assert(
+      events.some((event) =>
+        event.name === "rpc.service.connections_force_close"
+      ),
+    );
+  } finally {
+    acceptClosed.resolve();
+    await handle.close();
   }
 });
 

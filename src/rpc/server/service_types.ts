@@ -58,7 +58,13 @@ export interface RpcStubLifecycle {
 export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
 
 export interface RpcServiceContext {
+  /** Peer metadata and transport lifecycle for the accepted connection. */
   readonly peer: RpcPeer;
+  /**
+   * Aborts when service initialization is canceled before the runtime becomes
+   * active, for example by `connectionInitTimeoutMs` or a forced drain.
+   */
+  readonly signal: AbortSignal;
 }
 
 export type RpcServiceConstructor<TServer extends object> = new (

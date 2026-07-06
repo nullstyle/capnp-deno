@@ -330,15 +330,20 @@ the same server-side contract for browser and Deno clients:
      active runtimes.
    - `await handle.drain({ forceAfterMs })` stops accepting new upgrades, waits
      for active runtimes to close naturally, and force-closes the remaining
-     runtimes after the grace window.
+     runtimes after the grace window. If a service factory is still
+     initializing, the force path aborts its `RpcServiceContext.signal` and
+     closes the accepted transport.
    - Use `serve(..., { maxActiveConnections })` to cap active runtimes at the
      listener. Surplus accepted transports are closed immediately, reported via
      `onConnectionError`, and reflected in `handle.stats.refusedConnections`.
    - Use `serve(..., { connectionInitTimeoutMs })` or
      `serveConnection(..., { connectionInitTimeoutMs })` to bound per-connection
      service factory and runtime initialization. Listener timeouts close the
-     accepted transport, report through `onConnectionError`, and increment
-     `handle.stats.failedConnections`.
+     accepted transport, abort `RpcServiceContext.signal`, report through
+     `onConnectionError`, and increment `handle.stats.failedConnections`.
+   - Connection factories should observe `{ signal }` while doing async auth,
+     discovery, or resource acquisition so bounded shutdown can cancel setup
+     before a runtime becomes active.
 6. Fallback order and reconnect layering:
    - Browser clients should prefer `connect(...)` over
      `WebSocketTransport.connect(...)` when they want typed service stubs.

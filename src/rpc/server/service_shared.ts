@@ -27,6 +27,7 @@ export function resolveImplementationForConnection<TServer extends object>(
 export async function resolveBindingForConnection<TServer extends object>(
   implementation: RpcServiceBinding<TServer>,
   peer: RpcPeer,
+  signal: AbortSignal,
 ): Promise<{ server: TServer; disposeInstance: (() => Promise<void>) | null }> {
   if (typeof implementation === "function") {
     if (isServiceConstructor(implementation)) {
@@ -35,7 +36,7 @@ export async function resolveBindingForConnection<TServer extends object>(
       return { server, disposeInstance: toDisposer(server) };
     }
     const factory = implementation as RpcServiceFactory<TServer>;
-    const server = await factory({ peer });
+    const server = await factory({ peer, signal });
     return { server, disposeInstance: toDisposer(server) };
   }
   return { server: implementation, disposeInstance: null };

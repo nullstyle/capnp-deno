@@ -337,6 +337,10 @@ type AssertRpcCallContextSignal = Assert<
   IsEqual<RpcCallContext["signal"], AbortSignal>
 >;
 
+type AssertRpcServiceContextSignal = Assert<
+  IsEqual<RpcServiceContext["signal"], AbortSignal>
+>;
+
 type AssertStreamSendContextSignal = Assert<
   IsEqual<StreamSendContext["signal"], AbortSignal>
 >;
