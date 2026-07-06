@@ -242,6 +242,8 @@ Built-in transports:
 
 All built-in transports expose `transport.stats` snapshots for lifecycle state,
 outbound queue depth, in-flight writes/posts, and configured outbound limits.
+Client adapters expose `client.stats` snapshots for pending Return waits, local
+callback exports, next question IDs, and close state.
 
 Browser WebTransport clients must connect over `https:` and trust the server
 certificate by hash:
@@ -276,6 +278,8 @@ Low-level client adapters:
 
 - `RpcWireClient` (raw Bootstrap/Call/Finish/Release client over a started
   transport)
+- `SessionRpcClientTransport` (WASM-backed session client for in-process and
+  advanced harness flows)
 
 Typed service helpers:
 

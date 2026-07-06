@@ -82,6 +82,22 @@ export interface RpcWireClientOptions {
 }
 
 /**
+ * Operational snapshot for {@link RpcWireClient}.
+ */
+export interface RpcWireClientStats {
+  /** Whether {@link RpcWireClient.close} has been called. */
+  readonly closed: boolean;
+  /** Number of in-flight Bootstrap/Call questions waiting for Return frames. */
+  readonly pendingReturns: number;
+  /** Number of local callback capabilities currently exported by the client. */
+  readonly exportedCapabilities: number;
+  /** Question ID that will be assigned to the next Bootstrap/Call request. */
+  readonly nextQuestionId: number;
+  /** Default wait timeout in milliseconds, or `null` when calls wait indefinitely. */
+  readonly defaultTimeoutMs: number | null;
+}
+
+/**
  * Cap'n Proto RPC client adapter over a started {@link RpcTransport}.
  *
  * This adapter sends Bootstrap/Call/Finish/Release frames directly and waits
@@ -129,6 +145,27 @@ export class RpcWireClient {
         }),
       );
     });
+  }
+
+  /**
+   * Current client lifecycle and in-flight request counters.
+   *
+   * @returns A point-in-time stats snapshot suitable for logs and health checks.
+   *
+   * @example
+   * ```ts
+   * const stats = client.stats;
+   * console.log(stats.pendingReturns, stats.exportedCapabilities);
+   * ```
+   */
+  get stats(): RpcWireClientStats {
+    return {
+      closed: this.#closed,
+      pendingReturns: this.#pendingReturns.size,
+      exportedCapabilities: this.exportedCapabilityCount,
+      nextQuestionId: this.#nextQuestionId,
+      defaultTimeoutMs: this.#defaultTimeoutMs ?? null,
+    };
   }
 
   /**

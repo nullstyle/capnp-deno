@@ -91,6 +91,11 @@ Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table",
   const client = new RpcWireClient(transport, {
     interfaceId: 0x1234n,
   });
+  assertEquals(client.stats.closed, false);
+  assertEquals(client.stats.pendingReturns, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
+  assertEquals(client.stats.nextQuestionId, 1);
+  assertEquals(client.stats.defaultTimeoutMs, null);
 
   let seenQuestionId = -1;
   const callPromise = client.callRaw(
@@ -106,6 +111,8 @@ Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table",
   );
 
   await waitForSentFrames(transport, 1);
+  assertEquals(client.stats.pendingReturns, 1);
+  assertEquals(client.stats.nextQuestionId, 2);
   const call = decodeCallRequestFrame(transport.sent[0]);
   assertEquals(seenQuestionId, 1);
   assertEquals(call.questionId, 1);
@@ -131,8 +138,10 @@ Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table",
   assertEquals(result.capTable[0].tag, 1);
   assertEquals(result.capTable[0].id, 8);
   assertEquals(transport.sent.length, 1);
+  assertEquals(client.stats.pendingReturns, 0);
 
   await client.close();
+  assertEquals(client.stats.closed, true);
 });
 
 Deno.test("RpcWireClient sends early-cancel finish when a pending call aborts", async () => {
@@ -209,9 +218,15 @@ Deno.test("RpcWireClient close rejects pending waits", async () => {
 
   await waitForSentFrames(transport, 1);
   assertEquals(client.pendingReturnCount, 1);
+  assertEquals(client.stats.pendingReturns, 1);
 
   await client.close();
   assertEquals(client.pendingReturnCount, 0);
+  assertEquals(client.stats.closed, true);
+  assertEquals(client.stats.pendingReturns, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
+  assertEquals(client.stats.nextQuestionId, 2);
+  assertEquals(client.stats.defaultTimeoutMs, null);
 
   let thrown: unknown;
   try {
@@ -232,6 +247,7 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
   const client = new RpcWireClient(transport);
 
   assertEquals(client.exportedCapabilityCount, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
   const exported = client.exportCapability({
     interfaceId: 0x9000n,
     dispatch(methodId, params) {
@@ -242,6 +258,7 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
   }, { capabilityIndex: 33, referenceCount: 2 });
   assertEquals(exported.capabilityIndex, 33);
   assertEquals(client.exportedCapabilityCount, 1);
+  assertEquals(client.stats.exportedCapabilities, 1);
 
   await transport.emitInbound(encodeCallRequestFrame({
     questionId: 11,
@@ -277,9 +294,11 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
   assertEquals(releasedResponse.answerId, 12);
   assertEquals(releasedResponse.kind, "exception");
   assertEquals(client.exportedCapabilityCount, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
 
   await client.close();
   assertEquals(client.exportedCapabilityCount, 0);
+  assertEquals(client.stats.closed, true);
 });
 
 Deno.test("RpcWireClient rejects local exports after close", async () => {

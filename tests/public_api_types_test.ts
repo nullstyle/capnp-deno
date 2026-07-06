@@ -130,9 +130,13 @@ import type {
   RpcTransportAcceptor,
   RpcTransportMiddleware,
   RpcTransportStats,
+  RpcWireClient,
   RpcWireClientOptions,
+  RpcWireClientStats,
+  SessionRpcClientTransport,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
+  SessionRpcClientTransportStats,
   StreamCallFn,
   StreamSendContext,
   StreamSender,
@@ -291,8 +295,10 @@ type PublicTypeExportSmoke = {
   rpcSessionOptions: RpcSessionOptions;
   rpcTransportAcceptor: RpcTransportAcceptor;
   rpcTransport: RpcTransport;
+  rpcWireClientStats: RpcWireClientStats;
   sessionRpcClientTransportCreateOptions:
     SessionRpcClientTransportCreateOptions;
+  sessionRpcClientTransportStats: SessionRpcClientTransportStats;
   rpcTransportStats: RpcTransportStats;
   sessionRpcClientTransportOptions: SessionRpcClientTransportOptions;
   streamCallFn: StreamCallFn<number, void>;
@@ -347,6 +353,22 @@ type AssertRpcTransportStatsLimit = Assert<
 
 type AssertMessagePortTransportStats = Assert<
   IsEqual<MessagePortTransport["stats"], RpcTransportStats>
+>;
+
+type AssertRpcWireClientStatsGetter = Assert<
+  IsEqual<RpcWireClient["stats"], RpcWireClientStats>
+>;
+
+type AssertRpcWireClientStatsPendingReturns = Assert<
+  IsEqual<RpcWireClientStats["pendingReturns"], number>
+>;
+
+type AssertSessionRpcClientTransportStatsGetter = Assert<
+  IsEqual<SessionRpcClientTransport["stats"], SessionRpcClientTransportStats>
+>;
+
+type AssertSessionRpcClientTransportStatsPump = Assert<
+  IsEqual<SessionRpcClientTransportStats["responsePumpActive"], boolean>
 >;
 
 type AssertRpcClientCallOptionsCapTable = Assert<
@@ -729,6 +751,10 @@ type StaticAssertions = [
   AssertRpcTransportStatsQueuedBytes,
   AssertRpcTransportStatsLimit,
   AssertMessagePortTransportStats,
+  AssertRpcWireClientStatsGetter,
+  AssertRpcWireClientStatsPendingReturns,
+  AssertSessionRpcClientTransportStatsGetter,
+  AssertSessionRpcClientTransportStatsPump,
   AssertRpcClientCallOptionsCapTable,
   AssertRpcClientCallResultCapTable,
   AssertRpcServerCallContextCapTable,
@@ -864,8 +890,12 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 69);
+  assert(STATIC_ASSERTIONS.length === 73);
 });

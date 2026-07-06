@@ -50,7 +50,10 @@ unless you are adding a new wire protocol.
 
 Built-in TCP, WebSocket, WebTransport, and MessagePort implementations also
 expose `transport.stats` snapshots for closed state, drain activity, outbound
-queue depth, in-flight writes/posts, and configured outbound limits.
+queue depth, in-flight writes/posts, and configured outbound limits. Client
+adapters (`RpcWireClient` and `SessionRpcClientTransport`) expose `client.stats`
+snapshots for pending Return waits, local callback exports, next question IDs,
+and close state.
 
 ### `TcpTransport`
 
@@ -105,7 +108,9 @@ generated clients that pass local callback implementations as interface
 parameters; callback frames are dispatched through a local bridge while the
 client waits for the original result. Generated `-> stream` sender helpers can
 also use this transport; they are application-level RPC call flow control, not
-transport byte streams.
+transport byte streams. `client.stats` includes the underlying session state,
+pending/queued Return counts, local callback export count, and whether the
+response pump is active.
 
 ### `InMemoryRpcHarnessTransport`
 
@@ -127,7 +132,8 @@ TCP, WebSocket, or WebTransport without running a local client-side WASM peer.
 It also supports `exportCapability(...)`, so generated clients can pass local
 callback implementations over real network transports. Generated `-> stream`
 sender helpers work over this adapter as ordinary RPC calls with bounded
-in-flight windows.
+in-flight windows. `client.stats` reports pending Return waits, exported local
+callbacks, close state, and the next question ID.
 
 ### `RpcServerRuntime`
 

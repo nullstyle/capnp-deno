@@ -476,6 +476,10 @@ been closed.
   `transport.stats.queuedOutboundFrames`, and
   `transport.stats.inflightOutboundFrames` on built-in transports to distinguish
   shutdown from outbound saturation.
+- Inspect `client.stats.pendingReturns`, `client.stats.exportedCapabilities`,
+  and, for `SessionRpcClientTransport`, `client.stats.responsePumpActive` to
+  distinguish queued bytes from RPC waits that are still expecting Return or
+  callback traffic.
 
 #### `TcpTransport already started` / `WebSocketTransport already started`
 

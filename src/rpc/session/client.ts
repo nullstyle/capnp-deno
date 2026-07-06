@@ -382,6 +382,32 @@ export interface SessionRpcClientTransportCreateOptions
   startSession?: boolean;
 }
 
+/**
+ * Operational snapshot for {@link SessionRpcClientTransport}.
+ */
+export interface SessionRpcClientTransportStats {
+  /** Whether {@link SessionRpcClientTransport.close} has been called. */
+  readonly closed: boolean;
+  /** Whether the underlying {@link RpcSession} has started. */
+  readonly sessionStarted: boolean;
+  /** Whether the underlying {@link RpcSession} has closed. */
+  readonly sessionClosed: boolean;
+  /** Number of question IDs currently expecting Return frames. */
+  readonly expectedReturns: number;
+  /** Number of pending Return waiters currently retained by this transport. */
+  readonly pendingReturns: number;
+  /** Number of Return frames queued before a waiter consumed them. */
+  readonly queuedReturns: number;
+  /** Number of local callback capabilities currently exported by this transport. */
+  readonly exportedCapabilities: number;
+  /** Whether the response pump is currently waiting for inbound frames. */
+  readonly responsePumpActive: boolean;
+  /** Question ID that will be assigned to the next Bootstrap/Call request. */
+  readonly nextQuestionId: number;
+  /** Default wait timeout in milliseconds, or `null` when calls wait indefinitely. */
+  readonly defaultTimeoutMs: number | null;
+}
+
 interface PendingReturnWaiter {
   resolve: (message: RpcReturnMessage) => void;
   reject: (error: unknown) => void;
@@ -620,6 +646,32 @@ export class SessionRpcClientTransport {
    */
   get closed(): boolean {
     return this.#closed;
+  }
+
+  /**
+   * Current client/session lifecycle and in-flight request counters.
+   *
+   * @returns A point-in-time stats snapshot suitable for logs and health checks.
+   *
+   * @example
+   * ```ts
+   * const stats = client.stats;
+   * console.log(stats.pendingReturns, stats.queuedReturns);
+   * ```
+   */
+  get stats(): SessionRpcClientTransportStats {
+    return {
+      closed: this.#closed,
+      sessionStarted: this.session.started,
+      sessionClosed: this.session.closed,
+      expectedReturns: this.#expectedReturns.size,
+      pendingReturns: this.pendingReturnCount,
+      queuedReturns: this.queuedReturnCount,
+      exportedCapabilities: this.exportedCapabilityCount,
+      responsePumpActive: this.#responsePump !== null,
+      nextQuestionId: this.#nextQuestionId,
+      defaultTimeoutMs: this.#defaultTimeoutMs ?? null,
+    };
   }
 
   /**

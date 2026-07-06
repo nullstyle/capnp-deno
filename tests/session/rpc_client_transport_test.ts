@@ -266,19 +266,44 @@ Deno.test("SessionRpcClientTransport close rejects pending waits and clears reta
   const session = new RpcSession(peer, transport);
   const client = new SessionRpcClientTransport(session, transport, {
     interfaceId: 0x1234n,
+    defaultTimeoutMs: 1_000,
   });
+  assertEquals(client.stats.closed, false);
+  assertEquals(client.stats.sessionStarted, false);
+  assertEquals(client.stats.sessionClosed, false);
+  assertEquals(client.stats.expectedReturns, 0);
+  assertEquals(client.stats.pendingReturns, 0);
+  assertEquals(client.stats.queuedReturns, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
+  assertEquals(client.stats.responsePumpActive, false);
+  assertEquals(client.stats.nextQuestionId, 1);
+  assertEquals(client.stats.defaultTimeoutMs, 1_000);
 
   const pending = client.callRaw(
     { capabilityIndex: 0 },
     1,
     EMPTY_STRUCT_MESSAGE,
+    { timeoutMs: 5_000 },
   );
 
   await waitForCondition(
-    () => client.expectedReturnCount === 1 && client.pendingReturnCount === 1,
+    () =>
+      client.stats.expectedReturns === 1 &&
+      client.stats.pendingReturns === 1 &&
+      client.stats.responsePumpActive,
     "pending rpc client return",
   );
   assertEquals(client.queuedReturnCount, 0);
+  assertEquals(client.stats.closed, false);
+  assertEquals(client.stats.sessionStarted, true);
+  assertEquals(client.stats.sessionClosed, false);
+  assertEquals(client.stats.expectedReturns, 1);
+  assertEquals(client.stats.pendingReturns, 1);
+  assertEquals(client.stats.queuedReturns, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
+  assertEquals(client.stats.responsePumpActive, true);
+  assertEquals(client.stats.nextQuestionId, 2);
+  assertEquals(client.stats.defaultTimeoutMs, 1_000);
 
   const exported = client.exportCapability({
     interfaceId: 0x9000n,
@@ -288,6 +313,7 @@ Deno.test("SessionRpcClientTransport close rejects pending waits and clears reta
   });
   assertEquals(exported.capabilityIndex, 55);
   assertEquals(client.exportedCapabilityCount, 1);
+  assertEquals(client.stats.exportedCapabilities, 1);
 
   await client.close();
   assertEquals(client.closed, true);
@@ -296,6 +322,16 @@ Deno.test("SessionRpcClientTransport close rejects pending waits and clears reta
   assertEquals(client.pendingReturnCount, 0);
   assertEquals(client.queuedReturnCount, 0);
   assertEquals(client.exportedCapabilityCount, 0);
+  assertEquals(client.stats.closed, true);
+  assertEquals(client.stats.sessionStarted, true);
+  assertEquals(client.stats.sessionClosed, true);
+  assertEquals(client.stats.expectedReturns, 0);
+  assertEquals(client.stats.pendingReturns, 0);
+  assertEquals(client.stats.queuedReturns, 0);
+  assertEquals(client.stats.exportedCapabilities, 0);
+  assertEquals(client.stats.responsePumpActive, false);
+  assertEquals(client.stats.nextQuestionId, 2);
+  assertEquals(client.stats.defaultTimeoutMs, 1_000);
 
   let thrown: unknown;
   try {

@@ -103,6 +103,7 @@ export {
   SessionRpcClientTransport,
   type SessionRpcClientTransportCreateOptions,
   type SessionRpcClientTransportOptions,
+  type SessionRpcClientTransportStats,
 } from "./rpc/session/client.ts";
 
 // === RPC Server ===
@@ -205,6 +206,7 @@ export {
 export {
   RpcWireClient,
   type RpcWireClientOptions,
+  type RpcWireClientStats,
 } from "./rpc/rpc_wire_client.ts";
 
 // === Resilience (Connection Pool, Circuit Breaker, Reconnect) ===
