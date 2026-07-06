@@ -324,6 +324,11 @@ cancel queued acquires or override the pool default acquire timeout. Connection
 factories receive `{ signal }` and should pass it into network dials when
 possible.
 
+`ReconnectingRpcClientTransport.stats` exposes connection attempts, reconnect
+attempts, retry outcomes, queued operations, and the current bootstrap
+capability index so long-lived clients can publish health and saturation
+signals.
+
 `CircuitBreaker.stats` exposes state, failure counts, cooldown remaining, and
 half-open probe activity for health checks and metrics. `onStateChange` is an
 observer hook only; thrown observer errors are isolated from breaker decisions.

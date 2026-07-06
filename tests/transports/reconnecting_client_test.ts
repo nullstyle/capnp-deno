@@ -4,7 +4,7 @@ import {
   SessionError,
   TransportError,
 } from "../../src/advanced.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 const EMPTY = new Uint8Array();
 
@@ -66,6 +66,105 @@ Deno.test("ReconnectingRpcClientTransport retries dropped bootstrap-cap calls wi
     );
     assertEquals(transport.bootstrapCapability?.capabilityIndex, 20);
   } finally {
+    await transport.close();
+  }
+});
+
+Deno.test("ReconnectingRpcClientTransport stats track reconnect and retry lifecycle", async () => {
+  let connectCount = 0;
+
+  const client1: RpcClientTransportLike = {
+    bootstrap: () => Promise.resolve({ capabilityIndex: 10 }),
+    call: () => Promise.reject(new TransportError("connection dropped")),
+    close: () => Promise.resolve(),
+  };
+
+  const client2: RpcClientTransportLike = {
+    bootstrap: () => Promise.resolve({ capabilityIndex: 20 }),
+    call: () => Promise.resolve(new Uint8Array([0xbb])),
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => {
+      connectCount += 1;
+      return Promise.resolve(connectCount === 1 ? client1 : client2);
+    },
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    assertEquals(transport.stats.closed, false);
+    assertEquals(transport.stats.connected, false);
+    assertEquals(transport.stats.connectAttempts, 0);
+    assertEquals(transport.stats.retryAttempts, 0);
+
+    const bootstrap = await transport.bootstrap();
+    assertEquals(bootstrap.capabilityIndex, 10);
+    assertEquals(transport.stats.connected, true);
+    assertEquals(transport.stats.bootstrapCapabilityIndex, 10);
+    assertEquals(transport.stats.connectAttempts, 1);
+    assertEquals(transport.stats.successfulConnects, 1);
+
+    const response = await transport.call(bootstrap, 0, EMPTY);
+    assertEquals(response[0], 0xbb);
+    assertEquals(transport.stats.bootstrapCapabilityIndex, 20);
+    assertEquals(transport.stats.connectAttempts, 2);
+    assertEquals(transport.stats.successfulConnects, 2);
+    assertEquals(transport.stats.reconnectAttempts, 1);
+    assertEquals(transport.stats.reconnectSuccesses, 1);
+    assertEquals(transport.stats.reconnectFailures, 0);
+    assertEquals(transport.stats.retryAttempts, 1);
+    assertEquals(transport.stats.retrySuccesses, 1);
+    assertEquals(transport.stats.retryFailures, 0);
+  } finally {
+    await transport.close();
+  }
+
+  assertEquals(transport.stats.closed, true);
+  assertEquals(transport.stats.connected, false);
+  assertEquals(transport.stats.bootstrapCapabilityIndex, null);
+});
+
+Deno.test("ReconnectingRpcClientTransport stats expose serialized operation lane", async () => {
+  const releaseCall = deferred<void>();
+  const firstCallStarted = deferred<void>();
+  let callCount = 0;
+  const client: RpcClientTransportLike = {
+    call: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        firstCallStarted.resolve();
+        await releaseCall.promise;
+      }
+      return new Uint8Array([callCount]);
+    },
+    close: () => Promise.resolve(),
+  };
+
+  const transport = new ReconnectingRpcClientTransport({
+    connect: () => Promise.resolve(client),
+    reconnect: reconnectOptions(),
+  });
+
+  try {
+    const first = transport.call({ capabilityIndex: 1 }, 0, EMPTY);
+    await withTimeout(firstCallStarted.promise, 1000, "first call started");
+    assertEquals(transport.stats.operationInFlight, true);
+    assertEquals(transport.stats.queuedOperations, 0);
+
+    const second = transport.call({ capabilityIndex: 1 }, 0, EMPTY);
+    await Promise.resolve();
+    assertEquals(transport.stats.operationInFlight, true);
+    assertEquals(transport.stats.queuedOperations, 1);
+
+    releaseCall.resolve();
+    assertEquals((await first)[0], 1);
+    assertEquals((await second)[0], 2);
+    assertEquals(transport.stats.operationInFlight, false);
+    assertEquals(transport.stats.queuedOperations, 0);
+  } finally {
+    releaseCall.resolve();
     await transport.close();
   }
 });
@@ -638,6 +737,12 @@ Deno.test("ReconnectingRpcClientTransport surfaces reconnect close failures", as
     );
     assertEquals(connectCount, 1);
     assertEquals(closeCalls, 1);
+    assertEquals(transport.stats.reconnectAttempts, 1);
+    assertEquals(transport.stats.reconnectSuccesses, 0);
+    assertEquals(transport.stats.reconnectFailures, 1);
+    assertEquals(transport.stats.retryAttempts, 1);
+    assertEquals(transport.stats.retryFailures, 1);
+    assertEquals(transport.stats.connected, false);
   } finally {
     await transport.close();
   }
@@ -720,6 +825,11 @@ Deno.test("ReconnectingRpcClientTransport normalizes retry-call failures after r
       `expected normalized retry failure, got: ${String(thrown)}`,
     );
     assertEquals(connectCount, 2);
+    assertEquals(transport.stats.reconnectAttempts, 1);
+    assertEquals(transport.stats.reconnectSuccesses, 1);
+    assertEquals(transport.stats.retryAttempts, 1);
+    assertEquals(transport.stats.retrySuccesses, 0);
+    assertEquals(transport.stats.retryFailures, 1);
   } finally {
     await transport.close();
   }

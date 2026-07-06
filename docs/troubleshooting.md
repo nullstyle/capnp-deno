@@ -549,6 +549,11 @@ allows.
 **What it means:** The reconnection attempt was cancelled (e.g., via an abort
 signal or because `close()` was called).
 
+When using `ReconnectingRpcClientTransport`, inspect
+`client.stats.reconnectAttempts`, `client.stats.retryFailures`,
+`client.stats.queuedOperations`, and `client.stats.operationInFlight` to
+separate transport churn from serialized client-side saturation.
+
 #### `connection pool is at capacity`
 
 **What it means:** All slots in the connection pool are in use and no new

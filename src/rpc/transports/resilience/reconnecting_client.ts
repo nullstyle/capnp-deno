@@ -116,6 +116,40 @@ export interface ReconnectCapabilityRemapContext {
   error: unknown;
 }
 
+/**
+ * Snapshot of a {@link ReconnectingRpcClientTransport}'s lifecycle counters.
+ */
+export interface ReconnectingRpcClientTransportStats {
+  /** Whether the transport has been permanently closed. */
+  readonly closed: boolean;
+  /** Whether an underlying client transport is currently connected. */
+  readonly connected: boolean;
+  /** Whether a reconnect operation is currently in progress. */
+  readonly reconnecting: boolean;
+  /** Number of queued operations waiting for the serialized operation lane. */
+  readonly queuedOperations: number;
+  /** Whether an operation is currently running in the serialized lane. */
+  readonly operationInFlight: boolean;
+  /** Current bootstrap capability index, when one has been established. */
+  readonly bootstrapCapabilityIndex: number | null;
+  /** Logical connection attempts started by this wrapper. */
+  readonly connectAttempts: number;
+  /** Logical connection attempts that succeeded. */
+  readonly successfulConnects: number;
+  /** Reconnect sequences started after an established connection failed. */
+  readonly reconnectAttempts: number;
+  /** Reconnect sequences that established a replacement transport. */
+  readonly reconnectSuccesses: number;
+  /** Reconnect sequences that failed before replacement transport activation. */
+  readonly reconnectFailures: number;
+  /** Failed calls selected for retry after a reconnectable error. */
+  readonly retryAttempts: number;
+  /** Retried calls that completed successfully after reconnect/remap. */
+  readonly retrySuccesses: number;
+  /** Retried calls that still failed after reconnect/remap. */
+  readonly retryFailures: number;
+}
+
 function cloneCapability(
   capability: RpcCapabilityPointer,
 ): RpcCapabilityPointer {
@@ -175,6 +209,17 @@ export class ReconnectingRpcClientTransport {
   #closed = false;
   #bootstrapCapability: RpcCapabilityPointer | null = null;
   #opChain: Promise<void> = Promise.resolve();
+  #reconnecting = false;
+  #queuedOperations = 0;
+  #operationInFlight = false;
+  #connectAttempts = 0;
+  #successfulConnects = 0;
+  #reconnectAttempts = 0;
+  #reconnectSuccesses = 0;
+  #reconnectFailures = 0;
+  #retryAttempts = 0;
+  #retrySuccesses = 0;
+  #retryFailures = 0;
 
   constructor(options: ReconnectingRpcClientTransportOptions) {
     this.options = options;
@@ -188,6 +233,27 @@ export class ReconnectingRpcClientTransport {
     return this.#bootstrapCapability
       ? cloneCapability(this.#bootstrapCapability)
       : null;
+  }
+
+  /** Snapshot of reconnect, retry, and operation-lane counters. */
+  get stats(): ReconnectingRpcClientTransportStats {
+    return {
+      closed: this.#closed,
+      connected: this.#client !== null,
+      reconnecting: this.#reconnecting,
+      queuedOperations: this.#queuedOperations,
+      operationInFlight: this.#operationInFlight,
+      bootstrapCapabilityIndex: this.#bootstrapCapability?.capabilityIndex ??
+        null,
+      connectAttempts: this.#connectAttempts,
+      successfulConnects: this.#successfulConnects,
+      reconnectAttempts: this.#reconnectAttempts,
+      reconnectSuccesses: this.#reconnectSuccesses,
+      reconnectFailures: this.#reconnectFailures,
+      retryAttempts: this.#retryAttempts,
+      retrySuccesses: this.#retrySuccesses,
+      retryFailures: this.#retryFailures,
+    };
   }
 
   /**
@@ -238,25 +304,33 @@ export class ReconnectingRpcClientTransport {
           throw normalized;
         }
 
-        const previousBootstrap = this.#bootstrapCapability;
-        await this.#reconnect();
-        const reconnected = await this.#ensureConnected();
-
-        const remappedCap = await this.#mapCapabilityAfterReconnect(
-          callCap,
-          previousBootstrap,
-          methodId,
-          normalized,
-        );
+        this.#retryAttempts++;
         try {
-          return await reconnected.call(
-            remappedCap,
+          const previousBootstrap = this.#bootstrapCapability;
+          await this.#reconnect();
+          const reconnected = await this.#ensureConnected();
+
+          const remappedCap = await this.#mapCapabilityAfterReconnect(
+            callCap,
+            previousBootstrap,
             methodId,
-            params,
-            options,
+            normalized,
           );
-        } catch (retryError) {
-          throw normalizeSessionError(retryError, "rpc call retry failed");
+          try {
+            const response = await reconnected.call(
+              remappedCap,
+              methodId,
+              params,
+              options,
+            );
+            this.#retrySuccesses++;
+            return response;
+          } catch (retryError) {
+            throw normalizeSessionError(retryError, "rpc call retry failed");
+          }
+        } catch (retryPathError) {
+          this.#retryFailures++;
+          throw retryPathError;
         }
       }
     });
@@ -342,9 +416,10 @@ export class ReconnectingRpcClientTransport {
     await this.#enqueue(async () => {
       if (this.#closed) return;
       this.#closed = true;
-      await this.#closeClient(this.#client);
+      const client = this.#client;
       this.#client = null;
       this.#bootstrapCapability = null;
+      await this.#closeClient(client);
     });
   }
 
@@ -437,10 +512,12 @@ export class ReconnectingRpcClientTransport {
     this.#assertOpen();
     if (this.#client) return this.#client;
     try {
+      this.#connectAttempts++;
       this.#client = await connectWithReconnect(
         this.options.connect,
         this.options.reconnect,
       );
+      this.#successfulConnects++;
     } catch (error) {
       throw normalizeSessionError(error, "rpc client connect failed");
     }
@@ -448,10 +525,21 @@ export class ReconnectingRpcClientTransport {
   }
 
   async #reconnect(): Promise<void> {
-    await this.#closeClient(this.#client);
-    this.#client = null;
-    this.#bootstrapCapability = null;
-    await this.#ensureConnected();
+    this.#reconnectAttempts++;
+    this.#reconnecting = true;
+    try {
+      const previousClient = this.#client;
+      this.#client = null;
+      this.#bootstrapCapability = null;
+      await this.#closeClient(previousClient);
+      await this.#ensureConnected();
+      this.#reconnectSuccesses++;
+    } catch (error) {
+      this.#reconnectFailures++;
+      throw error;
+    } finally {
+      this.#reconnecting = false;
+    }
   }
 
   #shouldReconnect(error: unknown): boolean {
@@ -482,10 +570,14 @@ export class ReconnectingRpcClientTransport {
     this.#opChain = new Promise<void>((resolve) => {
       release = resolve;
     });
+    this.#queuedOperations++;
     await gate;
+    this.#queuedOperations--;
+    this.#operationInFlight = true;
     try {
       return await op();
     } finally {
+      this.#operationInFlight = false;
       release();
     }
   }

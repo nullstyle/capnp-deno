@@ -237,6 +237,7 @@ export {
   type ReconnectCapabilityRemapContext,
   ReconnectingRpcClientTransport,
   type ReconnectingRpcClientTransportOptions,
+  type ReconnectingRpcClientTransportStats,
   type RpcCapabilityPointer,
   type RpcClientTransportLike,
 } from "./rpc/transports/resilience/reconnecting_client.ts";

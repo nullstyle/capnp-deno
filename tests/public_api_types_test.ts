@@ -44,6 +44,7 @@ import type {
   MiddlewareResult,
   ReconnectCapabilityRemapContext,
   ReconnectingRpcClientTransportOptions,
+  ReconnectingRpcClientTransportStats,
   ReconnectPolicy,
   ReconnectPolicyContext,
   ReconnectRetryInfo,
@@ -209,6 +210,7 @@ type PublicTypeExportSmoke = {
   reconnectPolicyContext: ReconnectPolicyContext;
   reconnectRetryInfo: ReconnectRetryInfo;
   reconnectingRpcClientTransportOptions: ReconnectingRpcClientTransportOptions;
+  reconnectingRpcClientTransportStats: ReconnectingRpcClientTransportStats;
   rpcPeerAddress: RpcPeerAddress;
   rpcPeerOptions: RpcPeerOptions;
   rpcBootstrapRequest: RpcBootstrapRequest;
@@ -400,6 +402,10 @@ type ExpectedRemapReturn =
   | Promise<RpcCapabilityPointer | null | undefined>;
 type AssertRemapReturnAssignable = Assert<
   IsAssignable<RemapReturn, ExpectedRemapReturn>
+>;
+
+type AssertReconnectingClientStatsClosed = Assert<
+  IsEqual<ReconnectingRpcClientTransportStats["closed"], boolean>
 >;
 
 type AssertReconnectOnRetrySignature = Assert<
@@ -695,6 +701,7 @@ type StaticAssertions = [
   AssertRpcServerDispatchInterface,
   AssertRemapCallbackContext,
   AssertRemapReturnAssignable,
+  AssertReconnectingClientStatsClosed,
   AssertReconnectOnRetrySignature,
   AssertCreateSessionAutoStart,
   AssertSessionCreateAutoStart,
@@ -807,8 +814,9 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 61);
+  assert(STATIC_ASSERTIONS.length === 62);
 });
