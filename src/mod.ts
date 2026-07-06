@@ -268,6 +268,8 @@ export {
 
 export {
   RpcConnectionPool,
+  type RpcConnectionPoolAcquireOptions,
+  type RpcConnectionPoolConnectContext,
   type RpcConnectionPoolOptions,
   type RpcConnectionPoolStats,
   type RpcConnectionPoolWarmupStats,

@@ -318,6 +318,12 @@ Resilience and runtime helpers:
 - `createStreamSender(...)` for application-level RPC `-> stream` call flow
   control
 
+`RpcConnectionPool.acquire({ signal, timeoutMs })` and
+`withConnection(pool, fn, { signal, timeoutMs })` let request-scoped callers
+cancel queued acquires or override the pool default acquire timeout. Connection
+factories receive `{ signal }` and should pass it into network dials when
+possible.
+
 Middleware and observability:
 
 - `MiddlewareTransport`

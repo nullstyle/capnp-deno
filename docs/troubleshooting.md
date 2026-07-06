@@ -558,6 +558,28 @@ connections can be created.
 
 - Increase the pool's maximum size, or release idle connections.
 
+#### `connection pool acquire timed out after Nms`
+
+**What it means:** The pool was exhausted and no connection was released before
+the pool default or per-acquire timeout elapsed.
+
+**How to fix:**
+
+- Release pooled connections promptly, usually with `withConnection(...)`.
+- Increase `maxConnections` or set a larger per-call
+  `pool.acquire({ timeoutMs })` budget for known slow paths.
+
+#### `connection pool acquire aborted`
+
+**What it means:** The caller's `AbortSignal` fired while waiting for or
+creating a pooled connection.
+
+**How to fix:**
+
+- Check the owning request/controller timeout.
+- If your connection factory performs a dial, observe the `{ signal }` argument
+  so canceled acquires stop network work promptly.
+
 ### Circuit Breaker
 
 #### `circuit breaker is OPEN`

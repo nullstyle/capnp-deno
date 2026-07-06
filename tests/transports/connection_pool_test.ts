@@ -4,7 +4,7 @@ import {
   SessionError,
   withConnection,
 } from "../../src/advanced.ts";
-import { assert, assertEquals, withTimeout } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 const EMPTY = new Uint8Array();
 
@@ -143,6 +143,130 @@ Deno.test("RpcConnectionPool acquire times out when pool is exhausted", async ()
     assertEquals(pool.stats.pending, 0);
     pool.release(conn);
   } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool per-acquire timeout overrides pool default", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 1,
+    acquireTimeoutMs: 5_000,
+  });
+
+  try {
+    const conn = await pool.acquire();
+    const startedAt = Date.now();
+    let thrown: unknown;
+    try {
+      await pool.acquire({ timeoutMs: 10 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /acquire timed out after 10ms/i.test(thrown.message),
+      `expected per-acquire timeout SessionError, got: ${String(thrown)}`,
+    );
+    assert(
+      Date.now() - startedAt < 1_000,
+      "expected per-acquire timeout to beat pool default",
+    );
+    assertEquals(pool.stats.pending, 0);
+    pool.release(conn);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool aborts queued acquire and skips it on release", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 1,
+    acquireTimeoutMs: 5_000,
+  });
+
+  try {
+    const held = await pool.acquire();
+    const controller = new AbortController();
+    const pending = pool.acquire({ signal: controller.signal });
+    assertEquals(pool.stats.pending, 1);
+
+    controller.abort("request canceled");
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+    assertEquals((thrown as SessionError).cause, "request canceled");
+    assertEquals(pool.stats.pending, 0);
+
+    pool.release(held);
+    assertEquals(pool.stats.idle, 1);
+    assertEquals(pool.stats.active, 0);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool forwards abort signal to connection factory and closes late connections", async () => {
+  const connectStarted = deferred<AbortSignal>();
+  const releaseConnect = deferred<void>();
+  const closed = deferred<void>();
+  const controller = new AbortController();
+  let factorySignal: AbortSignal | undefined;
+
+  const pool = new RpcConnectionPool(async ({ signal }) => {
+    factorySignal = signal;
+    connectStarted.resolve(signal);
+    await releaseConnect.promise;
+    return {
+      call: () => Promise.resolve(EMPTY),
+      close: () => {
+        closed.resolve();
+        return Promise.resolve();
+      },
+    };
+  }, { maxConnections: 1 });
+
+  try {
+    const pending = pool.acquire({ signal: controller.signal });
+    const signal = await withTimeout(
+      connectStarted.promise,
+      1_000,
+      "connect started",
+    );
+    assertEquals(signal.aborted, false);
+
+    controller.abort(new Error("dial budget expired"));
+    assert(factorySignal !== undefined && factorySignal.aborted);
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+
+    releaseConnect.resolve();
+    await withTimeout(closed.promise, 1_000, "late connection close");
+    assertEquals(pool.stats.active, 0);
+    assertEquals(pool.stats.idle, 0);
+  } finally {
+    releaseConnect.resolve();
     await pool.close();
   }
 });
@@ -377,6 +501,45 @@ Deno.test("withConnection releases connection on error", async () => {
       `expected original error to propagate, got: ${String(thrown)}`,
     );
     assertEquals(pool.stats.active, 0);
+    assertEquals(pool.stats.idle, 1);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("withConnection forwards acquire options", async () => {
+  const factory = makeConnFactory();
+  const pool = new RpcConnectionPool(factory, {
+    maxConnections: 1,
+    acquireTimeoutMs: 5_000,
+  });
+
+  try {
+    const held = await pool.acquire();
+    const controller = new AbortController();
+    const pending = withConnection(
+      pool,
+      () => {
+        throw new Error("callback should not run");
+      },
+      { signal: controller.signal },
+    );
+    assertEquals(pool.stats.pending, 1);
+    controller.abort("request canceled");
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+    pool.release(held);
+    assertEquals(pool.stats.pending, 0);
     assertEquals(pool.stats.idle, 1);
   } finally {
     await pool.close();

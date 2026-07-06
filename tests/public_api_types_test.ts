@@ -55,6 +55,8 @@ import type {
   RpcClientCallOptions,
   RpcClientCallResult,
   RpcClientTransportLike,
+  RpcConnectionPoolAcquireOptions,
+  RpcConnectionPoolConnectContext,
   RpcConnectionPoolOptions,
   RpcConnectionPoolStats,
   RpcDebugEvent,
@@ -213,6 +215,8 @@ type PublicTypeExportSmoke = {
   rpcClientCallOptions: RpcClientCallOptions;
   rpcClientCallResult: RpcClientCallResult;
   rpcClientTransportLike: RpcClientTransportLike;
+  rpcConnectionPoolAcquireOptions: RpcConnectionPoolAcquireOptions;
+  rpcConnectionPoolConnectContext: RpcConnectionPoolConnectContext;
   rpcConnectionPoolOptions: RpcConnectionPoolOptions;
   rpcConnectionPoolStats: RpcConnectionPoolStats;
   rpcDebugEvent: RpcDebugEvent;
@@ -419,6 +423,14 @@ type AssertClientCreateStartSession = Assert<
 
 type AssertRpcConnectionPoolOptionsMaxConnections = Assert<
   IsEqual<RpcConnectionPoolOptions["maxConnections"], number | undefined>
+>;
+
+type AssertRpcConnectionPoolAcquireSignal = Assert<
+  IsEqual<RpcConnectionPoolAcquireOptions["signal"], AbortSignal | undefined>
+>;
+
+type AssertRpcConnectionPoolConnectContextSignal = Assert<
+  IsEqual<RpcConnectionPoolConnectContext["signal"], AbortSignal>
 >;
 
 type AssertRpcConnectionPoolStatsTotal = Assert<
@@ -655,6 +667,7 @@ type StaticAssertions = [
   AssertRpcClientCallResultCapTable,
   AssertRpcServerCallContextCapTable,
   AssertRpcCallContextSignal,
+  AssertRpcServiceContextSignal,
   AssertStreamSendContextSignal,
   AssertStreamSenderGenericSend,
   AssertStreamSenderCancel,
@@ -666,6 +679,8 @@ type StaticAssertions = [
   AssertSessionCreateAutoStart,
   AssertClientCreateStartSession,
   AssertRpcConnectionPoolOptionsMaxConnections,
+  AssertRpcConnectionPoolAcquireSignal,
+  AssertRpcConnectionPoolConnectContextSignal,
   AssertRpcConnectionPoolStatsTotal,
   AssertCreateRpcDebugTracerReturn,
   AssertRpcDebugTracerRegisterSchema,
@@ -764,8 +779,11 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 56);
+  assert(STATIC_ASSERTIONS.length === 59);
 });

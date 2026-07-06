@@ -56,6 +56,35 @@ export interface RpcConnectionPoolOptions {
 }
 
 /**
+ * Per-acquire options for {@link RpcConnectionPool.acquire}.
+ */
+export interface RpcConnectionPoolAcquireOptions {
+  /**
+   * Optional abort signal that cancels this acquire attempt. If the pool is
+   * creating a new connection, the signal is also forwarded to the connection
+   * factory.
+   */
+  signal?: AbortSignal;
+  /**
+   * Timeout in milliseconds for this acquire attempt. Defaults to the pool's
+   * `acquireTimeoutMs`.
+   */
+  timeoutMs?: number;
+}
+
+/**
+ * Context passed to a {@link RpcConnectionPool} connection factory.
+ */
+export interface RpcConnectionPoolConnectContext {
+  /**
+   * Abort signal for the connection attempt. Factories that perform network
+   * dialing should observe this signal when possible so canceled acquires do
+   * not leave long-running connection attempts behind.
+   */
+  signal: AbortSignal;
+}
+
+/**
  * Pool statistics returned by {@link RpcConnectionPool.stats}.
  */
 export interface RpcConnectionPoolStats {
@@ -91,12 +120,35 @@ interface IdleEntry {
 interface PendingAcquire {
   resolve: (conn: RpcClientTransportLike) => void;
   reject: (error: unknown) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer?: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
   /** Whether this entry has already been resolved or rejected. */
   settled: boolean;
 }
 
 const DEFAULT_CLOSE_WARMUP_SETTLE_MS = 25;
+
+function normalizeAcquireTimeoutMs(
+  value: number | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+  assertNonNegativeFinite(value, "timeoutMs");
+  return value;
+}
+
+function relayAbort(
+  source: AbortSignal,
+  target: AbortController,
+): () => void {
+  if (source.aborted) {
+    target.abort(source.reason);
+    return () => {};
+  }
+  const onAbort = (): void => target.abort(source.reason);
+  source.addEventListener("abort", onAbort, { once: true });
+  return () => source.removeEventListener("abort", onAbort);
+}
 
 /**
  * A connection pool for managing multiple RPC client transport connections.
@@ -104,7 +156,8 @@ const DEFAULT_CLOSE_WARMUP_SETTLE_MS = 25;
  * The pool lazily creates connections up to the configured maximum, reuses
  * idle connections, and closes connections that have been idle for longer
  * than `idleTimeoutMs`. When the pool is at capacity, {@link acquire} will
- * block until a connection is released or `acquireTimeoutMs` is exceeded.
+ * block until a connection is released, `acquireTimeoutMs` is exceeded, or
+ * the per-acquire abort signal fires.
  *
  * On construction, if `minConnections` is greater than 0, the pool will
  * pre-warm by creating that many connections eagerly. Warm-up is best-effort:
@@ -132,7 +185,9 @@ const DEFAULT_CLOSE_WARMUP_SETTLE_MS = 25;
  * ```
  */
 export class RpcConnectionPool implements Disposable, AsyncDisposable {
-  readonly #connect: () => Promise<RpcClientTransportLike>;
+  readonly #connect: (
+    context: RpcConnectionPoolConnectContext,
+  ) => Promise<RpcClientTransportLike>;
   readonly #minConnections: number;
   readonly #maxConnections: number;
   readonly #idleTimeoutMs: number;
@@ -160,7 +215,9 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
   #warmupClosePromises: Promise<void>[] = [];
 
   constructor(
-    connect: () => Promise<RpcClientTransportLike>,
+    connect: (
+      context: RpcConnectionPoolConnectContext,
+    ) => Promise<RpcClientTransportLike>,
     options: RpcConnectionPoolOptions = {},
   ) {
     this.#connect = connect;
@@ -249,11 +306,17 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
    * has capacity, a new connection is created. Otherwise the call blocks until
    * a connection is released or the acquire timeout expires.
    *
+   * @param options - Optional per-acquire timeout and abort signal.
    * @returns A pooled connection.
    * @throws {SessionError} If the pool is closed, the acquire times out, or
    *   connection creation fails.
    */
-  async acquire(): Promise<RpcClientTransportLike> {
+  async acquire(
+    options: RpcConnectionPoolAcquireOptions = {},
+  ): Promise<RpcClientTransportLike> {
+    const timeoutMs = normalizeAcquireTimeoutMs(options.timeoutMs) ??
+      this.#acquireTimeoutMs;
+    this.#throwIfAcquireAborted(options.signal);
     if (this.#closed) {
       throw new SessionError("connection pool is closed");
     }
@@ -286,13 +349,14 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
         }
       }
 
+      this.#throwIfAcquireAborted(options.signal);
       this.#active.add(entry.conn);
       return entry.conn;
     }
 
     // Try to create a new connection if under the limit.
     if (this.#canCreateConnection()) {
-      return await this.#createConnection();
+      return await this.#createConnection(options.signal);
     }
 
     // At capacity -- wait for a release.
@@ -300,19 +364,34 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       const entry: PendingAcquire = {
         resolve,
         reject,
-        timer: setTimeout(() => {
-          if (entry.settled) return;
-          entry.settled = true;
-          this.#pendingSettled++;
-          this.#compactPending();
-          reject(
-            new SessionError(
-              `connection pool acquire timed out after ${this.#acquireTimeoutMs}ms`,
-            ),
-          );
-        }, this.#acquireTimeoutMs),
+        signal: options.signal,
         settled: false,
       };
+      if (timeoutMs !== undefined) {
+        entry.timer = setTimeout(() => {
+          this.#rejectPendingAcquire(
+            entry,
+            new SessionError(
+              `connection pool acquire timed out after ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      }
+      if (options.signal) {
+        entry.onAbort = () => {
+          this.#rejectPendingAcquire(
+            entry,
+            this.#createAcquireAbortError(options.signal),
+          );
+        };
+        options.signal.addEventListener("abort", entry.onAbort, {
+          once: true,
+        });
+        if (options.signal.aborted) {
+          entry.onAbort();
+          return;
+        }
+      }
       this.#pending.push(entry);
     });
   }
@@ -427,10 +506,11 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     const pendingCopy = this.#pending.splice(0);
     this.#pendingSettled = 0;
     for (const waiter of pendingCopy) {
-      clearTimeout(waiter.timer);
-      if (!waiter.settled) {
-        waiter.reject(new SessionError("connection pool is closed"));
-      }
+      this.#rejectPendingAcquire(
+        waiter,
+        new SessionError("connection pool is closed"),
+        false,
+      );
     }
 
     // Close all idle connections.
@@ -469,11 +549,38 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
         continue;
       }
       waiter.settled = true;
-      clearTimeout(waiter.timer);
+      this.#cleanupPendingAcquire(waiter);
       this.#compactPending();
       return waiter;
     }
     return undefined;
+  }
+
+  #rejectPendingAcquire(
+    waiter: PendingAcquire,
+    error: unknown,
+    countPending = true,
+  ): void {
+    if (waiter.settled) return;
+    waiter.settled = true;
+    this.#cleanupPendingAcquire(waiter);
+    if (countPending && this.#pending.includes(waiter)) {
+      this.#pendingSettled++;
+      this.#compactPending();
+    }
+    waiter.reject(error);
+  }
+
+  #cleanupPendingAcquire(waiter: PendingAcquire): void {
+    if (waiter.timer !== undefined) {
+      clearTimeout(waiter.timer);
+      waiter.timer = undefined;
+    }
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.onAbort = undefined;
+      waiter.signal = undefined;
+    }
   }
 
   #normalizeConnectionCreateError(error: unknown): SessionError {
@@ -525,24 +632,34 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
     }
   }
 
-  #beginConnectAttempt(): Promise<RpcClientTransportLike> | null {
+  #beginConnectAttempt(
+    signal?: AbortSignal,
+  ): Promise<RpcClientTransportLike> | null {
     if (!this.#canCreateConnection()) return null;
     this.#connecting++;
+    const connectAbortController = new AbortController();
+    const detachAbort = signal
+      ? relayAbort(signal, connectAbortController)
+      : undefined;
     return Promise.resolve()
-      .then(() => this.#connect())
+      .then(() => this.#connect({ signal: connectAbortController.signal }))
       .finally(() => {
+        detachAbort?.();
         this.#connecting = Math.max(0, this.#connecting - 1);
       });
   }
 
-  async #createConnection(): Promise<RpcClientTransportLike> {
-    const connectAttempt = this.#beginConnectAttempt();
+  async #createConnection(
+    signal?: AbortSignal,
+  ): Promise<RpcClientTransportLike> {
+    this.#throwIfAcquireAborted(signal);
+    const connectAttempt = this.#beginConnectAttempt(signal);
     if (!connectAttempt) {
       throw new SessionError("connection pool is at capacity");
     }
 
     try {
-      const conn = await connectAttempt;
+      const conn = await this.#awaitConnectAttempt(connectAttempt, signal);
       if (this.#closed) {
         await this.#closeConnection(conn);
         throw new SessionError("connection pool is closed");
@@ -554,6 +671,48 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       this.#schedulePendingCreateDrain();
       throw normalized;
     }
+  }
+
+  async #awaitConnectAttempt(
+    connectAttempt: Promise<RpcClientTransportLike>,
+    signal: AbortSignal | undefined,
+  ): Promise<RpcClientTransportLike> {
+    if (!signal) return await connectAttempt;
+    this.#throwIfAcquireAborted(signal);
+    let settled = false;
+    const abort = new Promise<never>((_resolve, reject) => {
+      const onAbort = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        reject(this.#createAcquireAbortError(signal));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void connectAttempt.then(
+        () => signal.removeEventListener("abort", onAbort),
+        () => signal.removeEventListener("abort", onAbort),
+      );
+    });
+    try {
+      const conn = await Promise.race([connectAttempt, abort]);
+      settled = true;
+      return conn;
+    } finally {
+      if (!settled && signal.aborted) {
+        void connectAttempt.then((conn) => this.#closeConnection(conn), () => {
+          // no-op; the caller receives the abort error.
+        });
+      }
+    }
+  }
+
+  #throwIfAcquireAborted(signal: AbortSignal | undefined): void {
+    if (!signal?.aborted) return;
+    throw this.#createAcquireAbortError(signal);
+  }
+
+  #createAcquireAbortError(signal: AbortSignal | undefined): SessionError {
+    return new SessionError("connection pool acquire aborted", {
+      cause: signal?.reason,
+    });
   }
 
   async #closeConnection(conn: RpcClientTransportLike): Promise<void> {
@@ -681,14 +840,16 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
  *
  * @param pool - The connection pool to acquire from.
  * @param fn - The function to execute with the acquired connection.
+ * @param options - Optional acquire timeout and abort signal.
  * @returns The return value of `fn`.
  * @throws Rethrows any error from `fn` after releasing the connection.
  */
 export async function withConnection<T>(
   pool: RpcConnectionPool,
   fn: (conn: RpcClientTransportLike) => Promise<T>,
+  options: RpcConnectionPoolAcquireOptions = {},
 ): Promise<T> {
-  const conn = await pool.acquire();
+  const conn = await pool.acquire(options);
   try {
     const result = await fn(conn);
     pool.release(conn);
