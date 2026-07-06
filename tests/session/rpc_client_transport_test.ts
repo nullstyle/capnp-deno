@@ -3,8 +3,11 @@ import {
   decodeCallRequestFrame,
   decodeFinishFrame,
   decodeReleaseFrame,
+  decodeReturnFrame,
   decodeRpcMessageTag,
   EMPTY_STRUCT_MESSAGE,
+  encodeCallRequestFrame,
+  encodeReleaseFrame,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   InMemoryRpcHarnessTransport,
@@ -12,6 +15,7 @@ import {
   RPC_MESSAGE_TAG_CALL,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RETURN,
   RpcSession,
   SessionError,
   SessionRpcClientTransport,
@@ -24,7 +28,13 @@ import {
   CALL_BOOTSTRAP_CAP_Q2_INBOUND,
   CALL_BOOTSTRAP_CAP_Q2_OUTBOUND,
 } from "../fixtures/rpc_frames.ts";
-import { assert, assertBytes, assertEquals } from "../test_utils.ts";
+import {
+  assert,
+  assertBytes,
+  assertEquals,
+  deferred,
+  withTimeout,
+} from "../test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;
 
@@ -49,6 +59,21 @@ function decodeSingleU32StructMessage(frame: Uint8Array): number {
   const offset = signed30((root >> 2n) & MASK_30);
   const dataWord = 1 + offset;
   return view.getUint32(8 + (dataWord * 8), true);
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  label: string,
+): Promise<void> {
+  await withTimeout(
+    (async () => {
+      while (!predicate()) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    })(),
+    500,
+    label,
+  );
 }
 
 Deno.test("SessionRpcClientTransport drives fixture bootstrap/call flow", async () => {
@@ -96,12 +121,208 @@ Deno.test("SessionRpcClientTransport drives fixture bootstrap/call flow", async 
     } catch (error) {
       thrown = error;
     }
-    if (!(thrown instanceof Error) || !/bootstrap stub/.test(thrown.message)) {
-      throw new Error(`expected bootstrap stub error, got: ${String(thrown)}`);
+    if (
+      !(thrown instanceof Error) || !/host call failed/.test(thrown.message)
+    ) {
+      throw new Error(`expected host call failure, got: ${String(thrown)}`);
     }
   } finally {
     await session.close();
   }
+});
+
+Deno.test("SessionRpcClientTransport exportCapability requires host-call bridge support", async () => {
+  const fake = new FakeCapnpWasm();
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    let thrown: unknown;
+    try {
+      client.exportCapability({
+        interfaceId: 0x9000n,
+        dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /host-call bridge support/i.test(thrown.message),
+      `expected host-call bridge SessionError, got: ${String(thrown)}`,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport exportCapability registers a local callback capability", async () => {
+  const releasedCall = deferred<string>();
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_RETURN) {
+        const decoded = decodeReturnFrame(frame);
+        if (decoded.kind === "exception") {
+          releasedCall.resolve(decoded.reason);
+        }
+      }
+      return [];
+    },
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: () => {},
+      capnp_peer_respond_host_call_exception: () => {},
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const events: Array<{ name: string; attributes?: Record<string, unknown> }> =
+    [];
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+    observability: {
+      onEvent: (event) => events.push(event),
+    },
+  });
+
+  try {
+    await session.start();
+    assertEquals(client.exportedCapabilityCount, 0);
+    const exported = client.exportCapability({
+      interfaceId: 0x9000n,
+      dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    }, {
+      capabilityIndex: 44,
+      referenceCount: 2,
+    });
+
+    assertEquals(exported.capabilityIndex, 44);
+    assertEquals(client.exportedCapabilityCount, 1);
+    const exportEvent = events.find((event) =>
+      event.name === "rpc.client.capability_export"
+    );
+    assert(
+      exportEvent !== undefined,
+      "expected client capability export event",
+    );
+    assertEquals(exportEvent.attributes?.["rpc.capability_id"], 44);
+    assertEquals(exportEvent.attributes?.["rpc.interface_id"], 0x9000n);
+    assertEquals(exportEvent.attributes?.["rpc.reference_count"], 2);
+
+    transport.send(encodeReleaseFrame({
+      id: exported.capabilityIndex,
+      referenceCount: 2,
+    }));
+    transport.send(encodeCallRequestFrame({
+      questionId: 70,
+      targetImportedCap: exported.capabilityIndex,
+      interfaceId: 0x9000n,
+      methodId: 1,
+      paramsContent: EMPTY_STRUCT_MESSAGE,
+    }));
+
+    const reason = await withTimeout(
+      releasedCall.promise,
+      500,
+      "released callback dispatch",
+    );
+    assert(
+      /unknown capability index: 44/i.test(reason),
+      `expected released callback to be unknown, got: ${reason}`,
+    );
+    assertEquals(client.exportedCapabilityCount, 0);
+  } finally {
+    await client.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport close rejects pending waits and clears retained lifecycle state", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        return [];
+      }
+      if (tag === RPC_MESSAGE_TAG_FINISH) {
+        return [];
+      }
+      throw new Error(`unexpected inbound rpc tag=${tag}`);
+    },
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: () => {},
+      capnp_peer_respond_host_call_exception: () => {},
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  const pending = client.callRaw(
+    { capabilityIndex: 0 },
+    1,
+    EMPTY_STRUCT_MESSAGE,
+  );
+
+  await waitForCondition(
+    () => client.expectedReturnCount === 1 && client.pendingReturnCount === 1,
+    "pending rpc client return",
+  );
+  assertEquals(client.queuedReturnCount, 0);
+
+  const exported = client.exportCapability({
+    interfaceId: 0x9000n,
+    dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  }, {
+    capabilityIndex: 55,
+  });
+  assertEquals(exported.capabilityIndex, 55);
+  assertEquals(client.exportedCapabilityCount, 1);
+
+  await client.close();
+  assertEquals(client.closed, true);
+  assertEquals(session.closed, true);
+  assertEquals(client.expectedReturnCount, 0);
+  assertEquals(client.pendingReturnCount, 0);
+  assertEquals(client.queuedReturnCount, 0);
+  assertEquals(client.exportedCapabilityCount, 0);
+
+  let thrown: unknown;
+  try {
+    await pending;
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof SessionError &&
+      /rpc client transport is closed/i.test(thrown.message),
+    `expected closed SessionError, got: ${String(thrown)}`,
+  );
+
+  let exportErr: unknown;
+  try {
+    client.exportCapability({
+      interfaceId: 0x9000n,
+      dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    });
+  } catch (error) {
+    exportErr = error;
+  }
+  assert(
+    exportErr instanceof SessionError &&
+      /rpc client transport is closed/i.test(exportErr.message),
+    `expected closed export SessionError, got: ${String(exportErr)}`,
+  );
 });
 
 Deno.test("SessionRpcClientTransport transports non-empty payload and sends finish", async () => {

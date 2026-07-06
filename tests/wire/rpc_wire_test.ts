@@ -194,7 +194,7 @@ Deno.test("rpc wire decodes call exception return", () => {
   assertEquals(message.kind, "exception");
   assertEquals(message.answerId, 2);
   if (message.kind === "exception") {
-    assertEquals(message.reason, "bootstrap stub");
+    assertEquals(message.reason, "host call failed");
   }
 });
 

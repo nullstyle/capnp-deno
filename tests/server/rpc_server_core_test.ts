@@ -6,9 +6,10 @@ import {
   encodeReleaseFrame,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
+  type RpcObservabilityEvent,
   RpcServerBridge,
 } from "../../src/advanced.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, deferred } from "../test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;
 
@@ -253,6 +254,98 @@ Deno.test("server core: finishing a nonexistent question is silently ignored", a
   assertEquals(finishCallbackFired, true);
 });
 
+Deno.test("server core: early finish aborts call context signal and suppresses late return", async () => {
+  const bridge = new RpcServerBridge();
+  const started = deferred<AbortSignal>();
+  const aborted = deferred<void>();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) =>
+      new Promise<Uint8Array>((resolve) => {
+        started.resolve(ctx.signal);
+        ctx.signal.addEventListener("abort", () => {
+          aborted.resolve();
+          resolve(encodeSingleU32StructMessage(9));
+        }, { once: true });
+      }),
+  }, { capabilityIndex: 0 });
+
+  const callPromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  const signal = await started.promise;
+  assertEquals(signal.aborted, false);
+  assertEquals(bridge.answerTableSize, 1);
+
+  const finish = await bridge.handleFrame(encodeFinishFrame({
+    questionId: 1,
+    requireEarlyCancellation: true,
+  }));
+  assertEquals(finish, null);
+  await aborted.promise;
+  assertEquals(signal.aborted, true);
+  assertEquals(bridge.answerTableSize, 0);
+
+  const late = await callPromise;
+  assertEquals(late, null);
+  assertEquals(bridge.answerTableSize, 0);
+});
+
+Deno.test("server core: early finish emits cancellation observability event", async () => {
+  const events: RpcObservabilityEvent[] = [];
+  const bridge = new RpcServerBridge({
+    observability: {
+      onEvent: (event) => events.push(event),
+    },
+  });
+  const started = deferred<void>();
+  const aborted = deferred<void>();
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) =>
+      new Promise<Uint8Array>((resolve) => {
+        started.resolve();
+        ctx.signal.addEventListener("abort", () => {
+          aborted.resolve();
+          resolve(encodeSingleU32StructMessage(9));
+        }, { once: true });
+      }),
+  }, { capabilityIndex: 0 });
+
+  const callPromise = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 88,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  await started.promise;
+  await bridge.handleFrame(encodeFinishFrame({
+    questionId: 88,
+    requireEarlyCancellation: true,
+  }));
+  await aborted.promise;
+  await callPromise;
+
+  const cancelEvent = events.find((event) =>
+    event.name === "rpc.server.call_cancel"
+  );
+  assert(cancelEvent !== undefined, "expected call cancellation event");
+  assertEquals(cancelEvent.attributes?.["rpc.question_id"], 88);
+  assertEquals(
+    cancelEvent.attributes?.["rpc.require_early_cancellation"],
+    true,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Answer table size limit enforcement
 // ---------------------------------------------------------------------------
@@ -418,6 +511,50 @@ Deno.test("server core: release frame decrements refcount and removes capability
     encodeReleaseFrame({ id: 5, referenceCount: 1 }),
   );
   assertEquals(bridge.hasCapability(5), false);
+});
+
+Deno.test("server core: capability export and release emit observability events", async () => {
+  const events: RpcObservabilityEvent[] = [];
+  const bridge = new RpcServerBridge({
+    observability: {
+      onEvent: (event) => events.push(event),
+    },
+  });
+
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(0),
+  }, { capabilityIndex: 5, referenceCount: 2 });
+
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: 5, referenceCount: 1 }),
+  );
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: 5, referenceCount: 1 }),
+  );
+
+  const exportEvent = events.find((event) =>
+    event.name === "rpc.server.capability_export"
+  );
+  assert(exportEvent !== undefined, "expected capability export event");
+  assertEquals(exportEvent.attributes?.["rpc.capability_id"], 5);
+  assertEquals(exportEvent.attributes?.["rpc.interface_id"], 0x1234n);
+  assertEquals(exportEvent.attributes?.["rpc.reference_count"], 2);
+
+  const releaseEvents = events.filter((event) =>
+    event.name === "rpc.server.capability_release"
+  );
+  assertEquals(releaseEvents.length, 2);
+  assertEquals(
+    releaseEvents[0].attributes?.["rpc.remaining_reference_count"],
+    1,
+  );
+  assertEquals(releaseEvents[0].attributes?.["rpc.released"], false);
+  assertEquals(
+    releaseEvents[1].attributes?.["rpc.remaining_reference_count"],
+    0,
+  );
+  assertEquals(releaseEvents[1].attributes?.["rpc.released"], true);
 });
 
 Deno.test("server core: release frame with count larger than refcount throws ProtocolError", async () => {

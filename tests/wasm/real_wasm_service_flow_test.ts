@@ -1,4 +1,5 @@
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   InMemoryRpcHarnessTransport,
   instantiatePeer,
   ProtocolError,
@@ -7,7 +8,8 @@ import {
   SessionRpcClientTransport,
   type WasmPeer,
 } from "../../src/advanced.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { Pinger, type Ponger } from "../../examples/ping/gen/schema_types.ts";
+import { assert, assertEquals, withTimeout } from "../test_utils.ts";
 
 const wasmPath = new URL("../../generated/capnp_deno.wasm", import.meta.url);
 const INTERFACE_ID = 0x1234n;
@@ -20,6 +22,20 @@ function encodeSingleU32StructMessage(value: number): Uint8Array {
   view.setUint32(4, 2, true);
   view.setBigUint64(8, 0x0000_0001_0000_0000n, true);
   view.setUint32(16, value >>> 0, true);
+  return out;
+}
+
+function encodeU32AndCapPointerStructMessage(
+  value: number,
+  capTableIndex: number,
+): Uint8Array {
+  const out = new Uint8Array(32);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, 0, true);
+  view.setUint32(4, 3, true);
+  view.setBigUint64(8, 0x0001_0001_0000_0000n, true);
+  view.setUint32(16, value >>> 0, true);
+  view.setBigUint64(24, (BigInt(capTableIndex) << 32n) | 3n, true);
   return out;
 }
 
@@ -75,7 +91,9 @@ async function withRealServer(
 
 Deno.test("real wasm service flow: bootstrap -> host dispatch -> explicit finish/release", async () => {
   await withRealServer(async ({ bridge, client }) => {
-    const bootstrap = await client.bootstrap();
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+    });
     bridge.exportCapability({
       interfaceId: INTERFACE_ID,
       dispatch(methodId, params, ctx) {
@@ -113,9 +131,144 @@ Deno.test("real wasm service flow: bootstrap -> host dispatch -> explicit finish
   });
 });
 
+Deno.test("real wasm service flow: cap-bearing results cross the host-call bridge", async () => {
+  await withRealServer(async ({ bridge, client, runtime }) => {
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+    });
+    let rootDispatchCount = 0;
+    let childDispatchCount = 0;
+
+    bridge.exportCapability({
+      interfaceId: INTERFACE_ID,
+      dispatch(methodId, params, ctx) {
+        if (methodId === 12) {
+          childDispatchCount += 1;
+          return encodeSingleU32StructMessage(
+            decodeSingleU32StructMessage(params) + 7,
+          );
+        }
+
+        rootDispatchCount += 1;
+        assertEquals(methodId, 11);
+        assertEquals(decodeSingleU32StructMessage(params), 500);
+        assertEquals(ctx.paramsCapTable.length, 0);
+
+        return {
+          content: encodeU32AndCapPointerStructMessage(501, 0),
+          capTable: [{
+            tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+            id: bootstrap.capabilityIndex,
+          }],
+          releaseParamCaps: false,
+        };
+      },
+    }, {
+      capabilityIndex: bootstrap.capabilityIndex,
+      referenceCount: 2,
+    });
+
+    const rootResponse = await client.callRaw(
+      bootstrap,
+      11,
+      encodeSingleU32StructMessage(500),
+      {
+        finish: { releaseResultCaps: false },
+        timeoutMs: 2_000,
+      },
+    );
+
+    assertEquals(decodeSingleU32StructMessage(rootResponse.contentBytes), 501);
+    assertEquals(rootResponse.releaseParamCaps, false);
+    assertEquals(rootResponse.noFinishNeeded, false);
+    assertEquals(rootResponse.capTable.length, 1);
+    assertEquals(
+      rootResponse.capTable[0].tag,
+      CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+    );
+
+    const child = { capabilityIndex: rootResponse.capTable[0].id };
+    const childResponse = await client.call(
+      child,
+      12,
+      encodeSingleU32StructMessage(600),
+    );
+    assertEquals(decodeSingleU32StructMessage(childResponse), 607);
+
+    await client.release(child, 1);
+    await client.release(bootstrap, 1);
+    assertEquals(rootDispatchCount, 1);
+    assertEquals(childDispatchCount, 1);
+    assertEquals(runtime.totalHostCallsPumped, 2);
+  });
+});
+
+Deno.test("real wasm generated callbacks: cap-bearing params call back before the original call returns", async () => {
+  await withRealServer(async ({ bridge, client }) => {
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+      timeoutMs: 2_000,
+    });
+
+    let callbackStarted = false;
+    let callbackFinished = false;
+    let pingResolved = false;
+    let callbackSawPendingPing = false;
+    const callbackValues: number[] = [];
+
+    Pinger.registerServer(bridge, {
+      async ping(ponger) {
+        callbackStarted = true;
+        await ponger.pong(123);
+        callbackFinished = true;
+      },
+    }, {
+      capabilityIndex: bootstrap.capabilityIndex,
+      referenceCount: 2,
+    });
+
+    const pinger = await Pinger.bootstrapClient({
+      bootstrap: () => Promise.resolve(bootstrap),
+      call: (capability, methodId, params, options) =>
+        client.call(capability, methodId, params, options),
+      callRaw: (capability, methodId, params, options) =>
+        client.callRaw(capability, methodId, params, options),
+      finish: (questionId, options) => client.finish(questionId, options),
+      release: (capability, referenceCount) =>
+        client.release(capability, referenceCount),
+      exportCapability: (dispatch, options) =>
+        client.exportCapability(dispatch, options),
+    });
+
+    const localPonger: Ponger = {
+      pong(value) {
+        callbackSawPendingPing = !pingResolved;
+        callbackValues.push(value);
+        return Promise.resolve();
+      },
+    };
+
+    await withTimeout(
+      pinger.ping(localPonger, { timeoutMs: 2_000 }),
+      2_500,
+      "generated pinger callback flow",
+    );
+    pingResolved = true;
+
+    assertEquals(callbackStarted, true);
+    assertEquals(callbackFinished, true);
+    assertEquals(callbackSawPendingPing, true);
+    assertEquals(callbackValues.length, 1);
+    assertEquals(callbackValues[0], 123);
+    assertEquals(bridge.answerTableSize, 0);
+  });
+});
+
 Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
   await withRealServer(async ({ bridge, client, runtime }) => {
-    const bootstrap = await client.bootstrap();
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+    });
     let dispatchCount = 0;
 
     bridge.exportCapability({
@@ -136,16 +289,22 @@ Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
     let injectedFailures = 0;
     for (let i = 0; i < 120; i += 1) {
       const payload = encodeSingleU32StructMessage(i);
+      const shouldInjectFailure = (i + 1) % 9 === 0;
       try {
         const out = await client.call(bootstrap, 7, payload, {
           timeoutMs: 2_000,
         });
+        assert(
+          !shouldInjectFailure,
+          `expected injected failure for dispatch ${i + 1}`,
+        );
         assertEquals(decodeSingleU32StructMessage(out), i + 1000);
         success += 1;
       } catch (error) {
         if (
+          shouldInjectFailure &&
           error instanceof ProtocolError &&
-          /fault injection/i.test(error.message)
+          /fault injection|host call failed/i.test(error.message)
         ) {
           injectedFailures += 1;
           continue;

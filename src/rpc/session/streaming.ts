@@ -11,18 +11,31 @@
 import { SessionError } from "../../errors.ts";
 
 /**
+ * Context for a single streaming call.
+ */
+export interface StreamSendContext {
+  /** Zero-based index of the streaming call within this sender. */
+  readonly index: number;
+  /** Abort signal scoped to this send. */
+  readonly signal: AbortSignal;
+}
+
+/**
  * A function that sends a single streaming call and returns the result.
  *
  * The caller provides the encoded params and receives the response bytes.
  * The implementation is typically a thin wrapper around
  * `client.call(capability, methodId, params)`.
  */
-export type StreamCallFn = (params: Uint8Array) => Promise<Uint8Array>;
+export type StreamCallFn<TParams = Uint8Array, TResult = Uint8Array> = (
+  params: TParams,
+  context: StreamSendContext,
+) => Promise<TResult>;
 
 /**
  * Options for creating a {@link StreamSender}.
  */
-export interface StreamSenderOptions {
+export interface StreamSenderOptions<TResult = Uint8Array> {
   /**
    * Maximum number of in-flight calls before the sender blocks.
    * Controls the streaming window size. Defaults to `8`.
@@ -32,7 +45,7 @@ export interface StreamSenderOptions {
    * Called for each successful response in order.
    * Can be used to track progress or accumulate results.
    */
-  onResponse?: (response: Uint8Array, index: number) => void | Promise<void>;
+  onResponse?: (response: TResult, index: number) => void | Promise<void>;
   /**
    * Called when a streaming call fails. If this callback throws or is not
    * provided, the error propagates to {@link StreamSender.send} or
@@ -46,9 +59,11 @@ export interface StreamSenderOptions {
 /**
  * Tracks an in-flight streaming call.
  */
-interface InFlightCall {
+interface InFlightCall<TResult> {
   index: number;
-  promise: Promise<Uint8Array>;
+  promise: Promise<TResult>;
+  abortController: AbortController;
+  cleanup: () => void;
 }
 
 /**
@@ -68,18 +83,23 @@ interface InFlightCall {
  * await sender.flush();
  * ```
  */
-export interface StreamSender {
+export interface StreamSender<TParams = Uint8Array, TResult = Uint8Array> {
   /**
    * Send one streaming call. Blocks if the in-flight window is full,
    * providing natural backpressure.
    */
-  send(params: Uint8Array): Promise<void>;
+  send(params: TParams): Promise<void>;
 
   /**
    * Wait for all in-flight calls to complete. Must be called after
    * the last {@link send} to ensure all responses are received.
    */
   flush(): Promise<void>;
+
+  /**
+   * Abort all in-flight calls and prevent new calls from being sent.
+   */
+  cancel(reason?: unknown): Promise<void>;
 
   /** Number of calls currently in-flight. */
   readonly inFlight: number;
@@ -101,8 +121,16 @@ export interface StreamSender {
  */
 export function createStreamSender(
   callFn: StreamCallFn,
-  options: StreamSenderOptions = {},
-): StreamSender {
+  options?: StreamSenderOptions,
+): StreamSender;
+export function createStreamSender<TParams, TResult = Uint8Array>(
+  callFn: StreamCallFn<TParams, TResult>,
+  options?: StreamSenderOptions<TResult>,
+): StreamSender<TParams, TResult>;
+export function createStreamSender<TParams, TResult = Uint8Array>(
+  callFn: StreamCallFn<TParams, TResult>,
+  options: StreamSenderOptions<TResult> = {},
+): StreamSender<TParams, TResult> {
   const maxInFlight = options.maxInFlight ?? 8;
   if (maxInFlight < 1 || !Number.isInteger(maxInFlight)) {
     throw new SessionError(
@@ -113,16 +141,28 @@ export function createStreamSender(
   const signal = options.signal;
   const onResponse = options.onResponse;
   const onError = options.onError;
+  const streamAbortController = new AbortController();
 
-  const inFlightCalls: InFlightCall[] = [];
+  const inFlightCalls: InFlightCall<TResult>[] = [];
   let nextIndex = 0;
   let totalReceived = 0;
   let firstError: unknown = undefined;
   let hasError = false;
+  let canceled = false;
+  let cancelReason: unknown = undefined;
+
+  function abortReasonFromSignal(source: AbortSignal): unknown {
+    return source.reason ?? new SessionError("stream aborted");
+  }
 
   function checkAborted(): void {
     if (signal?.aborted) {
       throw new SessionError("stream aborted");
+    }
+    if (canceled || streamAbortController.signal.aborted) {
+      throw cancelReason instanceof SessionError
+        ? cancelReason
+        : new SessionError("stream canceled", { cause: cancelReason });
     }
   }
 
@@ -151,11 +191,13 @@ export function createStreamSender(
           firstError = error;
         }
       }
+    } finally {
+      oldest.cleanup();
     }
   }
 
   return {
-    async send(params: Uint8Array): Promise<void> {
+    async send(params: TParams): Promise<void> {
       checkAborted();
       checkError();
 
@@ -167,8 +209,42 @@ export function createStreamSender(
       }
 
       const index = nextIndex++;
-      const promise = callFn(params);
-      inFlightCalls.push({ index, promise });
+      const abortController = new AbortController();
+      const cleanupCallbacks: Array<() => void> = [];
+      const relayAbort = (source: AbortSignal): void => {
+        const onAbort = (): void => {
+          abortController.abort(abortReasonFromSignal(source));
+        };
+        if (source.aborted) {
+          onAbort();
+          return;
+        }
+        source.addEventListener("abort", onAbort, { once: true });
+        cleanupCallbacks.push(() =>
+          source.removeEventListener("abort", onAbort)
+        );
+      };
+      if (signal) relayAbort(signal);
+      relayAbort(streamAbortController.signal);
+
+      let promise: Promise<TResult>;
+      try {
+        promise = Promise.resolve(callFn(params, {
+          index,
+          signal: abortController.signal,
+        }));
+      } catch (error) {
+        for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
+        throw error;
+      }
+      inFlightCalls.push({
+        index,
+        promise,
+        abortController,
+        cleanup: () => {
+          for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
+        },
+      });
     },
 
     async flush(): Promise<void> {
@@ -176,6 +252,21 @@ export function createStreamSender(
         await drainOne();
       }
       checkError();
+    },
+
+    async cancel(reason?: unknown): Promise<void> {
+      if (!canceled) {
+        canceled = true;
+        cancelReason = reason ?? new SessionError("stream canceled");
+        streamAbortController.abort(cancelReason);
+      }
+      for (const call of inFlightCalls) {
+        call.abortController.abort(cancelReason);
+      }
+      await this.flush().catch((error) => {
+        if (onError) return;
+        throw error;
+      });
     },
 
     get inFlight(): number {

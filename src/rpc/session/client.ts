@@ -20,8 +20,16 @@ import {
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { RpcRuntimeModuleOptions } from "../server/runtime_module.ts";
+import type { RpcExportCapabilityOptions } from "../server/rpc_runtime.ts";
+import {
+  type CapabilityPointer,
+  RpcServerBridge,
+  type RpcServerDispatch,
+  type RpcServerWasmHost,
+} from "../server/bridge.ts";
 import {
   decodeReturnFrame,
+  decodeRpcMessageTag,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
   encodeFinishFrame,
@@ -29,6 +37,9 @@ import {
   extractBootstrapCapabilityIndex,
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+  RPC_MESSAGE_TAG_CALL,
+  RPC_MESSAGE_TAG_FINISH,
+  RPC_MESSAGE_TAG_RELEASE,
   RPC_PROMISED_ANSWER_OP_TAG_GET_POINTER_FIELD,
   type RpcCallTarget,
   type RpcCapDescriptor,
@@ -528,6 +539,8 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
  *   for promise pipelining (Level 2 RPC) without waiting for the response.
  * - {@link finish} - Tell the server a question is done.
  * - {@link release} - Release a capability reference.
+ * - {@link exportCapability} - Export a local callback capability that the
+ *   remote peer can call.
  *
  * All operations are serialized through an internal queue to ensure that
  * outbound frames are sent and responses collected in the correct order.
@@ -561,6 +574,9 @@ export class SessionRpcClientTransport {
   #queuedReturns: Map<number, RpcReturnMessage[]> = new Map();
   #responsePump: Promise<void> | null = null;
   #responsePumpAbort: AbortController | null = null;
+  #responsePumpStopped = false;
+  #localBridge: RpcServerBridge | null = null;
+  #closed = false;
 
   /**
    * Create a client transport with an internally-created session.
@@ -595,6 +611,59 @@ export class SessionRpcClientTransport {
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
     this.#middleware = options.middleware ?? [];
     this.#observability = options.observability;
+  }
+
+  /**
+   * Whether this client transport has been closed.
+   *
+   * @returns True once {@link close} has been called.
+   */
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  /**
+   * Number of question IDs currently expecting Return frames.
+   *
+   * @returns Current expected return count.
+   */
+  get expectedReturnCount(): number {
+    return this.#expectedReturns.size;
+  }
+
+  /**
+   * Number of pending Return waiters currently retained by this transport.
+   *
+   * @returns Current pending return waiter count.
+   */
+  get pendingReturnCount(): number {
+    let count = 0;
+    for (const waiters of this.#pendingReturns.values()) {
+      count += waiters.length;
+    }
+    return count;
+  }
+
+  /**
+   * Number of Return frames queued before a waiter consumed them.
+   *
+   * @returns Current queued return frame count.
+   */
+  get queuedReturnCount(): number {
+    let count = 0;
+    for (const queued of this.#queuedReturns.values()) {
+      count += queued.length;
+    }
+    return count;
+  }
+
+  /**
+   * Number of local callback capabilities exported by this transport.
+   *
+   * @returns Current exported local capability count.
+   */
+  get exportedCapabilityCount(): number {
+    return this.#localBridge?.capabilityCount ?? 0;
   }
 
   /**
@@ -892,6 +961,79 @@ export class SessionRpcClientTransport {
     });
   }
 
+  /**
+   * Export a local server dispatch as a callback capability.
+   *
+   * Generated high-level clients use this hook when a method parameter is an
+   * interface and the caller passes a local implementation instead of an
+   * existing remote stub.
+   *
+   * @param dispatch - Local dispatch implementation to expose to the remote peer.
+   * @param options - Optional capability index and initial reference count.
+   * @returns Capability pointer that can be encoded into RPC parameter cap tables.
+   * @throws {SessionError} If the underlying WASM peer cannot pump host calls.
+   *
+   * @example
+   * ```ts
+   * const callback = client.exportCapability({
+   *   interfaceId: 0x1234n,
+   *   dispatch(_methodId, _params) {
+   *     return new Uint8Array();
+   *   },
+   * });
+   * ```
+   */
+  exportCapability(
+    dispatch: RpcServerDispatch,
+    options: RpcExportCapabilityOptions = {},
+  ): CapabilityPointer {
+    if (this.#closed || this.session.closed) {
+      throw new SessionError("rpc client transport is closed");
+    }
+    if (!this.session.peer.abi.capabilities.hasHostCallBridge) {
+      throw new SessionError(
+        "local capability export requires WASM host-call bridge support",
+      );
+    }
+    if (!this.#localBridge) {
+      this.#localBridge = new RpcServerBridge();
+    }
+    const capability = this.#localBridge.exportCapability(dispatch, options);
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.client.capability_export",
+      attributes: {
+        "rpc.capability_id": capability.capabilityIndex,
+        "rpc.interface_id": dispatch.interfaceId,
+        "rpc.reference_count": options.referenceCount ?? 1,
+      },
+    });
+    this.#ensureResponsePump();
+    return capability;
+  }
+
+  /**
+   * Close this client transport and release retained client-side lifecycle
+   * state before closing the underlying session.
+   *
+   * Pending calls are rejected, expected/queued returns are cleared, local
+   * callback exports are dropped, and the response pump is stopped.
+   *
+   * @returns A promise that resolves once the underlying session is closed.
+   */
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#responsePumpStopped = true;
+    this.#localBridge = null;
+    this.#rejectAllPendingReturns(
+      new SessionError("rpc client transport is closed"),
+    );
+    this.#expectedReturns.clear();
+    this.#queuedReturns.clear();
+    this.#responsePumpAbort?.abort();
+    await this.session.close();
+  }
+
   #buildMiddlewareContext(
     questionId: number,
     interfaceId: bigint,
@@ -1151,6 +1293,11 @@ export class SessionRpcClientTransport {
     return this.#pendingReturns.size > 0;
   }
 
+  #shouldPumpResponses(): boolean {
+    return !this.#responsePumpStopped &&
+      (this.#hasPendingReturnWaiters() || this.#localBridge !== null);
+  }
+
   #markReturnExpected(questionId: number): void {
     this.#expectedReturns.add(questionId);
   }
@@ -1211,7 +1358,7 @@ export class SessionRpcClientTransport {
   }
 
   #abortResponsePumpReadIfIdle(): void {
-    if (this.#hasPendingReturnWaiters()) return;
+    if (this.#shouldPumpResponses()) return;
     this.#responsePumpAbort?.abort();
   }
 
@@ -1223,14 +1370,14 @@ export class SessionRpcClientTransport {
       })
       .finally(() => {
         this.#responsePump = null;
-        if (this.#hasPendingReturnWaiters()) {
+        if (this.#shouldPumpResponses()) {
           this.#ensureResponsePump();
         }
       });
   }
 
   async #pumpResponses(): Promise<void> {
-    while (this.#hasPendingReturnWaiters()) {
+    while (this.#shouldPumpResponses()) {
       const abortController = new AbortController();
       this.#responsePumpAbort = abortController;
       let outbound: Uint8Array;
@@ -1240,8 +1387,12 @@ export class SessionRpcClientTransport {
         });
       } catch (error) {
         if (
-          abortController.signal.aborted && !this.#hasPendingReturnWaiters()
+          abortController.signal.aborted && !this.#shouldPumpResponses()
         ) {
+          return;
+        }
+        this.#responsePumpStopped = true;
+        if (!this.#hasPendingReturnWaiters()) {
           return;
         }
         this.#rejectAllPendingReturns(error);
@@ -1263,6 +1414,11 @@ export class SessionRpcClientTransport {
             "rpc.frame_bytes": outbound.byteLength,
           },
         });
+        await this.session.flush();
+        const handledHostCalls = await this.#pumpLocalHostCallsNow();
+        if (handledHostCalls === 0) {
+          await this.#handleLocalCallbackFrame(outbound);
+        }
         continue;
       }
 
@@ -1273,6 +1429,65 @@ export class SessionRpcClientTransport {
       if (!this.#resolvePendingReturn(decoded)) {
         this.#queueReturn(decoded);
       }
+    }
+  }
+
+  async #handleLocalCallbackFrame(frame: Uint8Array): Promise<boolean> {
+    if (!this.#localBridge) return false;
+
+    let tag: number;
+    try {
+      tag = decodeRpcMessageTag(frame);
+    } catch {
+      return false;
+    }
+
+    if (
+      tag !== RPC_MESSAGE_TAG_CALL && tag !== RPC_MESSAGE_TAG_RELEASE &&
+      tag !== RPC_MESSAGE_TAG_FINISH
+    ) {
+      return false;
+    }
+
+    const response = await this.#localBridge.handleFrame(frame);
+    if (response) {
+      await this.transport.emitInbound(response);
+      await this.session.flush();
+    }
+    return true;
+  }
+
+  async #pumpLocalHostCallsNow(): Promise<number> {
+    if (!this.#localBridge) return 0;
+    const peer = this.session.peer;
+    if (!peer.abi.capabilities.hasHostCallBridge) return 0;
+
+    const wasmHost: RpcServerWasmHost = {
+      handle: peer.handle,
+      abi: {
+        supportsHostCallReturnFrame:
+          peer.abi.capabilities.hasHostCallReturnFrame,
+        popHostCall: (handle) => peer.abi.popHostCall(handle),
+        respondHostCallReturnFrame: (handle, frame) =>
+          peer.abi.respondHostCallReturnFrame(handle, frame),
+        respondHostCallResults: (handle, questionId, payloadFrame) =>
+          peer.abi.respondHostCallResults(handle, questionId, payloadFrame),
+        respondHostCallException: (handle, questionId, reason) =>
+          peer.abi.respondHostCallException(handle, questionId, reason),
+      },
+    };
+
+    const handled = await this.#localBridge.pumpWasmHostCalls(wasmHost);
+    if (handled > 0) {
+      await this.#flushLocalPeerOutboundFrames();
+    }
+    return handled;
+  }
+
+  async #flushLocalPeerOutboundFrames(): Promise<void> {
+    const { frames } = this.session.peer.drainOutgoingFrames();
+    for (const frame of frames) {
+      await this.session.transport.send(frame);
     }
   }
 
@@ -1304,12 +1519,19 @@ export class SessionRpcClientTransport {
   }
 
   async #enqueue<T>(op: () => Promise<T>): Promise<T> {
+    if (this.#closed) {
+      throw new SessionError("rpc client transport is closed");
+    }
     const gate = this.#opChain;
     let release!: () => void;
     this.#opChain = new Promise<void>((resolve) => {
       release = resolve;
     });
     await gate;
+    if (this.#closed) {
+      release();
+      throw new SessionError("rpc client transport is closed");
+    }
     try {
       return await op();
     } catch (error) {

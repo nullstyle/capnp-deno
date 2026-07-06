@@ -9,7 +9,7 @@
  */
 
 import type { WasmHostCallRecord } from "../../wasm/abi.ts";
-import { ProtocolError } from "../../errors.ts";
+import { ProtocolError, SessionError } from "../../errors.ts";
 import {
   emitObservabilityEvent,
   type RpcObservability,
@@ -19,6 +19,7 @@ import {
   decodeCallRequestFrame,
   decodeFinishFrame,
   decodeReleaseFrame,
+  decodeReturnFrame,
   decodeRpcMessageTag,
   EMPTY_STRUCT_MESSAGE,
   encodeBootstrapResponseFrame,
@@ -193,6 +194,10 @@ export interface RpcCallContext {
   readonly interfaceId: bigint;
   /** Capability descriptors from the call's parameter payload. */
   readonly paramsCapTable: RpcCapDescriptor[];
+  /**
+   * Aborts when the peer finishes the question with early cancellation.
+   */
+  readonly signal: AbortSignal;
   /**
    * Optional outbound client for invoking callbacks on inbound capabilities.
    */
@@ -376,8 +381,12 @@ type RpcDispatchOutcome =
 interface AnswerTableEntry {
   /** Promise that resolves when the dispatch completes */
   readonly promise: Promise<RpcDispatchOutcome>;
+  /** Abort controller exposed to the handler via RpcCallContext.signal. */
+  readonly abortController: AbortController;
   /** Resolved outcome, set once the promise settles */
   outcome?: RpcDispatchOutcome;
+  /** True once the peer has sent Finish for this question. */
+  finished: boolean;
   /** Timer handle for automatic eviction of completed but unfinished entries */
   evictionTimer?: ReturnType<typeof setTimeout>;
   /**
@@ -520,6 +529,8 @@ export class RpcServerBridge {
   #middleware: readonly RpcServerMiddleware[];
   #observability: RpcObservability | undefined;
   #outboundClient: RpcCallContext["outboundClient"];
+  #asyncHostCallDispatch: boolean;
+  #onAsyncHostCallSettled: (() => void | Promise<void>) | undefined;
 
   constructor(options: RpcServerBridgeOptions = {}) {
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
@@ -532,10 +543,30 @@ export class RpcServerBridge {
     this.#middleware = options.middleware ? [...options.middleware] : [];
     this.#observability = options.observability;
     this.#outboundClient = undefined;
+    this.#asyncHostCallDispatch = false;
+    this.#onAsyncHostCallSettled = undefined;
   }
 
   setOutboundClient(outboundClient: RpcCallContext["outboundClient"]): void {
     this.#outboundClient = outboundClient;
+  }
+
+  /**
+   * Configure host-call dispatch to complete asynchronously.
+   *
+   * Runtime integrations use this so inbound Finish frames can abort
+   * `RpcCallContext.signal` while a host-call handler is still pending.
+   *
+   * @param enabled - Whether host calls should finish in the background.
+   * @param onSettled - Optional callback invoked after an async host call
+   * response is delivered back to the WASM peer.
+   */
+  setAsyncHostCallDispatch(
+    enabled: boolean,
+    onSettled?: () => void | Promise<void>,
+  ): void {
+    this.#asyncHostCallDispatch = enabled;
+    this.#onAsyncHostCallSettled = onSettled;
   }
 
   exportCapability(
@@ -563,6 +594,14 @@ export class RpcServerBridge {
     this.#dispatchByCapability.set(capabilityIndex, {
       dispatch,
       refCount: referenceCount,
+    });
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.server.capability_export",
+      attributes: {
+        "rpc.capability_id": capabilityIndex,
+        "rpc.interface_id": dispatch.interfaceId,
+        "rpc.reference_count": referenceCount,
+      },
     });
     return { capabilityIndex };
   }
@@ -608,6 +647,17 @@ export class RpcServerBridge {
     }
 
     registered.refCount -= referenceCount;
+    const remainingRefCount = Math.max(registered.refCount, 0);
+    const released = registered.refCount <= 0;
+    emitObservabilityEvent(this.#observability, {
+      name: "rpc.server.capability_release",
+      attributes: {
+        "rpc.capability_id": capabilityIndex,
+        "rpc.reference_count": referenceCount,
+        "rpc.remaining_reference_count": remainingRefCount,
+        "rpc.released": released,
+      },
+    });
     if (registered.refCount <= 0) {
       this.#dispatchByCapability.delete(capabilityIndex);
       return false;
@@ -622,9 +672,21 @@ export class RpcServerBridge {
   /**
    * Returns the number of entries currently in the answer table.
    * Useful for testing and debugging promise pipelining state.
+   *
+   * @returns Current answer table entry count.
    */
   get answerTableSize(): number {
     return this.#answerTable.size;
+  }
+
+  /**
+   * Returns the number of exported capabilities currently registered.
+   * Useful for testing and debugging callback capability lifecycle.
+   *
+   * @returns Current exported capability count.
+   */
+  get capabilityCount(): number {
+    return this.#dispatchByCapability.size;
   }
 
   async handleFrame(frame: Uint8Array): Promise<Uint8Array | null> {
@@ -655,6 +717,26 @@ export class RpcServerBridge {
       const entry = this.#answerTable.get(finish.questionId);
       if (entry?.evictionTimer !== undefined) {
         clearTimeout(entry.evictionTimer);
+      }
+      if (entry) {
+        entry.finished = true;
+        if (
+          finish.requireEarlyCancellation &&
+          !entry.abortController.signal.aborted
+        ) {
+          entry.abortController.abort(
+            new SessionError("rpc call canceled by finish", {
+              metadata: { questionId: finish.questionId },
+            }),
+          );
+          emitObservabilityEvent(this.#observability, {
+            name: "rpc.server.call_cancel",
+            attributes: {
+              "rpc.question_id": finish.questionId,
+              "rpc.require_early_cancellation": true,
+            },
+          });
+        }
       }
       this.#answerTable.delete(finish.questionId);
       if (this.#onFinish) {
@@ -730,48 +812,84 @@ export class RpcServerBridge {
   async #handleCall(
     call: RpcCallRequest,
     middlewareState?: Map<string, unknown>,
-  ): Promise<Uint8Array> {
+  ): Promise<Uint8Array | null> {
+    const registration = this.#registerAnswerEntry(call);
+    if ("errorFrame" in registration) return registration.errorFrame;
+
+    const completion = this.#completeCall(
+      call,
+      registration.entry,
+      registration.resolveEntry,
+      middlewareState ?? new Map<string, unknown>(),
+    );
+
+    return await completion;
+  }
+
+  #registerAnswerEntry(call: RpcCallRequest):
+    | {
+      entry: AnswerTableEntry;
+      resolveEntry: (outcome: RpcDispatchOutcome) => void;
+    }
+    | { errorFrame: Uint8Array } {
     if (this.#answerTable.has(call.questionId)) {
-      return encodeReturnExceptionFrame({
-        answerId: call.questionId,
-        reason:
-          `duplicate questionId ${call.questionId}: question is already in progress`,
-      });
+      return {
+        errorFrame: encodeReturnExceptionFrame({
+          answerId: call.questionId,
+          reason:
+            `duplicate questionId ${call.questionId}: question is already in progress`,
+        }),
+      };
     }
 
-    // Enforce answer table size limit to prevent unbounded growth.
     if (
       this.#maxAnswerTableSize > 0 &&
       this.#maxAnswerTableSize !== Infinity &&
       this.#answerTable.size >= this.#maxAnswerTableSize
     ) {
-      return encodeReturnExceptionFrame({
-        answerId: call.questionId,
-        reason:
-          `answer table is full (${this.#maxAnswerTableSize} entries); cannot accept new questions`,
-      });
+      return {
+        errorFrame: encodeReturnExceptionFrame({
+          answerId: call.questionId,
+          reason:
+            `answer table is full (${this.#maxAnswerTableSize} entries); cannot accept new questions`,
+        }),
+      };
     }
 
-    // Register this question in the answer table before dispatching,
-    // so that pipelined calls targeting this question can find it.
     let resolveEntry!: (outcome: RpcDispatchOutcome) => void;
+    const abortController = new AbortController();
     const entry: AnswerTableEntry = {
       promise: new Promise<RpcDispatchOutcome>((resolve) => {
         resolveEntry = resolve;
       }),
+      abortController,
+      finished: false,
       pipelineRefCount: 0,
       evictionAttempts: 0,
     };
     this.#answerTable.set(call.questionId, entry);
+    return { entry, resolveEntry };
+  }
 
+  async #completeCall(
+    call: RpcCallRequest,
+    entry: AnswerTableEntry,
+    resolveEntry: (outcome: RpcDispatchOutcome) => void,
+    middlewareState: Map<string, unknown>,
+  ): Promise<Uint8Array | null> {
     const outcome = await this.#dispatchCall(
       call,
-      middlewareState ?? new Map<string, unknown>(),
+      middlewareState,
+      entry.abortController.signal,
     );
 
     // Store the resolved outcome and resolve the promise.
     (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
     resolveEntry(outcome);
+
+    if (this.#answerTable.get(call.questionId) !== entry || entry.finished) {
+      return null;
+    }
 
     // Schedule automatic eviction of completed entries that are not
     // finished by the peer within the configured timeout.
@@ -904,32 +1022,67 @@ export class RpcServerBridge {
       return;
     }
 
-    const outcome = await this.#dispatchCall(
-      call,
-      new Map<string, unknown>(),
-    );
-    if (outcome.kind === "exception") {
-      wasmHost.abi.respondHostCallException(
-        wasmHost.handle,
-        call.questionId,
-        outcome.reason,
-      );
+    const registration = this.#registerAnswerEntry(call);
+    if ("errorFrame" in registration) {
+      this.#respondWasmHostCallFrame(wasmHost, call, registration.errorFrame);
       return;
     }
 
-    const response = outcome.response;
+    const completion = this.#completeCall(
+      call,
+      registration.entry,
+      registration.resolveEntry,
+      new Map<string, unknown>(),
+    );
+
+    const respond = async (): Promise<void> => {
+      const responseFrame = await completion;
+      if (responseFrame) {
+        this.#respondWasmHostCallFrame(wasmHost, call, responseFrame);
+      }
+    };
+
+    if (this.#asyncHostCallDispatch) {
+      respond()
+        .then(async () => {
+          if (this.#onAsyncHostCallSettled) {
+            await this.#onAsyncHostCallSettled();
+          }
+        })
+        .catch((error) => {
+          if (this.#onUnhandledError) {
+            Promise.resolve(this.#onUnhandledError(error, call)).catch(() => {
+              // Nothing more to report if the error handler itself fails.
+            });
+          }
+        });
+      return;
+    }
+
+    await respond();
+  }
+
+  #respondWasmHostCallFrame(
+    wasmHost: RpcServerWasmHost,
+    call: RpcCallRequest,
+    responseFrame: Uint8Array,
+  ): void {
     const supportsReturnFrame = wasmHost.abi.supportsHostCallReturnFrame ??
       true;
     if (wasmHost.abi.respondHostCallReturnFrame && supportsReturnFrame) {
       wasmHost.abi.respondHostCallReturnFrame(
         wasmHost.handle,
-        encodeReturnResultsFrame({
-          answerId: call.questionId,
-          content: response.content,
-          capTable: response.capTable,
-          releaseParamCaps: response.releaseParamCaps,
-          noFinishNeeded: response.noFinishNeeded,
-        }),
+        responseFrame,
+      );
+      return;
+    }
+
+    const response = decodeReturnFrame(responseFrame);
+    if (response.kind === "exception") {
+      wasmHost.abi.respondHostCallException(
+        wasmHost.handle,
+        call.questionId,
+        response.reason,
       );
       return;
     }
@@ -956,17 +1109,18 @@ export class RpcServerBridge {
     wasmHost.abi.respondHostCallResults(
       wasmHost.handle,
       call.questionId,
-      response.content ?? new Uint8Array(EMPTY_STRUCT_MESSAGE),
+      response.contentBytes ?? new Uint8Array(EMPTY_STRUCT_MESSAGE),
     );
   }
 
   async #dispatchCall(
     call: RpcCallRequest,
     middlewareState: Map<string, unknown>,
+    signal: AbortSignal,
   ): Promise<RpcDispatchOutcome> {
     // Handle promisedAnswer targets (Level 2 RPC / promise pipelining).
     if (call.target.tag === RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
-      return await this.#dispatchPipelinedCall(call, middlewareState);
+      return await this.#dispatchPipelinedCall(call, middlewareState, signal);
     }
 
     if (call.target.tag !== RPC_CALL_TARGET_TAG_IMPORTED_CAP) {
@@ -983,6 +1137,7 @@ export class RpcServerBridge {
       capabilityIndex,
       call,
       middlewareState,
+      signal,
     );
   }
 
@@ -995,6 +1150,7 @@ export class RpcServerBridge {
   async #dispatchPipelinedCall(
     call: RpcCallRequest,
     middlewareState: Map<string, unknown>,
+    signal: AbortSignal,
   ): Promise<RpcDispatchOutcome> {
     if (call.target.tag !== RPC_CALL_TARGET_TAG_PROMISED_ANSWER) {
       return {
@@ -1045,6 +1201,7 @@ export class RpcServerBridge {
         capabilityIndex,
         call,
         middlewareState,
+        signal,
       );
     } finally {
       answerEntry.pipelineRefCount -= 1;
@@ -1059,6 +1216,7 @@ export class RpcServerBridge {
     capabilityIndex: number,
     call: RpcCallRequest,
     middlewareState: Map<string, unknown>,
+    signal: AbortSignal,
   ): Promise<RpcDispatchOutcome> {
     const registered = this.#dispatchByCapability.get(capabilityIndex);
     if (!registered) {
@@ -1101,6 +1259,7 @@ export class RpcServerBridge {
         tag: entry.tag,
         id: entry.id,
       })),
+      signal,
       outboundClient: this.#outboundClient,
       exportCapability: (dispatch, options) =>
         this.exportCapability(dispatch, options),

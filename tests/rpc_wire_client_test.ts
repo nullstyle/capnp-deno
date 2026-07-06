@@ -135,6 +135,46 @@ Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table",
   await client.close();
 });
 
+Deno.test("RpcWireClient sends early-cancel finish when a pending call aborts", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport, {
+    interfaceId: 0x1234n,
+  });
+  const controller = new AbortController();
+
+  const pending = client.callRaw(
+    { capabilityIndex: 9 },
+    5,
+    new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    { signal: controller.signal },
+  );
+
+  await waitForSentFrames(transport, 1);
+  const call = decodeCallRequestFrame(transport.sent[0]);
+  assertEquals(call.questionId, 1);
+
+  controller.abort("stop streaming");
+
+  let thrown: unknown;
+  try {
+    await pending;
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /rpc wait aborted/i.test(thrown.message),
+    `expected abort SessionError, got: ${String(thrown)}`,
+  );
+  await waitForSentFrames(transport, 2);
+  const finish = decodeFinishFrame(transport.sent[1]);
+  assertEquals(finish.questionId, 1);
+  assertEquals(finish.requireEarlyCancellation, true);
+
+  await client.close();
+});
+
 Deno.test("RpcWireClient callRaw requires interfaceId when no default exists", async () => {
   const transport = new MockTransport();
   const client = new RpcWireClient(transport);
@@ -168,8 +208,10 @@ Deno.test("RpcWireClient close rejects pending waits", async () => {
   );
 
   await waitForSentFrames(transport, 1);
+  assertEquals(client.pendingReturnCount, 1);
 
   await client.close();
+  assertEquals(client.pendingReturnCount, 0);
 
   let thrown: unknown;
   try {
@@ -189,6 +231,7 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
   const transport = new MockTransport();
   const client = new RpcWireClient(transport);
 
+  assertEquals(client.exportedCapabilityCount, 0);
   const exported = client.exportCapability({
     interfaceId: 0x9000n,
     dispatch(methodId, params) {
@@ -198,6 +241,7 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
     },
   }, { capabilityIndex: 33, referenceCount: 2 });
   assertEquals(exported.capabilityIndex, 33);
+  assertEquals(client.exportedCapabilityCount, 1);
 
   await transport.emitInbound(encodeCallRequestFrame({
     questionId: 11,
@@ -232,6 +276,33 @@ Deno.test("RpcWireClient can export a local capability and serve inbound callbac
   const releasedResponse = decodeReturnFrame(transport.sent[1]);
   assertEquals(releasedResponse.answerId, 12);
   assertEquals(releasedResponse.kind, "exception");
+  assertEquals(client.exportedCapabilityCount, 0);
+
+  await client.close();
+  assertEquals(client.exportedCapabilityCount, 0);
+});
+
+Deno.test("RpcWireClient rejects local exports after close", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport);
+
+  await client.close();
+
+  let thrown: unknown;
+  try {
+    client.exportCapability({
+      interfaceId: 0x9000n,
+      dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    });
+  } catch (error) {
+    thrown = error;
+  }
+
+  assert(
+    thrown instanceof SessionError &&
+      /rpc wire client is closed/i.test(thrown.message),
+    `expected closed SessionError, got: ${String(thrown)}`,
+  );
 });
 
 Deno.test("RpcWireClient callRaw send failures do not leak waiter rejections", async () => {

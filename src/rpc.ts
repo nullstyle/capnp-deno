@@ -41,6 +41,8 @@ export {
   type RpcServerRegistry,
 } from "./rpc/server/rpc_runtime.ts";
 
+export { EMPTY_STRUCT_MESSAGE } from "./rpc/wire.ts";
+
 // === High-Level Service API (DX V2) ===
 
 export {
@@ -243,6 +245,7 @@ export {
 export {
   createStreamSender,
   type StreamCallFn,
+  type StreamSendContext,
   type StreamSender,
   type StreamSenderOptions,
 } from "./rpc/session/streaming.ts";

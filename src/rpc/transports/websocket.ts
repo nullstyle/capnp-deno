@@ -691,6 +691,9 @@ class WebSocketTransportHandlerImpl implements WebSocketTransportHandler {
       return new Response("websocket protocol mismatch", { status: 426 });
     }
 
+    const localAddress = toWebSocketLocalAddress(request);
+    const connectionId = request.headers.get("sec-websocket-key") ?? undefined;
+
     let socket: WebSocket;
     let response: Response;
     try {
@@ -705,9 +708,9 @@ class WebSocketTransportHandlerImpl implements WebSocketTransportHandler {
     const transport = new AcceptedWebSocketTransport(
       socket,
       {
-        localAddress: toWebSocketLocalAddress(request),
+        localAddress,
         remoteAddress: { transport: "websocket" },
-        id: request.headers.get("sec-websocket-key") ?? undefined,
+        id: connectionId,
       },
       this.#options.transport ? { ...this.#options.transport } : undefined,
     );

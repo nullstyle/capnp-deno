@@ -37,6 +37,10 @@ export interface RpcCallContext {
   readonly interfaceId?: bigint;
   readonly paramsCapTable?: PreambleCapDescriptor[];
   /**
+   * Aborts when the peer finishes the question with early cancellation.
+   */
+  readonly signal: AbortSignal;
+  /**
    * Optional outbound client bound to the current call context.
    *
    * When present, generated adapters can invoke callbacks on capabilities

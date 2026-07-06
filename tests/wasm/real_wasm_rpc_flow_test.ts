@@ -197,7 +197,7 @@ Deno.test("real wasm peer bootstrap/call flow matches wire fixtures", async () =
       throw new Error(`expected exception return, got: ${call.kind}`);
     }
     assertEquals(call.answerId, 2);
-    assertEquals(call.reason, "unknown capability");
+    assertEquals(call.reason, "host call failed");
 
     assertEquals(peer.drainOutgoingFrames().frames.length, 0);
   });
@@ -231,7 +231,7 @@ Deno.test("real wasm peer successful bootstrap/call flow matches fixtures", asyn
       throw new Error(`expected exception return, got: ${call.kind}`);
     }
     assertEquals(call.answerId, 2);
-    assertEquals(call.reason, "bootstrap stub");
+    assertEquals(call.reason, "host call failed");
     assertEquals(peer.abi.popHostCall(peer.handle), null);
   });
 });

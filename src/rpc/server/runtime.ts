@@ -15,6 +15,7 @@ import {
 import { RpcSession, type RpcSessionOptions } from "../session/session.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { WasmPeer } from "../../wasm/peer.ts";
+import { decodeRpcMessageTag, RPC_MESSAGE_TAG_FINISH } from "../wire.ts";
 
 const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;
 const DEFAULT_MAX_HOST_CALLS_TOTAL = Number.MAX_SAFE_INTEGER;
@@ -360,9 +361,13 @@ export class RpcServerRuntime {
 
     const hooked = new PostInboundHookTransport(
       interceptor,
-      (_frame) => this.#afterInboundFrame(),
+      (frame) => this.#afterInboundFrame(frame),
     );
     this.#postInboundHookTransport = hooked;
+    this.bridge.setAsyncHostCallDispatch(
+      true,
+      () => this.#flushPeerOutboundFrames(),
+    );
     this.session = new RpcSession(peer, hooked, options.session ?? {});
   }
 
@@ -577,7 +582,14 @@ export class RpcServerRuntime {
     return handled;
   }
 
-  async #afterInboundFrame(): Promise<void> {
+  async #afterInboundFrame(frame: Uint8Array): Promise<void> {
+    try {
+      if (decodeRpcMessageTag(frame) === RPC_MESSAGE_TAG_FINISH) {
+        await this.bridge.handleFrame(frame);
+      }
+    } catch {
+      // The WASM peer remains the source of truth for malformed frames.
+    }
     await this.pumpHostCallsNow();
   }
 

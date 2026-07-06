@@ -20,7 +20,10 @@ export {
 
 // === Generated RPC Helpers ===
 
-export { connectAndBootstrap } from "./rpc/server/rpc_runtime.ts";
+export {
+  connectAndBootstrap,
+  type RpcCallContext,
+} from "./rpc/server/rpc_runtime.ts";
 
 // === High-Level Service API (DX V2) ===
 
@@ -302,6 +305,7 @@ export {
 export {
   createStreamSender,
   type StreamCallFn,
+  type StreamSendContext,
   type StreamSender,
   type StreamSenderOptions,
 } from "./rpc/session/streaming.ts";

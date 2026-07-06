@@ -117,6 +117,24 @@ export class RpcWireClient {
   }
 
   /**
+   * Number of in-flight calls currently waiting for Return frames.
+   *
+   * @returns Current pending return waiter count.
+   */
+  get pendingReturnCount(): number {
+    return this.#pendingReturns.size;
+  }
+
+  /**
+   * Number of local callback capabilities exported by this client.
+   *
+   * @returns Current exported local capability count.
+   */
+  get exportedCapabilityCount(): number {
+    return this.#localBridge?.capabilityCount ?? 0;
+  }
+
+  /**
    * Send bootstrap and return the server's root capability pointer.
    */
   async bootstrap(
@@ -252,6 +270,9 @@ export class RpcWireClient {
     dispatch: RpcServerDispatch,
     options: { capabilityIndex?: number; referenceCount?: number } = {},
   ): CapabilityPointer {
+    if (this.#closed) {
+      throw new SessionError("rpc wire client is closed");
+    }
     if (!this.#localBridge) {
       this.#localBridge = new RpcServerBridge();
     }
@@ -265,6 +286,7 @@ export class RpcWireClient {
     if (this.#closed) return;
     this.#closed = true;
     this.#rejectAllPending(new SessionError("rpc wire client is closed"));
+    this.#localBridge = null;
     await this.transport.close();
   }
 
@@ -357,8 +379,10 @@ export class RpcWireClient {
     options: RpcClientCallOptions,
   ): Promise<RpcReturnMessage> {
     const wait = this.#waitForReturn(questionId, options);
+    let frameSent = false;
     try {
       await this.transport.send(frame);
+      frameSent = true;
     } catch (error) {
       const pending = this.#pendingReturns.get(questionId);
       if (pending) {
@@ -369,7 +393,28 @@ export class RpcWireClient {
       await wait.catch(() => {});
       throw error;
     }
-    return await wait;
+    try {
+      return await wait;
+    } catch (error) {
+      if (frameSent && (options.autoFinish ?? true)) {
+        await this.#tryFinishAfterWaitFailure(questionId, options.finish);
+      }
+      throw error;
+    }
+  }
+
+  async #tryFinishAfterWaitFailure(
+    questionId: number,
+    options: RpcFinishOptions = {},
+  ): Promise<void> {
+    try {
+      await this.finish(questionId, {
+        releaseResultCaps: options.releaseResultCaps,
+        requireEarlyCancellation: options.requireEarlyCancellation ?? true,
+      });
+    } catch {
+      // Best-effort cleanup only; preserve the original request failure.
+    }
   }
 
   #waitForReturn(

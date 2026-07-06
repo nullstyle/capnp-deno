@@ -1,8 +1,9 @@
 import {
   createStreamSender,
   type StreamCallFn,
+  type StreamSendContext,
 } from "../../src/rpc/session/streaming.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, deferred } from "../test_utils.ts";
 
 function makeCallFn(
   responses: Uint8Array[] | ((index: number) => Uint8Array),
@@ -194,4 +195,115 @@ Deno.test("StreamSender with maxInFlight=1 processes sequentially", async () => 
   assertEquals(JSON.stringify(order), JSON.stringify([0, 1, 2, 3, 4]));
   assertEquals(sender.totalSent, 5);
   assertEquals(sender.totalReceived, 5);
+});
+
+Deno.test("StreamSender supports typed params/results and per-send context", async () => {
+  interface Chunk {
+    value: number;
+  }
+
+  const contexts: StreamSendContext[] = [];
+  const responses: string[] = [];
+  const sender = createStreamSender<Chunk, string>(
+    (chunk, context) => {
+      contexts.push(context);
+      return Promise.resolve(`chunk-${context.index}-${chunk.value}`);
+    },
+    {
+      maxInFlight: 2,
+      onResponse: (response) => {
+        responses.push(response);
+      },
+    },
+  );
+
+  await sender.send({ value: 7 });
+  await sender.send({ value: 9 });
+  await sender.flush();
+
+  assertEquals(responses.join(","), "chunk-0-7,chunk-1-9");
+  assertEquals(contexts.length, 2);
+  assertEquals(contexts[0].index, 0);
+  assertEquals(contexts[1].index, 1);
+  assertEquals(contexts[0].signal.aborted, false);
+  assertEquals(sender.inFlight, 0);
+});
+
+Deno.test("StreamSender cancel aborts in-flight calls and rejects future sends", async () => {
+  const started = deferred<void>();
+  const errors: Array<{ error: unknown; index: number }> = [];
+  let aborted = false;
+
+  const sender = createStreamSender<Uint8Array, Uint8Array>(
+    (_params, context) =>
+      new Promise<Uint8Array>((resolve, reject) => {
+        started.resolve();
+        context.signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(context.signal.reason);
+        }, { once: true });
+        context.signal.throwIfAborted?.();
+        void resolve;
+      }),
+    {
+      onError: (error, index) => {
+        errors.push({ error, index });
+      },
+    },
+  );
+
+  await sender.send(new Uint8Array([1]));
+  await started.promise;
+  await sender.cancel("stop streaming");
+
+  assertEquals(aborted, true);
+  assertEquals(sender.inFlight, 0);
+  assertEquals(sender.totalSent, 1);
+  assertEquals(sender.totalReceived, 1);
+  assertEquals(errors.length, 1);
+  assertEquals(errors[0].index, 0);
+
+  let thrown: unknown;
+  try {
+    await sender.send(new Uint8Array([2]));
+  } catch (error) {
+    thrown = error;
+  }
+  assert(
+    thrown instanceof Error && /stream canceled/i.test(thrown.message),
+    `expected stream canceled error, got: ${String(thrown)}`,
+  );
+});
+
+Deno.test("StreamSender cancel without onError rejects after clearing in-flight calls", async () => {
+  const started = deferred<void>();
+  let aborted = false;
+
+  const sender = createStreamSender<Uint8Array, Uint8Array>(
+    (_params, context) =>
+      new Promise<Uint8Array>((resolve, reject) => {
+        started.resolve();
+        context.signal.addEventListener("abort", () => {
+          aborted = true;
+          reject(context.signal.reason);
+        }, { once: true });
+        void resolve;
+      }),
+  );
+
+  await sender.send(new Uint8Array([1]));
+  await started.promise;
+
+  let thrown: unknown;
+  try {
+    await sender.cancel("cancel without handler");
+  } catch (error) {
+    thrown = error;
+  }
+
+  assertEquals(aborted, true);
+  assertEquals(sender.inFlight, 0);
+  assertEquals(sender.totalSent, 1);
+  assertEquals(sender.totalReceived, 1);
+  assertEquals(thrown, "cancel without handler");
 });

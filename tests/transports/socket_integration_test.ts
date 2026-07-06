@@ -5,6 +5,7 @@ import {
   ReconnectingRpcClientTransport,
   type RpcPeer,
   RpcSession,
+  type RpcStub,
   type RpcTransport,
   RpcWireClient,
   serve,
@@ -23,6 +24,17 @@ import {
   deferred,
   withTimeout,
 } from "../test_utils.ts";
+import {
+  CounterSink,
+  type CounterSink as CounterSinkClient,
+  type CounterSinkService,
+  createCounterSinkAddStreamSender,
+} from "../../examples/streaming/gen/schema_types.ts";
+import {
+  Pinger,
+  type Pinger as PingerService,
+  type Ponger,
+} from "../../examples/ping/gen/schema_types.ts";
 
 const EMPTY_RPC_PARAMS = EMPTY_STRUCT_MESSAGE;
 
@@ -379,6 +391,567 @@ function immediateReconnectOptions() {
     },
   };
 }
+
+interface GeneratedCallbackProbe {
+  callbackStarted: boolean;
+  callbackFinished: boolean;
+  postReleaseCallRejected: boolean;
+}
+
+function createGeneratedCallbackProbe(): GeneratedCallbackProbe {
+  return {
+    callbackStarted: false,
+    callbackFinished: false,
+    postReleaseCallRejected: false,
+  };
+}
+
+function createGeneratedCallbackPinger(
+  probe: GeneratedCallbackProbe,
+): PingerService {
+  return {
+    async ping(ponger) {
+      probe.callbackStarted = true;
+      await ponger.pong(321, { timeoutMs: 2_000 });
+      probe.callbackFinished = true;
+
+      const closable = ponger as Ponger & {
+        close?: () => Promise<void> | void;
+      };
+      assert(
+        typeof closable.close === "function",
+        "expected generated callback stub lifecycle",
+      );
+      await closable.close();
+
+      try {
+        await ponger.pong(654, { timeoutMs: 2_000 });
+      } catch (error) {
+        probe.postReleaseCallRejected = error instanceof Error &&
+          /unknown capability/i.test(error.message);
+        return;
+      }
+
+      throw new Error("expected released generated callback call to fail");
+    },
+  };
+}
+
+async function assertGeneratedCallbackFlow(
+  client: RpcStub<PingerService>,
+  probe: GeneratedCallbackProbe,
+  label: string,
+): Promise<void> {
+  let pingResolved = false;
+  let callbackSawPendingPing = false;
+  const callbackValues: number[] = [];
+  const localPonger: Ponger = {
+    pong(value) {
+      callbackSawPendingPing = !pingResolved;
+      callbackValues.push(value);
+      return Promise.resolve();
+    },
+  };
+
+  await withTimeout(
+    client.ping(localPonger, { timeoutMs: 2_000 }),
+    4_000,
+    `${label} generated callback ping`,
+  );
+  pingResolved = true;
+
+  assertEquals(probe.callbackStarted, true);
+  assertEquals(probe.callbackFinished, true);
+  assertEquals(probe.postReleaseCallRejected, true);
+  assertEquals(callbackSawPendingPing, true);
+  assertEquals(callbackValues.length, 1);
+  assertEquals(callbackValues[0], 321);
+}
+
+interface GeneratedStreamingProbe {
+  values: number[];
+  active: number;
+  maxActive: number;
+}
+
+function createGeneratedStreamingProbe(): GeneratedStreamingProbe {
+  return {
+    values: [],
+    active: 0,
+    maxActive: 0,
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sumNumbers(values: readonly number[]): bigint {
+  return values.reduce((sum, value) => sum + BigInt(value), 0n);
+}
+
+function createGeneratedStreamingCounter(
+  probe: GeneratedStreamingProbe,
+): CounterSinkService {
+  return {
+    async add(value, ctx) {
+      if (ctx.signal.aborted) {
+        throw new Error("stream call started after cancellation");
+      }
+      probe.active++;
+      probe.maxActive = Math.max(probe.maxActive, probe.active);
+      try {
+        probe.values.push(value);
+        await delay(5);
+      } finally {
+        probe.active--;
+      }
+    },
+
+    total() {
+      return {
+        sum: sumNumbers(probe.values),
+        count: probe.values.length,
+      };
+    },
+  };
+}
+
+async function assertGeneratedStreamingFlow(
+  client: RpcStub<CounterSinkClient>,
+  probe: GeneratedStreamingProbe,
+  label: string,
+): Promise<void> {
+  const values = [2, 3, 5, 7, 11, 13];
+  const sender = createCounterSinkAddStreamSender(client, {
+    maxInFlight: 4,
+  });
+
+  for (const value of values) {
+    await sender.send(value);
+  }
+  await withTimeout(sender.flush(), 4_000, `${label} stream flush`);
+
+  assertEquals(sender.totalSent, values.length);
+  assertEquals(sender.totalReceived, values.length);
+  assertEquals(probe.maxActive, 1);
+  assertEquals(probe.values.join(","), values.join(","));
+
+  const total = await withTimeout(
+    client.total({ timeoutMs: 2_000 }),
+    4_000,
+    `${label} stream total`,
+  );
+  assertEquals(total.sum, sumNumbers(values));
+  assertEquals(total.count, values.length);
+}
+
+interface GeneratedStreamingCancellationProbe {
+  readonly started: ReturnType<typeof deferred<number>>;
+  readonly canceled: ReturnType<typeof deferred<void>>;
+  readonly release: ReturnType<typeof deferred<void>>;
+  values: number[];
+  sawAbort: boolean;
+}
+
+function createGeneratedStreamingCancellationProbe(): GeneratedStreamingCancellationProbe {
+  return {
+    started: deferred<number>(),
+    canceled: deferred<void>(),
+    release: deferred<void>(),
+    values: [],
+    sawAbort: false,
+  };
+}
+
+function createGeneratedStreamingCancellationCounter(
+  probe: GeneratedStreamingCancellationProbe,
+): CounterSinkService {
+  return {
+    async add(value, ctx) {
+      probe.started.resolve(value);
+      ctx.signal.addEventListener("abort", () => {
+        probe.sawAbort = true;
+        probe.canceled.resolve();
+      }, { once: true });
+
+      if (value === 99) {
+        await Promise.race([
+          probe.canceled.promise,
+          probe.release.promise,
+        ]);
+        if (ctx.signal.aborted) return;
+      }
+
+      probe.values.push(value);
+    },
+
+    total() {
+      return {
+        sum: sumNumbers(probe.values),
+        count: probe.values.length,
+      };
+    },
+  };
+}
+
+async function assertGeneratedStreamingCancellationFlow(
+  client: RpcStub<CounterSinkClient>,
+  probe: GeneratedStreamingCancellationProbe,
+  label: string,
+): Promise<void> {
+  const errors: unknown[] = [];
+  const sender = createCounterSinkAddStreamSender(client, {
+    maxInFlight: 1,
+    onError: (error) => {
+      errors.push(error);
+    },
+  });
+  await sender.send(99);
+  assertEquals(
+    await withTimeout(
+      probe.started.promise,
+      2_000,
+      `${label} stream call start`,
+    ),
+    99,
+  );
+
+  await withTimeout(
+    sender.cancel("client canceled stream"),
+    4_000,
+    `${label} cancel stream`,
+  );
+  await withTimeout(
+    probe.canceled.promise,
+    2_000,
+    `${label} server cancellation`,
+  );
+  assertEquals(probe.sawAbort, true);
+  assertEquals(sender.inFlight, 0);
+  assertEquals(errors.length, 1);
+
+  const followup = createCounterSinkAddStreamSender(client, {
+    maxInFlight: 1,
+  });
+  await followup.send(7);
+  await withTimeout(
+    followup.flush(),
+    4_000,
+    `${label} followup stream flush`,
+  );
+
+  const total = await withTimeout(
+    client.total({ timeoutMs: 2_000 }),
+    4_000,
+    `${label} post-cancel stream total`,
+  );
+  assertEquals(total.sum, 7n);
+  assertEquals(total.count, 1);
+}
+
+Deno.test("connect/serve generated callbacks over TcpTransport", async () => {
+  const probe = createGeneratedCallbackProbe();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(Pinger, listener, createGeneratedCallbackPinger(probe));
+
+  let client: RpcStub<PingerService> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          Pinger,
+          await TcpTransport.connect("127.0.0.1", port),
+        ))(),
+      4_000,
+      "tcp generated callback connect",
+    );
+
+    await assertGeneratedCallbackFlow(client, probe, "tcp");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("connect/serve generated callbacks over WebSocketTransport", async () => {
+  const probe = createGeneratedCallbackProbe();
+  const port = reserveTcpPort();
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+    path: "/rpc",
+  });
+  const handle = serve(Pinger, listener, createGeneratedCallbackPinger(probe));
+
+  let client: RpcStub<PingerService> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          Pinger,
+          await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+        ))(),
+      4_000,
+      "websocket generated callback connect",
+    );
+
+    await assertGeneratedCallbackFlow(client, probe, "websocket");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("connect/serve generated streaming over TcpTransport", async () => {
+  const probe = createGeneratedStreamingProbe();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await TcpTransport.connect("127.0.0.1", port),
+        ))(),
+      4_000,
+      "tcp generated streaming connect",
+    );
+
+    await assertGeneratedStreamingFlow(client, probe, "tcp");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("connect/serve generated streaming over WebSocketTransport", async () => {
+  const probe = createGeneratedStreamingProbe();
+  const port = reserveTcpPort();
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+    path: "/rpc",
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+        ))(),
+      4_000,
+      "websocket generated streaming connect",
+    );
+
+    await assertGeneratedStreamingFlow(client, probe, "websocket");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("generated streaming cancellation over TcpTransport", async () => {
+  const probe = createGeneratedStreamingCancellationProbe();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingCancellationCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await TcpTransport.connect("127.0.0.1", port),
+        ))(),
+      4_000,
+      "tcp generated streaming cancellation connect",
+    );
+
+    await assertGeneratedStreamingCancellationFlow(client, probe, "tcp");
+  } finally {
+    probe.release.resolve();
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("generated streaming cancellation over WebSocketTransport", async () => {
+  const probe = createGeneratedStreamingCancellationProbe();
+  const port = reserveTcpPort();
+  const listener = WebSocketTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+    path: "/rpc",
+  });
+  const handle = serve(
+    CounterSink,
+    listener,
+    createGeneratedStreamingCancellationCounter(probe),
+  );
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await WebSocketTransport.connect(`ws://127.0.0.1:${port}/rpc`),
+        ))(),
+      4_000,
+      "websocket generated streaming cancellation connect",
+    );
+
+    await assertGeneratedStreamingCancellationFlow(client, probe, "websocket");
+  } finally {
+    probe.release.resolve();
+    await client?.close().catch(() => {});
+    await handle.close();
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test("connect/serve disposes generated streaming service handles", async () => {
+  const disposed = deferred<void>();
+  const port = reserveTcpPort();
+  const listener = TcpTransport.listen({
+    hostname: "127.0.0.1",
+    port,
+  });
+
+  class DisposableCounter implements CounterSinkService {
+    readonly values: number[] = [];
+
+    add(value: number): void {
+      this.values.push(value);
+    }
+
+    total() {
+      return {
+        sum: sumNumbers(this.values),
+        count: this.values.length,
+      };
+    }
+
+    [Symbol.dispose](): void {
+      disposed.resolve();
+    }
+  }
+
+  const handle = serve(CounterSink, listener, () => new DisposableCounter());
+
+  let client: RpcStub<CounterSinkClient> | null = null;
+  try {
+    client = await withTimeout(
+      (async () =>
+        await connect(
+          CounterSink,
+          await TcpTransport.connect("127.0.0.1", port),
+        ))(),
+      4_000,
+      "tcp generated streaming dispose connect",
+    );
+
+    const sender = createCounterSinkAddStreamSender(client, {
+      maxInFlight: 2,
+    });
+    await sender.send(1);
+    await sender.send(2);
+    await withTimeout(sender.flush(), 4_000, "dispose stream flush");
+
+    await handle.close();
+    await withTimeout(disposed.promise, 2_000, "streaming service dispose");
+  } finally {
+    await client?.close().catch(() => {});
+    await handle.close().catch(() => {});
+  }
+
+  assertEquals(handle.closed, true);
+});
+
+Deno.test({
+  name: "connect/serve generated callbacks over WebTransportTransport",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const probe = createGeneratedCallbackProbe();
+    const port = reserveTcpPort();
+    const listener = WebTransportTransport.listen({
+      hostname: "127.0.0.1",
+      port,
+      path: "/rpc",
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+    });
+    const handle = serve(
+      Pinger,
+      listener,
+      createGeneratedCallbackPinger(probe),
+    );
+
+    let client: RpcStub<PingerService> | null = null;
+    try {
+      client = await withTimeout(
+        (async () =>
+          await connect(
+            Pinger,
+            await WebTransportTransport.connect(
+              `https://127.0.0.1:${port}/rpc`,
+              createWebTransportConnectOptions(),
+            ),
+          ))(),
+        4_000,
+        "webtransport generated callback connect",
+      );
+
+      await assertGeneratedCallbackFlow(client, probe, "webtransport");
+    } finally {
+      await client?.close().catch(() => {});
+      await handle.close();
+    }
+
+    assertEquals(handle.closed, true);
+  },
+});
 
 Deno.test("serve disposes constructor instances on TCP peer disconnect", async () => {
   const connected = deferred<RpcPeer>();
