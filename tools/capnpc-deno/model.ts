@@ -11,6 +11,8 @@ export interface CodeGeneratorRequestModel {
   requestedFiles: RequestedFileModel[];
 }
 
+export const STREAM_RESULT_TYPE_ID = 0x995f9a3377c0b16en;
+
 export interface RequestedFileModel {
   id: bigint;
   filename: string;

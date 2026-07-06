@@ -1,4 +1,8 @@
 import { generateTypescriptFiles } from "../../tools/capnpc-deno/emitter.ts";
+import {
+  type CodeGeneratorRequestModel,
+  STREAM_RESULT_TYPE_ID,
+} from "../../tools/capnpc-deno/model.ts";
 import { parseCodeGeneratorRequest } from "../../tools/capnpc-deno/request_parser.ts";
 import { assert, assertEquals } from "../test_utils.ts";
 
@@ -177,6 +181,12 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   assert(
     source.includes("RpcServiceToken<Pinger>"),
     "expected generated service token type annotation",
+  );
+  assert(
+    source.includes(
+      "High-level generated RPC client for `Pinger`.",
+    ),
+    "expected generated high-level client JSDoc",
   );
   assert(
     source.includes("bootstrapPingerClient"),
@@ -480,4 +490,308 @@ Deno.test("capnpc-deno generated rpc client invokes optional finish lifecycle ho
   assertEquals(callCount, 1);
   assertEquals(finishQuestionId, 42);
   assertEquals(releaseResultCaps, true);
+});
+
+function makeStreamingRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x700n;
+  const interfaceId = 0x701n;
+  const paramsId = 0x702n;
+  const prefix = "tests/fixtures/schemas/streaming_codegen.capnp:";
+
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "tests/fixtures/schemas/streaming_codegen.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [{ name: "Counter", id: interfaceId }],
+        kind: "file",
+      },
+      {
+        id: interfaceId,
+        displayName: `${prefix}Counter`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [{
+            name: "add",
+            codeOrder: 0,
+            paramStructTypeId: paramsId,
+            resultStructTypeId: STREAM_RESULT_TYPE_ID,
+          }],
+        },
+      },
+      {
+        id: paramsId,
+        displayName: `${prefix}Counter.add$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: interfaceId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 1,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [{
+            name: "value",
+            codeOrder: 0,
+            discriminantValue: 0xffff,
+            slot: { offset: 0, type: { kind: "uint32" } },
+          }],
+        },
+      },
+    ],
+    requestedFiles: [{
+      id: fileId,
+      filename: "tests/fixtures/schemas/streaming_codegen.capnp",
+      imports: [],
+    }],
+  };
+}
+
+function makeCallbackRequest(): CodeGeneratorRequestModel {
+  const fileId = 0x710n;
+  const pingerId = 0x711n;
+  const pongerId = 0x712n;
+  const pingParamsId = 0x713n;
+  const pingResultsId = 0x714n;
+  const pongParamsId = 0x715n;
+  const pongResultsId = 0x716n;
+  const prefix = "tests/fixtures/schemas/callback_codegen.capnp:";
+
+  return {
+    nodes: [
+      {
+        id: fileId,
+        displayName: "tests/fixtures/schemas/callback_codegen.capnp",
+        displayNamePrefixLength: 0,
+        scopeId: 0n,
+        nestedNodes: [
+          { name: "Pinger", id: pingerId },
+          { name: "Ponger", id: pongerId },
+        ],
+        kind: "file",
+      },
+      {
+        id: pingerId,
+        displayName: `${prefix}Pinger`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [{
+            name: "ping",
+            codeOrder: 0,
+            paramStructTypeId: pingParamsId,
+            resultStructTypeId: pingResultsId,
+          }],
+        },
+      },
+      {
+        id: pongerId,
+        displayName: `${prefix}Ponger`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: fileId,
+        nestedNodes: [],
+        kind: "interface",
+        interfaceNode: {
+          methods: [{
+            name: "pong",
+            codeOrder: 0,
+            paramStructTypeId: pongParamsId,
+            resultStructTypeId: pongResultsId,
+          }],
+        },
+      },
+      {
+        id: pingParamsId,
+        displayName: `${prefix}Pinger.ping$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: pingerId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 1,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [{
+            name: "p",
+            codeOrder: 0,
+            discriminantValue: 0xffff,
+            slot: {
+              offset: 0,
+              type: { kind: "interface", typeId: pongerId },
+            },
+          }],
+        },
+      },
+      {
+        id: pingResultsId,
+        displayName: `${prefix}Pinger.ping$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: pingerId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+      {
+        id: pongParamsId,
+        displayName: `${prefix}Ponger.pong$Params`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: pongerId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 1,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [{
+            name: "n",
+            codeOrder: 0,
+            discriminantValue: 0xffff,
+            slot: { offset: 0, type: { kind: "uint32" } },
+          }],
+        },
+      },
+      {
+        id: pongResultsId,
+        displayName: `${prefix}Ponger.pong$Results`,
+        displayNamePrefixLength: prefix.length,
+        scopeId: pongerId,
+        nestedNodes: [],
+        kind: "struct",
+        structNode: {
+          dataWordCount: 0,
+          pointerCount: 0,
+          isGroup: false,
+          discriminantCount: 0,
+          discriminantOffset: 0,
+          fields: [],
+        },
+      },
+    ],
+    requestedFiles: [{
+      id: fileId,
+      filename: "tests/fixtures/schemas/callback_codegen.capnp",
+      imports: [],
+    }],
+  };
+}
+
+Deno.test("capnpc-deno documents generated callback-capable params", () => {
+  const generated = generateTypescriptFiles(makeCallbackRequest());
+  assertEquals(generated.length, 2);
+  const types = fileByPath(generated, "callback_codegen_types.ts");
+  const source = types.contents;
+
+  assert(
+    source.includes(
+      "@param value - Local `Ponger` implementation or remote `RpcStub<Ponger>` callback capability.",
+    ),
+    "expected generated callback parameter JSDoc",
+  );
+  assert(
+    source.includes("value: Ponger | RpcStub<Ponger>"),
+    "expected generated callback-capable high-level method signature",
+  );
+  assert(
+    source.includes(
+      "p: exportCapabilityFromTransport(transport, Ponger, value)",
+    ),
+    "expected generated callback params to export local capabilities",
+  );
+});
+
+Deno.test("capnpc-deno generates first-class streaming RPC methods", () => {
+  const generated = generateTypescriptFiles(makeStreamingRequest());
+  assertEquals(generated.length, 2);
+  const types = fileByPath(generated, "streaming_codegen_types.ts");
+  const source = types.contents;
+
+  assert(
+    source.includes("options?: RpcCallOptions): Promise<void>;"),
+    "expected low-level streaming client to return void",
+  );
+  assert(
+    /add\(params: \w*AddParams, ctx: RpcCallContext\): Promise<void> \| void;/
+      .test(source),
+    "expected low-level streaming server to return void",
+  );
+  assert(
+    source.includes("return new Uint8Array(EMPTY_STRUCT_MESSAGE);"),
+    "expected streaming server dispatch to return empty payload",
+  );
+  assert(
+    source.includes("export interface Counter {") &&
+      /add\(value: \w*AddParams\["value"\], options\?: RpcCallOptions\): Promise<void>;/
+        .test(source),
+    "expected high-level client streaming method",
+  );
+  assert(
+    source.includes("export interface CounterService {") &&
+      /add\(value: \w*AddParams\["value"\], ctx: RpcCallContext\): Promise<void> \| void;/
+        .test(source),
+    "expected high-level server streaming method with context",
+  );
+  assert(
+    source.includes(
+      "High-level generated RPC client for `Counter`.",
+    ) &&
+      source.includes(
+        "High-level generated RPC server implementation for `Counter`.",
+      ),
+    "expected generated streaming service JSDoc",
+  );
+  assert(
+    source.includes(
+      "@param ctx - RPC call context. `ctx.signal` aborts when the caller requests early cancellation.",
+    ),
+    "expected generated server context JSDoc",
+  );
+  assert(
+    source.includes(
+      "export const Counter: RpcServiceToken<Counter, CounterService> = createRpcServiceToken({",
+    ),
+    "expected separate client/server service token types",
+  );
+  assert(
+    source.includes("export function createCounterAddStreamSender(") &&
+      /StreamSender<\w*AddParams\["value"\], void>/.test(source) &&
+      /createStreamSender<\w*AddParams\["value"\], void>/.test(source),
+    "expected typed generated stream sender helper",
+  );
+  assert(
+    source.includes("Create a typed stream sender for `Counter.add`.") &&
+      /@returns A `StreamSender` whose `send\(\)` accepts `\w*AddParams\["value"\]`\./
+        .test(source),
+    "expected generated stream sender JSDoc",
+  );
+  assert(
+    source.includes(
+      "import { EMPTY_STRUCT_MESSAGE, createRpcServiceToken, createStreamSender }",
+    ) &&
+      source.includes("StreamSenderOptions,"),
+    "expected generated streaming imports",
+  );
+  assert(
+    !source.includes("StreamResult"),
+    "expected no generated dependency on a local StreamResult codec",
+  );
 });

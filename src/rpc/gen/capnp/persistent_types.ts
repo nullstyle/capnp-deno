@@ -391,7 +391,17 @@ export function registerPersistentServer(
   return registry.exportCapability(createPersistentServer(server), options);
 }
 
+/**
+ * High-level generated RPC client for `Persistent`.
+ */
 export interface Persistent {
+  /**
+   * Call `Persistent.save`.
+   *
+   * @param value - Flattened `SaveParams.sealFor` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   save(
     value: SaveParams["sealFor"],
     options?: RpcCallOptions,

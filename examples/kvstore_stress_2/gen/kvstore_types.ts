@@ -36,6 +36,7 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "@nullstyle/capnp/rpc";
+import { createRpcServiceToken } from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -2013,11 +2014,28 @@ export function registerKvStoreServer(
   return registry.exportCapability(createKvStoreServer(server), options);
 }
 
+/**
+ * High-level generated RPC client for `KvClientNotifier`.
+ */
 export interface KvClientNotifier {
+  /**
+   * Call `KvClientNotifier.keysChanged`.
+   *
+   * @param value - Flattened `KeysChangedParams.changes` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   keysChanged(
     value: KeysChangedParams["changes"],
     options?: RpcCallOptions,
   ): Promise<void>;
+  /**
+   * Call `KvClientNotifier.stateResetRequired`.
+   *
+   * @param params - Generated method parameter struct.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   stateResetRequired(
     params: StateResetRequiredParams,
     options?: RpcCallOptions,
@@ -2064,8 +2082,8 @@ function createKvClientNotifierServiceServer(
   };
 }
 
-export const KvClientNotifier: RpcServiceToken<KvClientNotifier> = Object
-  .freeze({
+export const KvClientNotifier: RpcServiceToken<KvClientNotifier> =
+  createRpcServiceToken({
     interfaceId: KvClientNotifierInterfaceId,
     interfaceName: "KvClientNotifier",
     bootstrapClient: async (
@@ -2088,29 +2106,87 @@ export const KvClientNotifier: RpcServiceToken<KvClientNotifier> = Object
       ),
   });
 
+/**
+ * High-level generated RPC client for `KvStore`.
+ */
 export interface KvStore {
+  /**
+   * Call `KvStore.get`.
+   *
+   * @param value - Flattened `GetParams.key` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   get(value: GetParams["key"], options?: RpcCallOptions): Promise<GetResults>;
+  /**
+   * Call `KvStore.writeBatch`.
+   *
+   * @param value - Flattened `WriteBatchParams.ops` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   writeBatch(
     value: WriteBatchParams["ops"],
     options?: RpcCallOptions,
   ): Promise<WriteBatchResults>;
+  /**
+   * Call `KvStore.list`.
+   *
+   * @param params - Generated method parameter struct.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   list(
     params: ListParams,
     options?: RpcCallOptions,
   ): Promise<ListResults["entries"]>;
+  /**
+   * Call `KvStore.subscribe`.
+   *
+   * @param value - Local `KvClientNotifier` implementation or remote `RpcStub<KvClientNotifier>` callback capability.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   subscribe(
     value: KvClientNotifier | RpcStub<KvClientNotifier>,
     options?: RpcCallOptions,
   ): Promise<void>;
+  /**
+   * Call `KvStore.setWatchedKeys`.
+   *
+   * @param value - Flattened `SetWatchedKeysParams.keys` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   setWatchedKeys(
     value: SetWatchedKeysParams["keys"],
     options?: RpcCallOptions,
   ): Promise<void>;
+  /**
+   * Call `KvStore.createBackup`.
+   *
+   * @param value - Flattened `CreateBackupParams.flushBeforeBackup` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   createBackup(
     value: CreateBackupParams["flushBeforeBackup"],
     options?: RpcCallOptions,
   ): Promise<CreateBackupResults>;
+  /**
+   * Call `KvStore.listBackups`.
+   *
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   listBackups(options?: RpcCallOptions): Promise<ListBackupsResults["backups"]>;
+  /**
+   * Call `KvStore.restoreFromBackup`.
+   *
+   * @param params - Generated method parameter struct.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   restoreFromBackup(
     params: RestoreFromBackupParams,
     options?: RpcCallOptions,
@@ -2236,7 +2312,7 @@ function createKvStoreServiceServer(
   };
 }
 
-export const KvStore: RpcServiceToken<KvStore> = Object.freeze({
+export const KvStore: RpcServiceToken<KvStore> = createRpcServiceToken({
   interfaceId: KvStoreInterfaceId,
   interfaceName: "KvStore",
   bootstrapClient: async (

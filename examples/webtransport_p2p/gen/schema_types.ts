@@ -36,6 +36,7 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "@nullstyle/capnp/rpc";
+import { createRpcServiceToken } from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -1311,7 +1312,17 @@ export function registerPeerNodeServer(
   return registry.exportCapability(createPeerNodeServer(server), options);
 }
 
+/**
+ * High-level generated RPC client for `PeerEvents`.
+ */
 export interface PeerEvents {
+  /**
+   * Call `PeerEvents.system`.
+   *
+   * @param value - Flattened `SystemParams.message` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   system(
     value: SystemParams["message"],
     options?: RpcCallOptions,
@@ -1344,7 +1355,7 @@ function createPeerEventsServiceServer(
   };
 }
 
-export const PeerEvents: RpcServiceToken<PeerEvents> = Object.freeze({
+export const PeerEvents: RpcServiceToken<PeerEvents> = createRpcServiceToken({
   interfaceId: PeerEventsInterfaceId,
   interfaceName: "PeerEvents",
   bootstrapClient: async (
@@ -1367,18 +1378,62 @@ export const PeerEvents: RpcServiceToken<PeerEvents> = Object.freeze({
     ),
 });
 
+/**
+ * High-level generated RPC client for `PeerNode`.
+ */
 export interface PeerNode {
+  /**
+   * Call `PeerNode.connect`.
+   *
+   * @param value - Local `PeerEvents` implementation or remote `RpcStub<PeerEvents>` callback capability.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   connect(
     value: PeerEvents | RpcStub<PeerEvents>,
     options?: RpcCallOptions,
   ): Promise<ConnectResults>;
+  /**
+   * Call `PeerNode.say`.
+   *
+   * @param value - Flattened `SayParams.message` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   say(value: SayParams["message"], options?: RpcCallOptions): Promise<void>;
+  /**
+   * Call `PeerNode.rename`.
+   *
+   * @param value - Flattened `RenameParams.name` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   rename(value: RenameParams["name"], options?: RpcCallOptions): Promise<void>;
+  /**
+   * Call `PeerNode.listPeers`.
+   *
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
   listPeers(options?: RpcCallOptions): Promise<ListPeersResults["peers"]>;
+  /**
+   * Call `PeerNode.disconnect`.
+   *
+   * @param value - Flattened `DisconnectParams.reason` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   disconnect(
     value: DisconnectParams["reason"],
     options?: RpcCallOptions,
   ): Promise<void>;
+  /**
+   * Call `PeerNode.advertise`.
+   *
+   * @param value - Flattened `AdvertiseParams.endpoint` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   advertise(
     value: AdvertiseParams["endpoint"],
     options?: RpcCallOptions,
@@ -1469,7 +1524,7 @@ function createPeerNodeServiceServer(
   };
 }
 
-export const PeerNode: RpcServiceToken<PeerNode> = Object.freeze({
+export const PeerNode: RpcServiceToken<PeerNode> = createRpcServiceToken({
   interfaceId: PeerNodeInterfaceId,
   interfaceName: "PeerNode",
   bootstrapClient: async (

@@ -2,7 +2,11 @@
  * Interface/RPC client and server emission functions.
  */
 
-import type { InterfaceMethodModel, NodeModel } from "./model.ts";
+import {
+  STREAM_RESULT_TYPE_ID,
+  type InterfaceMethodModel,
+  type NodeModel,
+} from "./model.ts";
 import type { InterfaceInfo, StructInfo } from "./emitter_helpers.ts";
 import {
   collectLocalInterfaces,
@@ -16,7 +20,8 @@ interface ResolvedMethodInfo {
   readonly method: InterfaceMethodModel;
   readonly methodName: string;
   readonly params: StructInfo;
-  readonly results: StructInfo;
+  readonly results: StructInfo | null;
+  readonly isStreaming: boolean;
   readonly sourceInterfaceId: bigint;
 }
 
@@ -85,15 +90,20 @@ export function emitRpcModule(
     "encodeStructMessageWithCaps",
     "decodeStructMessageWithCaps",
   ]);
+  const hasStreamingMethods = resolvedInterfaces.some((resolvedInfo) =>
+    resolvedInfo.methods.some((method) => method.isStreaming)
+  );
 
   for (const resolvedInfo of resolvedInterfaces) {
     for (const method of resolvedInfo.methods) {
       typeImports.add(method.params.typeName);
       valueImports.add(method.params.codecConst);
       valueImports.add(method.params.descriptorConst);
-      typeImports.add(method.results.typeName);
-      valueImports.add(method.results.codecConst);
-      valueImports.add(method.results.descriptorConst);
+      if (!method.isStreaming && method.results) {
+        typeImports.add(method.results.typeName);
+        valueImports.add(method.results.codecConst);
+        valueImports.add(method.results.descriptorConst);
+      }
     }
   }
 
@@ -114,6 +124,9 @@ export function emitRpcModule(
         JSON.stringify(`./${capnpModulePath}`)
       };`,
     );
+  }
+  if (hasStreamingMethods) {
+    out.push('import { EMPTY_STRUCT_MESSAGE } from "@nullstyle/capnp/rpc";');
   }
   out.push("");
   out.push(
@@ -159,10 +172,13 @@ function emitInterfaceCode(
 
   out.push(`export interface ${info.typeName}Client {`);
   for (const resolved of resolvedMethods) {
+    const returnType = resolved.isStreaming
+      ? "void"
+      : resolved.results!.typeName;
     out.push(
       `  ${
         quoteIfNeeded(resolved.methodName)
-      }(params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${resolved.results.typeName}>;`,
+      }(params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${returnType}>;`,
     );
   }
   out.push("}");
@@ -170,10 +186,13 @@ function emitInterfaceCode(
 
   out.push(`export interface ${info.typeName}Server {`);
   for (const resolved of resolvedMethods) {
+    const returnType = resolved.isStreaming
+      ? "void"
+      : resolved.results!.typeName;
     out.push(
       `  ${
         quoteIfNeeded(resolved.methodName)
-      }(params: ${resolved.params.typeName}, ctx: RpcCallContext): Promise<${resolved.results.typeName}> | ${resolved.results.typeName};`,
+      }(params: ${resolved.params.typeName}, ctx: RpcCallContext): Promise<${returnType}> | ${returnType};`,
     );
   }
   out.push("}");
@@ -184,10 +203,13 @@ function emitInterfaceCode(
   );
   out.push("  return {");
   for (const resolved of resolvedMethods) {
+    const returnType = resolved.isStreaming
+      ? "void"
+      : resolved.results!.typeName;
     out.push(
       `    ${
         quoteIfNeeded(resolved.methodName)
-      }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${resolved.results.typeName}> => {`,
+      }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${returnType}> => {`,
     );
     // Encode params with cap table support (handles capability parameters)
     out.push(
@@ -219,9 +241,14 @@ function emitInterfaceCode(
       }], encoded.content, callOptions);`,
     );
     out.push("        try {");
-    out.push(
-      `          return decodeStructMessageWithCaps(${resolved.results.descriptorConst}, raw.contentBytes, raw.capTable) as ${resolved.results.typeName};`,
-    );
+    if (resolved.isStreaming) {
+      out.push("          void raw;");
+      out.push("          return;");
+    } else {
+      out.push(
+        `          return decodeStructMessageWithCaps(${resolved.results!.descriptorConst}, raw.contentBytes, raw.capTable) as ${resolved.results!.typeName};`,
+      );
+    }
     out.push("        } finally {");
     out.push(
       "          if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
@@ -239,9 +266,14 @@ function emitInterfaceCode(
       }], encoded.content, callOptions);`,
     );
     out.push("      try {");
-    out.push(
-      `        return decodeStructMessageWithCaps(${resolved.results.descriptorConst}, response, []) as ${resolved.results.typeName};`,
-    );
+    if (resolved.isStreaming) {
+      out.push("        void response;");
+      out.push("        return;");
+    } else {
+      out.push(
+        `        return decodeStructMessageWithCaps(${resolved.results!.descriptorConst}, response, []) as ${resolved.results!.typeName};`,
+      );
+    }
     out.push("      } finally {");
     out.push(
       "        if ((options?.autoFinish ?? true) && questionId !== undefined && transport.finish) {",
@@ -417,8 +449,11 @@ function resolveInterfaceInfo(
         } (source interface ${formatBigint(sourceInterfaceId)})`,
       );
     }
-    const results = structById.get(method.resultStructTypeId);
-    if (!results) {
+    const isStreaming = method.resultStructTypeId === STREAM_RESULT_TYPE_ID;
+    const results = isStreaming
+      ? null
+      : structById.get(method.resultStructTypeId);
+    if (!isStreaming && !results) {
       throw new Error(
         `interface ${info.typeName} method ${
           JSON.stringify(method.name)
@@ -432,7 +467,8 @@ function resolveInterfaceInfo(
       method,
       methodName,
       params,
-      results,
+      results: isStreaming ? null : results!,
+      isStreaming,
       sourceInterfaceId,
     });
   };
@@ -477,15 +513,20 @@ function emitServerMethodSwitch(
         JSON.stringify(resolved.methodName)
       }](decoded, ctx);`,
     );
-    out.push(
-      `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results.descriptorConst}, result);`,
-    );
-    out.push(`${indent}    if (encoded.capTable.length > 0) {`);
-    out.push(
-      `${indent}      return { content: encoded.content, capTable: encoded.capTable };`,
-    );
-    out.push(`${indent}    }`);
-    out.push(`${indent}    return encoded.content;`);
+    if (resolved.isStreaming) {
+      out.push(`${indent}    void result;`);
+      out.push(`${indent}    return new Uint8Array(EMPTY_STRUCT_MESSAGE);`);
+    } else {
+      out.push(
+        `${indent}    const encoded = encodeStructMessageWithCaps(${resolved.results!.descriptorConst}, result);`,
+      );
+      out.push(`${indent}    if (encoded.capTable.length > 0) {`);
+      out.push(
+        `${indent}      return { content: encoded.content, capTable: encoded.capTable };`,
+      );
+      out.push(`${indent}    }`);
+      out.push(`${indent}    return encoded.content;`);
+    }
     out.push(`${indent}  }`);
   }
   out.push(`${indent}  default:`);

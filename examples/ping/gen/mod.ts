@@ -3,4 +3,3 @@
 
 export * from "./schema_meta.ts";
 export * from "./schema_types.ts";
-export * from "./types.ts";

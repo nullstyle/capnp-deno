@@ -36,6 +36,7 @@ import type {
   RpcServiceToken,
   RpcStub,
 } from "@nullstyle/capnp/rpc";
+import { createRpcServiceToken } from "@nullstyle/capnp/rpc";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,
@@ -532,7 +533,11 @@ export function createPongerServer(server: PongerServer): RpcServerDispatch {
     ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = PongParamsCodec.decode(params);
+          const decoded = decodeStructMessageWithCaps(
+            PongParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as PongParams;
           const result = await server["pong"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             PongResultsStruct,
@@ -558,7 +563,17 @@ export function registerPongerServer(
   return registry.exportCapability(createPongerServer(server), options);
 }
 
+/**
+ * High-level generated RPC client for `Pinger`.
+ */
 export interface Pinger {
+  /**
+   * Call `Pinger.ping`.
+   *
+   * @param value - Local `Ponger` implementation or remote `RpcStub<Ponger>` callback capability.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   ping(
     value: Ponger | RpcStub<Ponger>,
     options?: RpcCallOptions,
@@ -600,7 +615,7 @@ function createPingerServiceServer(
   };
 }
 
-export const Pinger: RpcServiceToken<Pinger> = Object.freeze({
+export const Pinger: RpcServiceToken<Pinger> = createRpcServiceToken({
   interfaceId: PingerInterfaceId,
   interfaceName: "Pinger",
   bootstrapClient: async (
@@ -619,7 +634,17 @@ export const Pinger: RpcServiceToken<Pinger> = Object.freeze({
     registerPingerServer(registry, createPingerServiceServer(server), options),
 });
 
+/**
+ * High-level generated RPC client for `Ponger`.
+ */
 export interface Ponger {
+  /**
+   * Call `Ponger.pong`.
+   *
+   * @param value - Flattened `PongParams.n` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
   pong(value: PongParams["n"], options?: RpcCallOptions): Promise<void>;
 }
 
@@ -646,7 +671,7 @@ function createPongerServiceServer(
   };
 }
 
-export const Ponger: RpcServiceToken<Ponger> = Object.freeze({
+export const Ponger: RpcServiceToken<Ponger> = createRpcServiceToken({
   interfaceId: PongerInterfaceId,
   interfaceName: "Ponger",
   bootstrapClient: async (
