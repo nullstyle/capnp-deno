@@ -59,10 +59,40 @@ export interface CircuitBreakerOptions {
   ) => void;
 
   /**
+   * Optional callback invoked when `onStateChange` throws. Errors from this
+   * callback are swallowed so observer failures cannot affect breaker behavior.
+   */
+  onStateChangeError?: (
+    error: unknown,
+    from: CircuitBreakerState,
+    to: CircuitBreakerState,
+  ) => void;
+
+  /**
    * Custom function returning the current time in milliseconds.
    * Defaults to `Date.now`. Useful for testing to control time progression.
    */
   now?: () => number;
+}
+
+/**
+ * Snapshot of a circuit breaker's operational state.
+ */
+export interface CircuitBreakerStats {
+  /** Current circuit breaker state. */
+  readonly state: CircuitBreakerState;
+  /** Current consecutive failure count. */
+  readonly consecutiveFailures: number;
+  /** Configured failure threshold before opening the circuit. */
+  readonly maxConsecutiveFailures: number;
+  /** Configured open-state cooldown in milliseconds. */
+  readonly cooldownMs: number;
+  /** Remaining open-state cooldown in milliseconds, or zero outside OPEN. */
+  readonly cooldownRemainingMs: number;
+  /** Timestamp when the current/last open window started, or null when closed. */
+  readonly openedAtMs: number | null;
+  /** Whether the single half-open probe slot is currently in use. */
+  readonly halfOpenProbeInFlight: boolean;
 }
 
 /**
@@ -101,11 +131,18 @@ export class CircuitBreaker<T> {
   readonly #onStateChange:
     | ((from: CircuitBreakerState, to: CircuitBreakerState) => void)
     | undefined;
+  readonly #onStateChangeError:
+    | ((
+      error: unknown,
+      from: CircuitBreakerState,
+      to: CircuitBreakerState,
+    ) => void)
+    | undefined;
   readonly #now: () => number;
 
   #state: CircuitBreakerState = "CLOSED";
   #consecutiveFailures = 0;
-  #openedAtMs = 0;
+  #openedAtMs: number | null = null;
   #halfOpenProbeInFlight = false;
 
   constructor(options: CircuitBreakerOptions = {}) {
@@ -118,6 +155,7 @@ export class CircuitBreaker<T> {
     this.#maxConsecutiveFailures = maxConsecutiveFailures;
     this.#cooldownMs = cooldownMs;
     this.#onStateChange = options.onStateChange;
+    this.#onStateChangeError = options.onStateChangeError;
     this.#now = options.now ?? Date.now;
   }
 
@@ -129,6 +167,23 @@ export class CircuitBreaker<T> {
   /** The number of consecutive failures recorded so far. */
   get consecutiveFailures(): number {
     return this.#consecutiveFailures;
+  }
+
+  /** Snapshot of breaker state for logs, health checks, and metrics. */
+  get stats(): CircuitBreakerStats {
+    const openedAtMs = this.#openedAtMs;
+    const cooldownRemainingMs = this.#state === "OPEN" && openedAtMs !== null
+      ? Math.max(0, this.#cooldownMs - (this.#now() - openedAtMs))
+      : 0;
+    return {
+      state: this.#state,
+      consecutiveFailures: this.#consecutiveFailures,
+      maxConsecutiveFailures: this.#maxConsecutiveFailures,
+      cooldownMs: this.#cooldownMs,
+      cooldownRemainingMs,
+      openedAtMs,
+      halfOpenProbeInFlight: this.#halfOpenProbeInFlight,
+    };
   }
 
   /**
@@ -150,7 +205,8 @@ export class CircuitBreaker<T> {
    */
   async call(factory: () => Promise<T>): Promise<T> {
     if (this.#state === "OPEN") {
-      const elapsed = this.#now() - this.#openedAtMs;
+      const openedAtMs = this.#openedAtMs ?? this.#now();
+      const elapsed = this.#now() - openedAtMs;
       if (elapsed < this.#cooldownMs) {
         throw new TransportError(
           `circuit breaker is open; ${
@@ -194,6 +250,7 @@ export class CircuitBreaker<T> {
   reset(): void {
     this.#halfOpenProbeInFlight = false;
     this.#consecutiveFailures = 0;
+    this.#openedAtMs = null;
     if (this.#state !== "CLOSED") {
       this.#transitionTo("CLOSED");
     }
@@ -201,6 +258,7 @@ export class CircuitBreaker<T> {
 
   #onSuccess(): void {
     this.#consecutiveFailures = 0;
+    this.#openedAtMs = null;
     if (this.#state !== "CLOSED") {
       this.#transitionTo("CLOSED");
     }
@@ -222,9 +280,18 @@ export class CircuitBreaker<T> {
 
   #transitionTo(newState: CircuitBreakerState): void {
     const from = this.#state;
+    if (from === newState) return;
     this.#state = newState;
     if (this.#onStateChange) {
-      this.#onStateChange(from, newState);
+      try {
+        this.#onStateChange(from, newState);
+      } catch (error) {
+        try {
+          this.#onStateChangeError?.(error, from, newState);
+        } catch {
+          // Observer failures must not alter circuit-breaker behavior.
+        }
+      }
     }
   }
 }

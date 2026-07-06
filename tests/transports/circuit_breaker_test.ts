@@ -178,6 +178,100 @@ Deno.test("CircuitBreaker opens after maxConsecutiveFailures", async () => {
   assertEquals(transitions[0][1], "OPEN");
 });
 
+Deno.test("CircuitBreaker exposes operational stats", async () => {
+  const clock = makeClock(1_000);
+  const breaker = new CircuitBreaker<string>({
+    maxConsecutiveFailures: 1,
+    cooldownMs: 5_000,
+    now: clock.now,
+  });
+
+  try {
+    await breaker.call(() => Promise.reject(new TransportError("down")));
+  } catch {
+    // expected
+  }
+
+  let stats = breaker.stats;
+  assertEquals(stats.state, "OPEN");
+  assertEquals(stats.consecutiveFailures, 1);
+  assertEquals(stats.maxConsecutiveFailures, 1);
+  assertEquals(stats.cooldownMs, 5_000);
+  assertEquals(stats.cooldownRemainingMs, 5_000);
+  assertEquals(stats.openedAtMs, 1_000);
+  assertEquals(stats.halfOpenProbeInFlight, false);
+
+  clock.advance(1_500);
+  assertEquals(breaker.stats.cooldownRemainingMs, 3_500);
+
+  clock.advance(3_500);
+  let releaseProbe!: () => void;
+  const probeGate = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  const probe = breaker.call(async () => {
+    await probeGate;
+    return "ok";
+  });
+  await Promise.resolve();
+
+  stats = breaker.stats;
+  assertEquals(stats.state, "HALF_OPEN");
+  assertEquals(stats.cooldownRemainingMs, 0);
+  assertEquals(stats.openedAtMs, 1_000);
+  assertEquals(stats.halfOpenProbeInFlight, true);
+
+  releaseProbe();
+  assertEquals(await probe, "ok");
+  stats = breaker.stats;
+  assertEquals(stats.state, "CLOSED");
+  assertEquals(stats.consecutiveFailures, 0);
+  assertEquals(stats.openedAtMs, null);
+  assertEquals(stats.halfOpenProbeInFlight, false);
+});
+
+Deno.test("CircuitBreaker isolates throwing state-change observers", async () => {
+  const clock = makeClock();
+  const observerErrors: [unknown, CircuitBreakerState, CircuitBreakerState][] =
+    [];
+  const breaker = new CircuitBreaker<string>({
+    maxConsecutiveFailures: 1,
+    cooldownMs: 1_000,
+    now: clock.now,
+    onStateChange() {
+      throw new Error("metrics sink unavailable");
+    },
+    onStateChangeError(error, from, to) {
+      observerErrors.push([error, from, to]);
+      throw new Error("secondary observer failed");
+    },
+  });
+  const originalFailure = new TransportError("dial failed");
+
+  let thrown: unknown;
+  try {
+    await breaker.call(() => Promise.reject(originalFailure));
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown === originalFailure);
+  assertEquals(breaker.state, "OPEN");
+  assertEquals(observerErrors.length, 1);
+  assert(observerErrors[0][0] instanceof Error);
+  assertEquals(observerErrors[0][1], "CLOSED");
+  assertEquals(observerErrors[0][2], "OPEN");
+
+  clock.advance(1_000);
+  const recovered = await breaker.call(() => Promise.resolve("recovered"));
+  assertEquals(recovered, "recovered");
+  assertEquals(breaker.state, "CLOSED");
+  assertEquals(observerErrors.length, 3);
+  assertEquals(observerErrors[1][1], "OPEN");
+  assertEquals(observerErrors[1][2], "HALF_OPEN");
+  assertEquals(observerErrors[2][1], "HALF_OPEN");
+  assertEquals(observerErrors[2][2], "CLOSED");
+});
+
 Deno.test("CircuitBreaker rejects calls immediately when OPEN", async () => {
   const clock = makeClock();
   const breaker = new CircuitBreaker<string>({

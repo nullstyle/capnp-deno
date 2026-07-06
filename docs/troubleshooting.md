@@ -592,6 +592,9 @@ connection failures and is rejecting new connection attempts.
 - Wait for the cooldown period to elapse (default 30 seconds), after which a
   probe attempt will be allowed.
 - Fix the underlying connection issue (server down, network partition).
+- Inspect `breaker.stats.cooldownRemainingMs`,
+  `breaker.stats.consecutiveFailures`, and `breaker.stats.halfOpenProbeInFlight`
+  when wiring health checks or metrics.
 
 ---
 

@@ -324,6 +324,10 @@ cancel queued acquires or override the pool default acquire timeout. Connection
 factories receive `{ signal }` and should pass it into network dials when
 possible.
 
+`CircuitBreaker.stats` exposes state, failure counts, cooldown remaining, and
+half-open probe activity for health checks and metrics. `onStateChange` is an
+observer hook only; thrown observer errors are isolated from breaker decisions.
+
 Middleware and observability:
 
 - `MiddlewareTransport`

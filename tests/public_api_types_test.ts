@@ -27,6 +27,9 @@ import type {
   CapnpErrorOptions,
   CapnpFrameFramerOptions,
   CapnpFrameLimitsOptions,
+  CircuitBreakerOptions,
+  CircuitBreakerState,
+  CircuitBreakerStats,
   ConnectTcpTransportWithReconnectOptions,
   ConnectWebSocketTransportWithReconnectOptions,
   ConnectWebTransportTransportWithReconnectOptions,
@@ -183,6 +186,9 @@ type PublicTypeExportSmoke = {
   rpcMetricsMiddlewareOptions: RpcMetricsMiddlewareOptions;
   rpcMetricsSnapshot: RpcMetricsSnapshot;
   capabilityPointer: CapabilityPointer;
+  circuitBreakerOptions: CircuitBreakerOptions;
+  circuitBreakerState: CircuitBreakerState;
+  circuitBreakerStats: CircuitBreakerStats;
   connectTcpTransportWithReconnectOptions:
     ConnectTcpTransportWithReconnectOptions;
   connectWebSocketTransportWithReconnectOptions:
@@ -437,6 +443,21 @@ type AssertRpcConnectionPoolStatsTotal = Assert<
   IsEqual<RpcConnectionPoolStats["total"], number>
 >;
 
+type AssertCircuitBreakerStatsState = Assert<
+  IsEqual<CircuitBreakerStats["state"], CircuitBreakerState>
+>;
+
+type AssertCircuitBreakerStateChangeError = Assert<
+  IsEqual<
+    NonNullable<CircuitBreakerOptions["onStateChangeError"]>,
+    (
+      error: unknown,
+      from: CircuitBreakerState,
+      to: CircuitBreakerState,
+    ) => void
+  >
+>;
+
 type AssertCreateRpcDebugTracerReturn = Assert<
   IsEqual<ReturnType<typeof createRpcDebugTracer>, RpcDebugTracer>
 >;
@@ -682,6 +703,8 @@ type StaticAssertions = [
   AssertRpcConnectionPoolAcquireSignal,
   AssertRpcConnectionPoolConnectContextSignal,
   AssertRpcConnectionPoolStatsTotal,
+  AssertCircuitBreakerStatsState,
+  AssertCircuitBreakerStateChangeError,
   AssertCreateRpcDebugTracerReturn,
   AssertRpcDebugTracerRegisterSchema,
   AssertFormatRpcDebugEventReturn,
@@ -782,8 +805,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 59);
+  assert(STATIC_ASSERTIONS.length === 61);
 });

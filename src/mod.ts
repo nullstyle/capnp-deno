@@ -280,6 +280,7 @@ export {
   CircuitBreaker,
   type CircuitBreakerOptions,
   type CircuitBreakerState,
+  type CircuitBreakerStats,
 } from "./rpc/transports/resilience/circuit_breaker.ts";
 
 export {
