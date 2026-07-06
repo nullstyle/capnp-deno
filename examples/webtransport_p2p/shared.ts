@@ -1,3 +1,5 @@
+import { createWebTransportCertificateHashOptions } from "@nullstyle/capnp";
+
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 4443;
 export const DEFAULT_PATH = "/p2p";
@@ -113,12 +115,7 @@ export function formatUrl(host: string, port: number, path: string): string {
 
 export function createConnectOptions(certHash: Uint8Array) {
   return {
-    webTransport: {
-      serverCertificateHashes: [{
-        algorithm: "sha-256",
-        value: new Uint8Array(certHash),
-      }],
-    },
+    webTransport: createWebTransportCertificateHashOptions(certHash),
     connectTimeoutMs: DEFAULT_CONNECT_TIMEOUT_MS,
     streamOpenTimeoutMs: DEFAULT_STREAM_OPEN_TIMEOUT_MS,
   };

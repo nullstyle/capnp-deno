@@ -2,7 +2,13 @@
  * WebTransport transport tests.
  */
 
-import { TransportError, WebTransportTransport } from "../../src/advanced.ts";
+import {
+  createWebTransportCertificateHash,
+  createWebTransportCertificateHashOptions,
+  getWebTransportRuntimeSupport,
+  TransportError,
+  WebTransportTransport,
+} from "../../src/advanced.ts";
 import {
   assert,
   assertBytes,
@@ -24,7 +30,7 @@ function buildFrame(words: number): Uint8Array {
 
 async function withPatchedGlobalWebTransport(
   replacement: unknown,
-  fn: () => Promise<void>,
+  fn: () => void | Promise<void>,
 ): Promise<void> {
   const globalMutable = globalThis as unknown as {
     WebTransport: typeof WebTransport;
@@ -40,7 +46,7 @@ async function withPatchedGlobalWebTransport(
 
 async function withPatchedDenoQuicEndpoint(
   replacement: unknown,
-  fn: () => Promise<void>,
+  fn: () => void | Promise<void>,
 ): Promise<void> {
   const denoMutable = Deno as unknown as {
     QuicEndpoint?: typeof Deno.QuicEndpoint;
@@ -56,7 +62,7 @@ async function withPatchedDenoQuicEndpoint(
 
 async function withPatchedDenoUpgradeWebTransport(
   replacement: unknown,
-  fn: () => Promise<void>,
+  fn: () => void | Promise<void>,
 ): Promise<void> {
   const denoMutable = Deno as unknown as {
     upgradeWebTransport?: typeof Deno.upgradeWebTransport;
@@ -176,6 +182,13 @@ function createFakeBidiStream(
       getWriter: () => writer,
     } as WritableStream<Uint8Array> as WebTransportSendStream,
   };
+}
+
+function bufferSourceBytes(source: BufferSource): Uint8Array {
+  if (ArrayBuffer.isView(source)) {
+    return new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+  }
+  return new Uint8Array(source);
 }
 
 function createFakeIncomingBidiReaderHarness(): {
@@ -318,6 +331,109 @@ class SuccessfulWebTransport {
     this.#closedDeferred.resolve({ closeCode: 0, reason: "closed" });
   }
 }
+
+Deno.test("WebTransport certificate hash helpers copy bytes and parse hex", () => {
+  const source = new Uint8Array(32);
+  for (let i = 0; i < source.length; i += 1) {
+    source[i] = i;
+  }
+
+  const hash = createWebTransportCertificateHash(source);
+  assertEquals(hash.algorithm, "sha-256");
+  assertBytes(hash.value, Array.from(source));
+
+  source[0] = 255;
+  assertEquals(hash.value[0], 0);
+
+  const hex = Array.from(hash.value)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join(":");
+  const parsed = createWebTransportCertificateHash(hex);
+  assertBytes(parsed.value, Array.from(hash.value));
+
+  const baseOptions: WebTransportOptions = {
+    allowPooling: false,
+    serverCertificateHashes: [hash],
+  };
+  const merged = createWebTransportCertificateHashOptions(
+    parsed.value,
+    baseOptions,
+  );
+  assertEquals(merged.allowPooling, false);
+  assertEquals(merged.serverCertificateHashes?.length, 2);
+  const appendedValue = merged.serverCertificateHashes?.[1].value;
+  assert(appendedValue !== undefined, "expected appended certificate hash");
+  assertBytes(
+    bufferSourceBytes(appendedValue),
+    Array.from(parsed.value),
+  );
+});
+
+Deno.test("WebTransport certificate hash helpers reject malformed input", () => {
+  for (
+    const value of [
+      new Uint8Array(31),
+      "abc",
+      "zz".repeat(32),
+    ]
+  ) {
+    let thrown: unknown;
+    try {
+      createWebTransportCertificateHash(value);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof TransportError,
+      `expected TransportError for ${String(value)}, got ${String(thrown)}`,
+    );
+  }
+});
+
+Deno.test("getWebTransportRuntimeSupport reports client and server primitives", async () => {
+  class FakeWebTransport {}
+  class FakeQuicEndpoint {}
+  const fakeUpgrade = () => Promise.resolve({} as WebTransport);
+
+  await withPatchedGlobalWebTransport(FakeWebTransport, async () => {
+    await withPatchedDenoQuicEndpoint(FakeQuicEndpoint, async () => {
+      await withPatchedDenoUpgradeWebTransport(fakeUpgrade, () => {
+        const support = getWebTransportRuntimeSupport();
+        assertEquals(support.client, true);
+        assertEquals(support.server, true);
+        assertEquals(support.webTransport, true);
+        assertEquals(support.denoQuicEndpoint, true);
+        assertEquals(support.denoUpgradeWebTransport, true);
+        assertEquals(support.missing.length, 0);
+      });
+    });
+  });
+});
+
+Deno.test("WebTransportTransport.connect rejects non-https URLs before constructing session", async () => {
+  let constructed = false;
+  class TrackingWebTransport {
+    constructor() {
+      constructed = true;
+    }
+  }
+
+  await withPatchedGlobalWebTransport(TrackingWebTransport, async () => {
+    let thrown: unknown;
+    try {
+      await WebTransportTransport.connect("http://127.0.0.1:8443/rpc");
+    } catch (error) {
+      thrown = error;
+    }
+
+    assertEquals(constructed, false);
+    assert(
+      thrown instanceof TransportError &&
+        /requires an https URL/i.test(thrown.message),
+      `expected https validation error, got: ${String(thrown)}`,
+    );
+  });
+});
 
 Deno.test({
   name:
@@ -755,6 +871,251 @@ Deno.test({
       "webtransport close after stream eof",
     );
     assertEquals(webTransportCloseCalls, 1);
+  },
+});
+
+Deno.test({
+  name:
+    "WebTransportTransport.listen normalizes paths and reports path mismatch",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    class FakeQuicConn {
+      readonly remoteAddr: Deno.NetAddr = {
+        transport: "udp",
+        hostname: "127.0.0.1",
+        port: 5001,
+      };
+
+      close(): void {
+        // no-op
+      }
+    }
+
+    class FakeQuicIncoming {
+      accept(): Promise<Deno.QuicConn> {
+        return Promise.resolve(new FakeQuicConn() as unknown as Deno.QuicConn);
+      }
+    }
+
+    class FakeQuicListener {
+      #pending: ReturnType<typeof deferred<FakeQuicIncoming>> | null = null;
+
+      incoming(): Promise<Deno.QuicIncoming> {
+        this.#pending = deferred<FakeQuicIncoming>();
+        return this.#pending.promise as unknown as Promise<Deno.QuicIncoming>;
+      }
+
+      enqueue(incoming: FakeQuicIncoming): void {
+        this.#pending?.resolve(incoming);
+        this.#pending = null;
+      }
+
+      stop(): void {
+        this.#pending?.reject(new Error("listener stopped"));
+        this.#pending = null;
+      }
+    }
+
+    class FakeQuicEndpoint {
+      static last: FakeQuicEndpoint | null = null;
+
+      readonly addr: Deno.NetAddr = {
+        transport: "udp",
+        hostname: "127.0.0.1",
+        port: 4443,
+      };
+      readonly listener = new FakeQuicListener();
+
+      constructor() {
+        FakeQuicEndpoint.last = this;
+      }
+
+      listen(): Deno.QuicListener {
+        return this.listener as unknown as Deno.QuicListener;
+      }
+
+      close(): void {
+        this.listener.stop();
+      }
+    }
+
+    const mismatchSession = createFakeAcceptedSession(
+      "https://127.0.0.1:4443/wrong",
+    );
+    const reported = deferred<unknown>();
+    const events: Array<
+      { name: string; error?: unknown; attributes?: unknown }
+    > = [];
+
+    await withPatchedDenoQuicEndpoint(FakeQuicEndpoint, async () => {
+      await withPatchedDenoUpgradeWebTransport(() => {
+        return Promise.resolve(mismatchSession.session);
+      }, async () => {
+        const listener = WebTransportTransport.listen({
+          hostname: "127.0.0.1",
+          port: 4443,
+          path: "rpc",
+          cert: "cert",
+          key: "key",
+          onConnectionError: (error) => {
+            reported.resolve(error);
+          },
+          observability: {
+            onEvent(event) {
+              events.push(event);
+            },
+          },
+        });
+
+        FakeQuicEndpoint.last!.listener.enqueue(new FakeQuicIncoming());
+        const error = await withTimeout(
+          reported.promise,
+          1000,
+          "path mismatch report",
+        );
+        assert(
+          error instanceof TransportError &&
+            /expected \/rpc got \/wrong/i.test(error.message),
+          `expected path mismatch error, got: ${String(error)}`,
+        );
+        assert(
+          events.some((event) =>
+            event.name === "rpc.transport.webtransport.connection_error" &&
+            (event.attributes as Record<string, unknown>)?.[
+                "rpc.connection.path.expected"
+              ] === "/rpc"
+          ),
+          "expected path mismatch observability event",
+        );
+
+        await listener.close();
+      });
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "WebTransportTransport.listen reports first stream timeout through callback",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    class FakeQuicConn {
+      readonly remoteAddr: Deno.NetAddr = {
+        transport: "udp",
+        hostname: "127.0.0.1",
+        port: 5002,
+      };
+
+      close(): void {
+        // no-op
+      }
+    }
+
+    class FakeQuicIncoming {
+      accept(): Promise<Deno.QuicConn> {
+        return Promise.resolve(new FakeQuicConn() as unknown as Deno.QuicConn);
+      }
+    }
+
+    class FakeQuicListener {
+      #pending: ReturnType<typeof deferred<FakeQuicIncoming>> | null = null;
+
+      incoming(): Promise<Deno.QuicIncoming> {
+        this.#pending = deferred<FakeQuicIncoming>();
+        return this.#pending.promise as unknown as Promise<Deno.QuicIncoming>;
+      }
+
+      enqueue(incoming: FakeQuicIncoming): void {
+        this.#pending?.resolve(incoming);
+        this.#pending = null;
+      }
+
+      stop(): void {
+        this.#pending?.reject(new Error("listener stopped"));
+        this.#pending = null;
+      }
+    }
+
+    class FakeQuicEndpoint {
+      static last: FakeQuicEndpoint | null = null;
+
+      readonly addr: Deno.NetAddr = {
+        transport: "udp",
+        hostname: "127.0.0.1",
+        port: 4444,
+      };
+      readonly listener = new FakeQuicListener();
+
+      constructor() {
+        FakeQuicEndpoint.last = this;
+      }
+
+      listen(): Deno.QuicListener {
+        return this.listener as unknown as Deno.QuicListener;
+      }
+
+      close(): void {
+        this.listener.stop();
+      }
+    }
+
+    const timeoutSession = createFakeAcceptedSession(
+      "https://127.0.0.1:4444/rpc",
+    );
+    const reported = deferred<unknown>();
+    const events: Array<
+      { name: string; error?: unknown; attributes?: unknown }
+    > = [];
+
+    await withPatchedDenoQuicEndpoint(FakeQuicEndpoint, async () => {
+      await withPatchedDenoUpgradeWebTransport(() => {
+        return Promise.resolve(timeoutSession.session);
+      }, async () => {
+        const listener = WebTransportTransport.listen({
+          hostname: "127.0.0.1",
+          port: 4444,
+          path: "/rpc",
+          cert: "cert",
+          key: "key",
+          transport: {
+            streamOpenTimeoutMs: 10,
+          },
+          onConnectionError: (error) => {
+            reported.resolve(error);
+          },
+          observability: {
+            onEvent(event) {
+              events.push(event);
+            },
+          },
+        });
+
+        FakeQuicEndpoint.last!.listener.enqueue(new FakeQuicIncoming());
+        const error = await withTimeout(
+          reported.promise,
+          1000,
+          "first stream timeout report",
+        );
+        assert(
+          error instanceof TransportError &&
+            /bidirectional stream accept timed out/i.test(error.message),
+          `expected first stream timeout error, got: ${String(error)}`,
+        );
+        assert(
+          events.some((event) =>
+            event.name === "rpc.transport.webtransport.connection_error" &&
+            (event.attributes as Record<string, unknown>)?.[
+                "rpc.connection.phase"
+              ] === "first_stream"
+          ),
+          "expected first-stream observability event",
+        );
+
+        await listener.close();
+      });
+    });
   },
 });
 

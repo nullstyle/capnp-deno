@@ -36,6 +36,51 @@ interface PromiseResolvers<T> {
   reject: (reason?: unknown) => void;
 }
 
+/** Accepted input for a WebTransport SHA-256 certificate hash. */
+export type WebTransportCertificateHashInput =
+  | Uint8Array
+  | ArrayBuffer
+  | string;
+
+/**
+ * Browser-compatible WebTransport certificate hash descriptor.
+ */
+export interface WebTransportCertificateHash {
+  /** Hash algorithm. WebTransport certificate pinning requires SHA-256. */
+  readonly algorithm: "sha-256";
+  /** 32-byte SHA-256 certificate hash. */
+  readonly value: Uint8Array<ArrayBuffer>;
+}
+
+/**
+ * Options for {@link createWebTransportCertificateHash}.
+ */
+export interface WebTransportCertificateHashOptions {
+  /**
+   * Whether to ignore common hex separators (`:`, `-`, whitespace).
+   * Defaults to `true`.
+   */
+  allowSeparators?: boolean;
+}
+
+/**
+ * Runtime feature summary for browser and Deno WebTransport support.
+ */
+export interface WebTransportRuntimeSupport {
+  /** Whether client-side `new WebTransport(...)` is available. */
+  readonly client: boolean;
+  /** Whether Deno server-side QUIC/WebTransport primitives are available. */
+  readonly server: boolean;
+  /** Whether `globalThis.WebTransport` exists. */
+  readonly webTransport: boolean;
+  /** Whether `Deno.QuicEndpoint` exists. */
+  readonly denoQuicEndpoint: boolean;
+  /** Whether `Deno.upgradeWebTransport` exists. */
+  readonly denoUpgradeWebTransport: boolean;
+  /** Human-readable missing capability names. */
+  readonly missing: readonly string[];
+}
+
 /**
  * Configuration options for {@link WebTransportTransport}.
  */
@@ -146,10 +191,174 @@ function delay(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+function normalizeWebTransportPath(
+  path: string | undefined,
+): string | undefined {
+  if (path === undefined) return undefined;
+  const normalized = path.trim();
+  if (normalized.length === 0) return "/";
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function requireHttpsWebTransportUrl(url: string | URL): URL {
+  let parsed: URL;
+  try {
+    parsed = url instanceof URL ? url : new URL(url);
+  } catch (error) {
+    throw new TransportError(`invalid WebTransport URL: ${String(url)}`, {
+      cause: error,
+    });
+  }
+  if (parsed.protocol !== "https:") {
+    throw new TransportError(
+      `WebTransport requires an https URL, got ${parsed.protocol || "unknown"}`,
+    );
+  }
+  return parsed;
+}
+
+function getGlobalWebTransportConstructor(): typeof WebTransport | undefined {
+  const ctor = (globalThis as unknown as {
+    WebTransport?: typeof WebTransport;
+  }).WebTransport;
+  return typeof ctor === "function" ? ctor : undefined;
+}
+
+function getDenoQuicEndpoint(): typeof Deno.QuicEndpoint | undefined {
+  const denoGlobal = (globalThis as unknown as {
+    Deno?: { QuicEndpoint?: typeof Deno.QuicEndpoint };
+  }).Deno;
+  const endpoint = denoGlobal?.QuicEndpoint;
+  return typeof endpoint === "function" ? endpoint : undefined;
+}
+
+function getDenoUpgradeWebTransport():
+  | typeof Deno.upgradeWebTransport
+  | undefined {
+  const denoGlobal = (globalThis as unknown as {
+    Deno?: { upgradeWebTransport?: typeof Deno.upgradeWebTransport };
+  }).Deno;
+  const upgrade = denoGlobal?.upgradeWebTransport;
+  return typeof upgrade === "function" ? upgrade : undefined;
+}
+
+function parseCertificateHashHex(
+  value: string,
+  options: WebTransportCertificateHashOptions,
+): Uint8Array<ArrayBuffer> {
+  const raw = options.allowSeparators === false
+    ? value
+    : value.replace(/[\s:-]/g, "");
+  if (!/^[0-9a-fA-F]+$/.test(raw)) {
+    throw new TransportError("WebTransport certificate hash must be hex");
+  }
+  if (raw.length !== 64) {
+    throw new TransportError(
+      `WebTransport certificate hash must be 32 bytes (64 hex characters), got ${raw.length}`,
+    );
+  }
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Return available WebTransport client/server primitives in the current runtime.
+ *
+ * @returns A feature summary for browser clients and Deno WebTransport servers.
+ *
+ * @example
+ * ```ts
+ * const support = getWebTransportRuntimeSupport();
+ * if (!support.client) {
+ *   console.warn(`WebTransport unavailable: ${support.missing.join(", ")}`);
+ * }
+ * ```
+ */
+export function getWebTransportRuntimeSupport(): WebTransportRuntimeSupport {
+  const webTransport = getGlobalWebTransportConstructor() !== undefined;
+  const denoQuicEndpoint = getDenoQuicEndpoint() !== undefined;
+  const denoUpgradeWebTransport = getDenoUpgradeWebTransport() !== undefined;
+  const missing: string[] = [];
+  if (!webTransport) missing.push("WebTransport");
+  if (!denoQuicEndpoint) missing.push("Deno.QuicEndpoint");
+  if (!denoUpgradeWebTransport) missing.push("Deno.upgradeWebTransport");
+  return {
+    client: webTransport,
+    server: denoQuicEndpoint && denoUpgradeWebTransport,
+    webTransport,
+    denoQuicEndpoint,
+    denoUpgradeWebTransport,
+    missing,
+  };
+}
+
+/**
+ * Create a browser-compatible WebTransport SHA-256 certificate hash descriptor.
+ *
+ * @param input - 32-byte hash bytes or a 64-character SHA-256 hex string.
+ * @param options - Parsing options for string input.
+ * @returns A copied `{ algorithm: "sha-256", value }` descriptor.
+ *
+ * @example
+ * ```ts
+ * const hash = createWebTransportCertificateHash(certHashHex);
+ * await WebTransportTransport.connect(url, {
+ *   webTransport: { serverCertificateHashes: [hash] },
+ * });
+ * ```
+ */
+export function createWebTransportCertificateHash(
+  input: WebTransportCertificateHashInput,
+  options: WebTransportCertificateHashOptions = {},
+): WebTransportCertificateHash {
+  const bytes: Uint8Array<ArrayBuffer> = typeof input === "string"
+    ? parseCertificateHashHex(input, options)
+    : new Uint8Array(input);
+  if (bytes.byteLength !== 32) {
+    throw new TransportError(
+      `WebTransport certificate hash must be 32 bytes, got ${bytes.byteLength}`,
+    );
+  }
+  return {
+    algorithm: "sha-256",
+    value: new Uint8Array(bytes),
+  };
+}
+
+/**
+ * Merge a SHA-256 certificate hash into `WebTransportOptions`.
+ *
+ * @param input - 32-byte hash bytes or a 64-character SHA-256 hex string.
+ * @param baseOptions - Existing constructor options to preserve.
+ * @returns WebTransport constructor options with the hash appended.
+ *
+ * @example
+ * ```ts
+ * const options = createWebTransportCertificateHashOptions(certHashBytes);
+ * const transport = await WebTransportTransport.connect(url, {
+ *   webTransport: options,
+ * });
+ * ```
+ */
+export function createWebTransportCertificateHashOptions(
+  input: WebTransportCertificateHashInput,
+  baseOptions: WebTransportOptions = {},
+): WebTransportOptions {
+  const existing = baseOptions.serverCertificateHashes ?? [];
+  return {
+    ...baseOptions,
+    serverCertificateHashes: [
+      ...existing,
+      createWebTransportCertificateHash(input),
+    ],
+  };
+}
+
 function requireDenoQuicEndpoint(): typeof Deno.QuicEndpoint {
-  const maybeQuicEndpoint = (Deno as unknown as {
-    QuicEndpoint?: typeof Deno.QuicEndpoint;
-  }).QuicEndpoint;
+  const maybeQuicEndpoint = getDenoQuicEndpoint();
   if (typeof maybeQuicEndpoint !== "function") {
     throw new SessionError(
       "Deno.QuicEndpoint is unavailable; run Deno with --unstable-net to serve WebTransport",
@@ -159,9 +368,7 @@ function requireDenoQuicEndpoint(): typeof Deno.QuicEndpoint {
 }
 
 function requireDenoUpgradeWebTransport(): typeof Deno.upgradeWebTransport {
-  const maybeUpgrade = (Deno as unknown as {
-    upgradeWebTransport?: typeof Deno.upgradeWebTransport;
-  }).upgradeWebTransport;
+  const maybeUpgrade = getDenoUpgradeWebTransport();
   if (typeof maybeUpgrade !== "function") {
     throw new SessionError(
       "Deno.upgradeWebTransport is unavailable; run Deno with --unstable-net to serve WebTransport",
@@ -202,21 +409,33 @@ function toWebTransportRemoteAddress(
 async function reportConnectionError(
   callback: ((error: unknown) => void | Promise<void>) | undefined,
   error: unknown,
+  observability: RpcObservability | undefined,
+  attributes: Record<string, string | number | boolean | bigint> = {},
 ): Promise<void> {
+  const normalized = normalizeTransportError(
+    error,
+    "webtransport connection failed",
+  );
+  emitObservabilityEvent(observability, {
+    name: "rpc.transport.webtransport.connection_error",
+    attributes: {
+      "rpc.outcome": "error",
+      ...attributes,
+    },
+    error: normalized,
+  });
   if (!callback) {
     return;
   }
   try {
-    await callback(error);
+    await callback(normalized);
   } catch {
     // Error callbacks must not destabilize accept loops.
   }
 }
 
 function requireWebTransportConstructor(): typeof WebTransport {
-  const ctor = (globalThis as unknown as {
-    WebTransport?: typeof WebTransport;
-  }).WebTransport;
+  const ctor = getGlobalWebTransportConstructor();
   if (typeof ctor !== "function") {
     throw new TransportError(
       "WebTransport is unavailable; run Deno with --unstable-net",
@@ -349,14 +568,15 @@ export class WebTransportTransport implements RpcTransport {
     url: string | URL,
     options: WebTransportTransportConnectOptions = {},
   ): Promise<WebTransportTransport> {
+    const parsedUrl = requireHttpsWebTransportUrl(url);
     const WebTransportCtor = requireWebTransportConstructor();
     let webTransport: WebTransport;
     try {
-      webTransport = new WebTransportCtor(url, options.webTransport);
+      webTransport = new WebTransportCtor(parsedUrl, options.webTransport);
     } catch (error) {
       throw normalizeTransportError(
         error,
-        `failed to create webtransport session: ${String(url)}`,
+        `failed to create webtransport session: ${String(parsedUrl)}`,
       );
     }
 
@@ -367,7 +587,7 @@ export class WebTransportTransport implements RpcTransport {
         (timeoutMs) =>
           new TransportError(
             `webtransport connect timed out after ${timeoutMs}ms: ${
-              String(url)
+              String(parsedUrl)
             }`,
           ),
       );
@@ -377,7 +597,7 @@ export class WebTransportTransport implements RpcTransport {
         (timeoutMs) =>
           new TransportError(
             `webtransport bidirectional stream open timed out after ${timeoutMs}ms: ${
-              String(url)
+              String(parsedUrl)
             }`,
           ),
       );
@@ -394,7 +614,7 @@ export class WebTransportTransport implements RpcTransport {
       }
       throw normalizeTransportError(
         error,
-        `webtransport connect failed: ${String(url)}`,
+        `webtransport connect failed: ${String(parsedUrl)}`,
       );
     }
   }
@@ -674,6 +894,16 @@ export class WebTransportTransport implements RpcTransport {
     this.#sessionClosedWait.resolve();
     const error = new TransportError("webtransport session is closed");
     this.#outbound.rejectQueued(error);
+    try {
+      void this.#writer.abort(error).catch(() => {});
+    } catch {
+      // no-op during shutdown
+    }
+    try {
+      void this.#reader.cancel(error).catch(() => {});
+    } catch {
+      // no-op during shutdown
+    }
     this.#notifyClose();
   }
 
@@ -772,7 +1002,10 @@ class WebTransportTransportListenerImpl
   #closed = false;
 
   constructor(options: WebTransportTransportListenOptions) {
-    this.#options = options;
+    this.#options = {
+      ...options,
+      path: normalizeWebTransportPath(options.path),
+    };
     const QuicEndpoint = requireDenoQuicEndpoint();
     this.#endpoint = new QuicEndpoint({
       hostname: options.hostname ?? "0.0.0.0",
@@ -848,7 +1081,12 @@ class WebTransportTransportListenerImpl
         if (this.#closed) {
           return;
         }
-        await reportConnectionError(this.#options.onConnectionError, error);
+        await reportConnectionError(
+          this.#options.onConnectionError,
+          error,
+          this.#options.observability,
+          { "rpc.connection.phase": "incoming" },
+        );
         continue;
       }
       this.#trackAcceptIncoming(incoming);
@@ -861,7 +1099,12 @@ class WebTransportTransportListenerImpl
         if (this.#closed) {
           return;
         }
-        await reportConnectionError(this.#options.onConnectionError, error);
+        await reportConnectionError(
+          this.#options.onConnectionError,
+          error,
+          this.#options.observability,
+          { "rpc.connection.phase": "accept_job" },
+        );
       })
       .finally(() => {
         this.#accepting.delete(acceptJob);
@@ -877,7 +1120,12 @@ class WebTransportTransportListenerImpl
       if (this.#closed) {
         return;
       }
-      await reportConnectionError(this.#options.onConnectionError, error);
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        error,
+        this.#options.observability,
+        { "rpc.connection.phase": "accept" },
+      );
       return;
     }
 
@@ -891,7 +1139,12 @@ class WebTransportTransportListenerImpl
       } catch {
         // no-op
       }
-      await reportConnectionError(this.#options.onConnectionError, error);
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        error,
+        this.#options.observability,
+        { "rpc.connection.phase": "upgrade" },
+      );
       return;
     }
 
@@ -906,15 +1159,32 @@ class WebTransportTransportListenerImpl
 
     const url = new URL(session.url);
     if (this.#options.path && url.pathname !== this.#options.path) {
+      const error = new TransportError(
+        `webtransport path mismatch: expected ${this.#options.path} got ${url.pathname}`,
+      );
       try {
-        session.close({ reason: "webtransport path mismatch" });
+        conn.close();
       } catch {
         try {
-          session.close();
+          session.close({ reason: "webtransport path mismatch" });
         } catch {
-          // no-op
+          try {
+            session.close();
+          } catch {
+            // no-op
+          }
         }
       }
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        error,
+        this.#options.observability,
+        {
+          "rpc.connection.phase": "path",
+          "rpc.connection.path.expected": this.#options.path,
+          "rpc.connection.path.actual": url.pathname,
+        },
+      );
       return;
     }
 
@@ -935,7 +1205,12 @@ class WebTransportTransportListenerImpl
       } catch {
         // no-op
       }
-      await reportConnectionError(this.#options.onConnectionError, error);
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        error,
+        this.#options.observability,
+        { "rpc.connection.phase": "first_stream" },
+      );
       return;
     }
 

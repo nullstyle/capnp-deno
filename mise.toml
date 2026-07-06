@@ -2,4 +2,17 @@
 deno = "2.6.8"
 "github:WebAssembly/binaryen" = { version = "latest", extract_all = true, bin_path = "bin" }
 just = "1.46.0"
+node = "lts"
+"npm:esbuild" = "0.28.1"
+"npm:playwright" = "1.61.1"
 zig = "master"
+
+[tasks."browser-webtransport:install"]
+description = "Install Playwright Chromium for the optional browser WebTransport e2e"
+run = "playwright install chromium"
+
+[tasks."test:browser-webtransport"]
+description = "Install Chromium and run the opt-in browser WebTransport e2e"
+depends = ["browser-webtransport:install"]
+env = { CAPNP_DENO_BROWSER_E2E = "1" }
+run = "deno task test:browser-webtransport"
