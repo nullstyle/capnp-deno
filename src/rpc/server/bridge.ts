@@ -368,6 +368,38 @@ export interface RpcServerBridgePumpHostCallsOptions {
   maxCalls?: number;
 }
 
+/**
+ * Operational snapshot for {@link RpcServerBridge}.
+ */
+export interface RpcServerBridgeStats {
+  /** Number of answer table entries currently retained by the bridge. */
+  readonly answerTableEntries: number;
+  /** Number of answers whose dispatch handler has not completed yet. */
+  readonly pendingAnswers: number;
+  /** Number of completed answers retained while waiting for Finish or eviction. */
+  readonly completedAnswers: number;
+  /** Number of retained answers with an eviction timer scheduled. */
+  readonly answersWithEvictionTimers: number;
+  /** Total in-flight pipelined references across retained answers. */
+  readonly totalPipelineRefCount: number;
+  /** Largest pipeline reference count on a single retained answer. */
+  readonly maxPipelineRefCount: number;
+  /** Total deferred eviction attempts across retained answers. */
+  readonly evictionAttempts: number;
+  /** Number of exported capabilities currently registered. */
+  readonly exportedCapabilities: number;
+  /** Total retained references across exported capabilities. */
+  readonly totalCapabilityReferences: number;
+  /** Capability index that will be assigned to the next auto-exported capability. */
+  readonly nextCapabilityIndex: number;
+  /** Configured answer table size limit, or `null` when disabled. */
+  readonly maxAnswerTableSize: number | null;
+  /** Configured completed-answer eviction timeout, or `null` when disabled. */
+  readonly answerEvictionTimeoutMs: number | null;
+  /** Configured maximum deferred eviction attempts, or `null` when disabled. */
+  readonly maxEvictionRetries: number | null;
+}
+
 interface RegisteredDispatch {
   readonly dispatch: RpcServerDispatch;
   refCount: number;
@@ -421,6 +453,10 @@ function normalizeCallResponse(
     return { content: value };
   }
   return value;
+}
+
+function normalizeOptionalPositiveLimit(value: number): number | null {
+  return value > 0 && Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -721,6 +757,70 @@ export class RpcServerBridge {
   }
 
   /**
+   * Current answer table, pipelining, and capability registry counters.
+   *
+   * @returns A point-in-time stats snapshot suitable for logs and health checks.
+   *
+   * @example
+   * ```ts
+   * const stats = bridge.stats;
+   * console.log(stats.pendingAnswers, stats.totalPipelineRefCount);
+   * ```
+   */
+  get stats(): RpcServerBridgeStats {
+    let pendingAnswers = 0;
+    let completedAnswers = 0;
+    let answersWithEvictionTimers = 0;
+    let totalPipelineRefCount = 0;
+    let maxPipelineRefCount = 0;
+    let evictionAttempts = 0;
+
+    for (const entry of this.#answerTable.values()) {
+      if (entry.outcome === undefined && !entry.finished) {
+        pendingAnswers += 1;
+      } else if (!entry.finished) {
+        completedAnswers += 1;
+      }
+      if (entry.evictionTimer !== undefined) {
+        answersWithEvictionTimers += 1;
+      }
+      totalPipelineRefCount += entry.pipelineRefCount;
+      maxPipelineRefCount = Math.max(
+        maxPipelineRefCount,
+        entry.pipelineRefCount,
+      );
+      evictionAttempts += entry.evictionAttempts;
+    }
+
+    let totalCapabilityReferences = 0;
+    for (const registered of this.#dispatchByCapability.values()) {
+      totalCapabilityReferences += registered.refCount;
+    }
+
+    return {
+      answerTableEntries: this.#answerTable.size,
+      pendingAnswers,
+      completedAnswers,
+      answersWithEvictionTimers,
+      totalPipelineRefCount,
+      maxPipelineRefCount,
+      evictionAttempts,
+      exportedCapabilities: this.#dispatchByCapability.size,
+      totalCapabilityReferences,
+      nextCapabilityIndex: this.#nextCapabilityIndex,
+      maxAnswerTableSize: normalizeOptionalPositiveLimit(
+        this.#maxAnswerTableSize,
+      ),
+      answerEvictionTimeoutMs: normalizeOptionalPositiveLimit(
+        this.#answerEvictionTimeoutMs,
+      ),
+      maxEvictionRetries: normalizeOptionalPositiveLimit(
+        this.#maxEvictionRetries,
+      ),
+    };
+  }
+
+  /**
    * Returns the number of exported capabilities currently registered.
    * Useful for testing and debugging callback capability lifecycle.
    *
@@ -1007,10 +1107,27 @@ export class RpcServerBridge {
         ) {
           // Force-evict the entry and report a warning.
           this.#answerTable.delete(questionId);
+          const error = new SessionError(
+            `Force-evicted answer table entry for question ${questionId} after ${entry.evictionAttempts} eviction attempts (pipelineRefCount=${entry.pipelineRefCount})`,
+            {
+              metadata: {
+                phase: "dispatch",
+                questionId,
+                errorType: "AnswerTableForceEviction",
+              },
+            },
+          );
+          emitObservabilityEvent(this.#observability, {
+            name: "rpc.server.answer_table_force_eviction",
+            error,
+            attributes: {
+              "rpc.question_id": questionId,
+              "rpc.pipeline_ref_count": entry.pipelineRefCount,
+              "rpc.eviction_attempts": entry.evictionAttempts,
+              "rpc.answer_table_size": this.#answerTable.size,
+            },
+          });
           if (this.#onUnhandledError) {
-            const error = new Error(
-              `Force-evicted answer table entry for question ${questionId} after ${entry.evictionAttempts} eviction attempts (pipelineRefCount=${entry.pipelineRefCount})`,
-            );
             // Create a synthetic call request for the error handler.
             const syntheticCall: RpcCallRequest = {
               questionId,

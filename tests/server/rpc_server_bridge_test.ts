@@ -6,6 +6,7 @@ import {
   encodeReleaseFrame,
   RpcServerBridge,
   type RpcServerWasmHost,
+  SessionError,
   type WasmHostCallRecord,
 } from "../../src/advanced.ts";
 import { assert, assertEquals, deferred } from "../test_utils.ts";
@@ -235,6 +236,65 @@ Deno.test("RpcServerBridge handles release and finish lifecycle frames", async (
   );
   assertEquals(finish, null);
   assertEquals(finishQuestionId, 42);
+});
+
+Deno.test("RpcServerBridge stats expose answer table and capability pressure", async () => {
+  const gate = deferred<Uint8Array>();
+  const bridge = new RpcServerBridge({
+    nextCapabilityIndex: 20,
+    maxAnswerTableSize: 3,
+    answerEvictionTimeoutMs: 500,
+    maxEvictionRetries: 2,
+  });
+
+  const capability = bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => gate.promise,
+  }, { referenceCount: 2 });
+
+  assertEquals(capability.capabilityIndex, 20);
+  assertEquals(bridge.stats.exportedCapabilities, 1);
+  assertEquals(bridge.stats.totalCapabilityReferences, 2);
+  assertEquals(bridge.stats.nextCapabilityIndex, 21);
+  assertEquals(bridge.stats.maxAnswerTableSize, 3);
+  assertEquals(bridge.stats.answerEvictionTimeoutMs, 500);
+  assertEquals(bridge.stats.maxEvictionRetries, 2);
+  assertEquals(bridge.stats.answerTableEntries, 0);
+
+  const pending = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: capability.capabilityIndex,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  assertEquals(bridge.stats.answerTableEntries, 1);
+  assertEquals(bridge.stats.pendingAnswers, 1);
+  assertEquals(bridge.stats.completedAnswers, 0);
+  assertEquals(bridge.stats.answersWithEvictionTimers, 0);
+  assertEquals(bridge.stats.totalPipelineRefCount, 0);
+  assertEquals(bridge.stats.maxPipelineRefCount, 0);
+
+  gate.resolve(encodeSingleU32StructMessage(123));
+  const response = await pending;
+  assert(response !== null, "expected response frame");
+  assertEquals(decodeReturnFrame(response).kind, "results");
+
+  assertEquals(bridge.stats.answerTableEntries, 1);
+  assertEquals(bridge.stats.pendingAnswers, 0);
+  assertEquals(bridge.stats.completedAnswers, 1);
+  assertEquals(bridge.stats.answersWithEvictionTimers, 1);
+
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
+  assertEquals(bridge.stats.answerTableEntries, 0);
+  assertEquals(bridge.stats.pendingAnswers, 0);
+  assertEquals(bridge.stats.completedAnswers, 0);
+  assertEquals(bridge.stats.answersWithEvictionTimers, 0);
+
+  assertEquals(bridge.releaseCapability(capability, 2), false);
+  assertEquals(bridge.stats.exportedCapabilities, 0);
+  assertEquals(bridge.stats.totalCapabilityReferences, 0);
 });
 
 Deno.test("RpcServerBridge pumps wasm host calls and responds with results payload", async () => {
@@ -1606,6 +1666,9 @@ Deno.test("RpcServerBridge eviction deferred while pipelined call is in-flight",
   // The entry for question 1 should still be present because the pipelined
   // call has incremented the pipeline ref count.
   assertEquals(bridge.answerTableSize >= 1, true);
+  assertEquals(bridge.stats.totalPipelineRefCount, 1);
+  assertEquals(bridge.stats.maxPipelineRefCount, 1);
+  assertEquals(bridge.stats.evictionAttempts >= 1, true);
 
   // Step 4: Release the gate and let the pipelined call complete.
   gate.resolve();
@@ -1621,6 +1684,7 @@ Deno.test("RpcServerBridge eviction deferred while pipelined call is in-flight",
   // cancelled and Deno's test sanitizer does not report timer leaks.
   await bridge.handleFrame(encodeFinishFrame({ questionId: 1 }));
   await bridge.handleFrame(encodeFinishFrame({ questionId: 2 }));
+  assertEquals(bridge.stats.totalPipelineRefCount, 0);
 });
 
 Deno.test("RpcServerBridge eviction proceeds after pipelined call completes", async () => {
@@ -1811,11 +1875,19 @@ Deno.test("RpcServerBridge multiple concurrent pipelined calls against same ques
 
 Deno.test("RpcServerBridge force-evicts entry after maxEvictionRetries and reports error", async () => {
   const errors: Array<{ error: unknown; questionId: number }> = [];
+  const events: Array<
+    { name: string; error?: unknown; attributes?: Record<string, unknown> }
+  > = [];
 
   // Use a very short eviction timeout (10ms) and a low retry limit (3).
   const bridge = new RpcServerBridge({
     answerEvictionTimeoutMs: 10,
     maxEvictionRetries: 3,
+    observability: {
+      onEvent: (event) => {
+        events.push(event);
+      },
+    },
     onUnhandledError: (error, call) => {
       errors.push({ error, questionId: call.questionId });
     },
@@ -1879,9 +1951,19 @@ Deno.test("RpcServerBridge force-evicts entry after maxEvictionRetries and repor
   // The entry for question 1 should have been force-evicted after exceeding
   // the retry limit, despite the pipelined call still being in-flight.
   assertEquals(bridge.answerTableSize, 1); // Only question 2 should remain
+  assertEquals(bridge.stats.answerTableEntries, 1);
+  assertEquals(bridge.stats.pendingAnswers, 1);
+  assertEquals(bridge.stats.completedAnswers, 0);
+  assertEquals(bridge.stats.totalPipelineRefCount, 0);
 
   // Verify that the error handler was called with a force-eviction warning.
   assertEquals(errors.length, 1);
+  assert(errors[0].error instanceof SessionError, "expected SessionError");
+  assertEquals(errors[0].error.metadata?.questionId, 1);
+  assertEquals(
+    errors[0].error.metadata?.errorType,
+    "AnswerTableForceEviction",
+  );
   const errorMsg = errors[0].error instanceof Error
     ? errors[0].error.message
     : String(errors[0].error);
@@ -1901,6 +1983,17 @@ Deno.test("RpcServerBridge force-evicts entry after maxEvictionRetries and repor
     errorMsg.includes("pipelineRefCount=1"),
     `Expected error to mention pipelineRefCount, got: ${errorMsg}`,
   );
+  const forceEvictionEvent = events.find((event) =>
+    event.name === "rpc.server.answer_table_force_eviction"
+  );
+  assert(forceEvictionEvent !== undefined, "expected force-eviction event");
+  assert(forceEvictionEvent.error instanceof SessionError);
+  assertEquals(forceEvictionEvent.attributes?.["rpc.question_id"], 1);
+  assertEquals(
+    forceEvictionEvent.attributes?.["rpc.error_type"],
+    "AnswerTableForceEviction",
+  );
+  assertEquals(forceEvictionEvent.attributes?.["rpc.pipeline_ref_count"], 1);
 
   // Clean up: release the gate and finish the pipelined call.
   gate.resolve();

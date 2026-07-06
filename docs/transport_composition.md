@@ -138,7 +138,9 @@ callbacks, close state, and the next question ID.
 ### `RpcServerRuntime`
 
 Server-side runtime that combines `RpcSession` + `RpcServerBridge` + automatic
-host-call pumping. One runtime per accepted connection.
+host-call pumping. One runtime per accepted connection. The underlying
+`RpcServerBridge.stats` snapshot reports answer-table entries, pending/completed
+answers, pipelined reference pressure, and exported capability references.
 
 ## Stack Diagrams
 

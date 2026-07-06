@@ -93,8 +93,10 @@ import type {
   RpcReturnResults,
   RpcReturnResultsFrameRequest,
   RpcRuntimeModuleOptions,
+  RpcServerBridge,
   RpcServerBridgeOptions,
   RpcServerBridgePumpHostCallsOptions,
+  RpcServerBridgeStats,
   RpcServerCallContext,
   RpcServerCallResponse,
   RpcServerDispatch,
@@ -272,6 +274,7 @@ type PublicTypeExportSmoke = {
   rpcStub: RpcStub<{ ping(): Promise<void> }>;
   rpcStubLifecycle: RpcStubLifecycle;
   rpcServerBridgeOptions: RpcServerBridgeOptions;
+  rpcServerBridgeStats: RpcServerBridgeStats;
   rpcServerRuntimeHostCallPumpOptions: RpcServerRuntimeHostCallPumpOptions;
   rpcServerRuntimeOptions: RpcServerRuntimeOptions;
   rpcServerRuntimePumpOptions: RpcServerRuntimePumpOptions;
@@ -384,6 +387,14 @@ type AssertRpcClientCallResultCapTable = Assert<
 
 type AssertRpcServerCallContextCapTable = Assert<
   IsEqual<RpcServerCallContext["paramsCapTable"], RpcCapDescriptor[]>
+>;
+
+type AssertRpcServerBridgeStatsGetter = Assert<
+  IsEqual<RpcServerBridge["stats"], RpcServerBridgeStats>
+>;
+
+type AssertRpcServerBridgeStatsPipelineRefs = Assert<
+  IsEqual<RpcServerBridgeStats["totalPipelineRefCount"], number>
 >;
 
 type AssertRpcCallContextSignal = Assert<
@@ -758,6 +769,8 @@ type StaticAssertions = [
   AssertRpcClientCallOptionsCapTable,
   AssertRpcClientCallResultCapTable,
   AssertRpcServerCallContextCapTable,
+  AssertRpcServerBridgeStatsGetter,
+  AssertRpcServerBridgeStatsPipelineRefs,
   AssertRpcCallContextSignal,
   AssertRpcServiceContextSignal,
   AssertStreamSendContextSignal,
@@ -894,8 +907,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 73);
+  assert(STATIC_ASSERTIONS.length === 75);
 });

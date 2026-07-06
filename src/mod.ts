@@ -175,6 +175,7 @@ export {
   RpcServerBridge,
   type RpcServerBridgeOptions,
   type RpcServerBridgePumpHostCallsOptions,
+  type RpcServerBridgeStats,
   type RpcServerDispatch,
   type RpcServerMiddleware,
   type RpcServerWasmHost,

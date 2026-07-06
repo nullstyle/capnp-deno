@@ -952,12 +952,15 @@ const bridge = new RpcServerBridge({
 
 ### Check the answer table
 
-The `RpcServerBridge.answerTableSize` property shows how many in-flight or
-completed-but-unfinished questions are tracked. A steadily growing answer table
-indicates that `finish` messages are not being sent:
+The `RpcServerBridge.stats` snapshot shows how many in-flight and
+completed-but-unfinished questions are tracked. A steadily growing
+`answerTableEntries` count usually means `finish` messages are not being sent;
+non-zero `totalPipelineRefCount` means eviction is waiting for pipelined calls:
 
 ```ts
-console.log("answer table entries:", bridge.answerTableSize);
+console.log("answer table entries:", bridge.stats.answerTableEntries);
+console.log("pending answers:", bridge.stats.pendingAnswers);
+console.log("pipelined refs:", bridge.stats.totalPipelineRefCount);
 ```
 
 ### Verify transport wiring
