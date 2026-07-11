@@ -17,6 +17,10 @@ class MockTransport implements RpcTransport {
   closeCalls = 0;
   throwOnStart: unknown = null;
   throwOnSend: unknown = null;
+  // 1-based send() call index that throwOnSend applies to; null throws on
+  // every send.
+  throwOnSendCall: number | null = null;
+  sendCalls = 0;
   throwOnClose: unknown = null;
   sendStarted: (() => void) | null = null;
   sendGate: Promise<void> | null = null;
@@ -34,7 +38,13 @@ class MockTransport implements RpcTransport {
   }
 
   async send(frame: Uint8Array): Promise<void> {
-    if (this.throwOnSend !== null) throw this.throwOnSend;
+    this.sendCalls += 1;
+    if (
+      this.throwOnSend !== null &&
+      (this.throwOnSendCall === null || this.sendCalls === this.throwOnSendCall)
+    ) {
+      throw this.throwOnSend;
+    }
     this.sendStarted?.();
     if (this.sendGate) await this.sendGate;
     this.sent.push(new Uint8Array(frame));
@@ -271,6 +281,87 @@ Deno.test("RpcSession pumpInboundFrame normalizes transport send failures", asyn
     assertEquals(session.stats.inboundBytesReceived, 1);
     assertEquals(session.stats.outboundFramesSent, 0);
     assertEquals(session.stats.outboundBytesSent, 0);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("RpcSession stats count peer pushFrame failures without outbound sends", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (_frame) => {
+      throw new Error("peer pushFrame exploded");
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const session = new RpcSession(peer, transport);
+
+  try {
+    await session.start();
+
+    let thrown: unknown;
+    try {
+      await session.pumpInboundFrame(new Uint8Array([0x01, 0x02, 0x03]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /rpc session inbound frame failed/i.test(thrown.message) &&
+        /peer pushFrame exploded/i.test(thrown.message),
+      `expected normalized inbound failure, got: ${String(thrown)}`,
+    );
+    assertEquals(session.stats.inboundFramesStarted, 1);
+    assertEquals(session.stats.inboundFramesSucceeded, 0);
+    assertEquals(session.stats.inboundFramesFailed, 1);
+    assertEquals(session.stats.inboundFramesInFlight, 0);
+    assertEquals(session.stats.inboundBytesReceived, 3);
+    assertEquals(session.stats.outboundFramesSent, 0);
+    assertEquals(session.stats.outboundBytesSent, 0);
+    assertEquals(transport.sent.length, 0);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("RpcSession stats count partial outbound sends when a later send fails", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (
+      _frame,
+    ) => [new Uint8Array([0xa1, 0xa2]), new Uint8Array([0xb1])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  transport.throwOnSend = "second send exploded";
+  transport.throwOnSendCall = 2;
+  const session = new RpcSession(peer, transport);
+
+  try {
+    await session.start();
+
+    let thrown: unknown;
+    try {
+      await session.pumpInboundFrame(new Uint8Array([0x07]));
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert(
+      thrown instanceof SessionError &&
+        /rpc session inbound frame failed/i.test(thrown.message) &&
+        /second send exploded/i.test(thrown.message),
+      `expected normalized inbound failure, got: ${String(thrown)}`,
+    );
+    assertEquals(transport.sent.length, 1);
+    assertBytes(transport.sent[0], [0xa1, 0xa2]);
+    assertEquals(session.stats.inboundFramesStarted, 1);
+    assertEquals(session.stats.inboundFramesSucceeded, 0);
+    assertEquals(session.stats.inboundFramesFailed, 1);
+    assertEquals(session.stats.inboundFramesInFlight, 0);
+    assertEquals(session.stats.inboundBytesReceived, 1);
+    assertEquals(session.stats.outboundFramesSent, 1);
+    assertEquals(session.stats.outboundBytesSent, 2);
   } finally {
     await session.close();
   }
