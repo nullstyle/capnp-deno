@@ -6,8 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-11
+
+### Breaking
+
+- Restructured the package for the `src/`-based layout and split entrypoints.
+  Published versions `<= 0.0.2` are a different, pre-reorg API generation and
+  are not compatible with this release.
+- Package exports are now `.`, `./encoding`, `./rpc`, and `./advanced`; the
+  legacy `./codegen_runtime` export no longer exists.
+- The wire-level `MessageBuilder` exported from the root entrypoint is renamed
+  to `RpcWireMessageBuilder`; the `@nullstyle/capnp/encoding` `MessageBuilder`
+  used by generated code is unchanged.
+- The `./encoding` entrypoint no longer exports internal helpers (bit-mask
+  constants such as `MASK_29`, the shared `TEXT_ENCODER`/`TEXT_DECODER`
+  singletons, and `as*` coercion utilities such as `asString`).
+
 ### Added
 
+- `@nullstyle/capnp/advanced` entrypoint exposing low-level WASM APIs
+  (`WasmAbi`, `WasmPeer`, `instantiatePeer`, `getCapnpWasmExports`, `WasmSerde`,
+  `createRuntimePeer`, `getRuntimeWasmExports`).
+- `LICENSE` file at the repository root, shipped with the published package.
+- Stats snapshots across the stack: `transport.stats` for byte transports and
+  `MessagePortTransport`, `RpcSession.stats`, client adapter `stats`,
+  `RpcServerBridge.stats`, and enriched `RpcConnectionPool.stats`.
 - Schema-first getting started guides:
   - `docs/getting_started_serde.md`
   - `docs/getting_started_rpc.md`
@@ -65,7 +88,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   `onConnectionError` and observability, and rejects queued/in-flight sends when
   sessions close.
 - Documentation cleanup:
-  - archived historical planning/progress docs under `docs/archive/2026-02/`
+  - removed historical planning/progress docs from the repository
   - refreshed `docs/capnp_zig_additions.md` to current submodule revision.
 
 ### Fixed

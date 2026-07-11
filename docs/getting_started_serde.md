@@ -1,6 +1,6 @@
 # capnp-deno Serde Getting Started
 
-Updated: 2026-02-08
+Updated: 2026-07-11
 
 This guide is schema-first:
 
@@ -43,7 +43,7 @@ This generates files like:
 ## 3. Use Generated Binary Serde (Primary Path)
 
 ```ts
-import { type Person, PersonCodec } from "../generated/schema/person_types.ts";
+import { type Person, PersonCodec } from "./generated/schema/person_types.ts";
 
 const input: Person = {
   id: 123n,
@@ -68,11 +68,24 @@ Build the runtime module first:
 just build-wasm
 ```
 
-Then use `WasmSerde` from `advanced.ts`:
+Then use `WasmSerde` from `@nullstyle/capnp/advanced`. Package consumers can use
+the runtime WASM module bundled with the package via `getRuntimeWasmExports()` —
+no build step or manual WASM import needed:
 
 ```ts
-import * as runtimeWasmExports from "../generated/capnp_deno.wasm";
-import { WasmSerde } from "../advanced.ts";
+import { getRuntimeWasmExports, WasmSerde } from "@nullstyle/capnp/advanced";
+
+const serde = WasmSerde.fromExports(getRuntimeWasmExports());
+```
+
+Alternatively — for example when working against a locally built artifact — the
+build step above produces `generated/capnp_deno.wasm` in this repository; import
+it with a static WASM import (adjust the relative path to where your script
+lives):
+
+```ts
+import * as runtimeWasmExports from "./generated/capnp_deno.wasm";
+import { WasmSerde } from "@nullstyle/capnp/advanced";
 
 const serde = WasmSerde.fromExports(runtimeWasmExports, {
   expectedVersion: 1,
@@ -112,4 +125,5 @@ try {
 
 - For app development, prefer generated binary codecs first.
 - Keep `WasmSerde` for JSON bridge/debug/snapshot use cases.
-- For direct WASM instance/export control, use `WasmSerde` from `advanced.ts`.
+- For direct WASM instance/export control, use `WasmSerde` and the other
+  low-level APIs from `@nullstyle/capnp/advanced`.

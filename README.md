@@ -13,10 +13,16 @@ It combines:
 - resilience/ops helpers (reconnect, connection pool, circuit breaker,
   middleware, streaming, observability).
 
-Primary public entrypoint is `mod.ts`. Split entrypoints are available at
-`rpc.ts` (`@nullstyle/capnp/rpc`) and `encoding.ts`
-(`@nullstyle/capnp/encoding`). Advanced low-level WASM APIs are in
-`advanced.ts`.
+The primary public entrypoint is `@nullstyle/capnp` (`src/mod.ts`). Split
+entrypoints are available at `@nullstyle/capnp/rpc` (`src/rpc.ts`) and
+`@nullstyle/capnp/encoding` (`src/encoding.ts`). Advanced low-level WASM APIs
+are in `@nullstyle/capnp/advanced` (`src/advanced.ts`).
+
+Add the package to a consumer project with:
+
+```sh
+deno add jsr:@nullstyle/capnp
+```
 
 The published runtime source is dependency-clean: `src/**/*.ts` imports only
 relative project modules. Optional tools such as Playwright, esbuild, and Cliffy
@@ -101,7 +107,7 @@ import {
   InMemoryRpcHarnessTransport,
   RpcServerRuntime,
   SessionRpcClientTransport,
-} from "./mod.ts";
+} from "@nullstyle/capnp";
 import {
   bootstrapPingerClient,
   PingerInterfaceId,
@@ -385,12 +391,6 @@ Cross-compile a specific release target:
 deno task codegen:compile x86_64-pc-windows-msvc dist/capnpc-deno-x86_64-pc-windows-msvc.exe
 ```
 
-Local wrapper-script plugin mode (no install):
-
-```sh
-capnp compile -I schema -o ./scripts/capnpc-deno:generated schema/foo.capnp
-```
-
 GitHub release assets:
 
 - pushing a tag matching `v*` runs `.github/workflows/release.yml`
@@ -477,16 +477,20 @@ just ci-bench
 
 ## Repository Map
 
-- `mod.ts`: umbrella public API surface
-- `rpc.ts`: RPC/runtime-focused entrypoint
-- `encoding.ts`: encoding-focused entrypoint
-- `advanced.ts`: low-level WASM/serde APIs (`WasmAbi`, `WasmPeer`, `WasmSerde`)
-- `src/rpc/session.ts`: session lifecycle + ordered inbound/outbound pumping
-- `src/rpc/server_runtime.ts`: session + bridge + host-call pump integration
-- `src/rpc/client.ts`: bootstrap/call/finish/release + pipelining transport
-- `src/rpc/server.ts`: server dispatch bridge + answer table/pipelining
+- `src/mod.ts`: umbrella public API surface (`@nullstyle/capnp`)
+- `src/rpc.ts`: RPC/runtime-focused entrypoint (`@nullstyle/capnp/rpc`)
+- `src/encoding.ts`: encoding-focused entrypoint (`@nullstyle/capnp/encoding`)
+- `src/advanced.ts`: low-level WASM/serde APIs (`WasmAbi`, `WasmPeer`,
+  `WasmSerde`) (`@nullstyle/capnp/advanced`)
+- `src/rpc/session/session.ts`: session lifecycle + ordered inbound/outbound
+  pumping
+- `src/rpc/session/client.ts`: bootstrap/call/finish/release + pipelining
+  transport
+- `src/rpc/server/bridge.ts`: server dispatch bridge + answer table/pipelining
+- `src/rpc/server/runtime.ts`: session + bridge + host-call pump integration
 - `src/rpc/transports/*`: TCP, WebSocket, WebTransport, MessagePort adapters
-- `src/encoding/*`: frame limits, stream framing, RPC wire encode/decode
+- `src/rpc/wire/*`: frame limits, stream framing, RPC wire encode/decode
+- `src/encoding/*`: schema/serde runtime used by generated codecs
 - `tools/capnpc-deno/*`: TypeScript codegen CLI/plugin
 - `tests/*`: fake-wasm unit, integration, and real-wasm tests
 - `vendor/capnp-zig/`: canonical Zig implementation submodule
@@ -497,9 +501,10 @@ just ci-bench
 - Serde guide: `docs/getting_started_serde.md`
 - RPC guide: `docs/getting_started_rpc.md`
 - Examples index: `examples/README.md`
-- End-to-end walkthrough example:
-  `examples/getting-started/getting-started.ts` +
-  `examples/getting-started/getting-started.capnp`
+- Generated RPC golden-path example: `examples/ping/` (TCP + WebSocket typed
+  clients/servers, callback capabilities) + `examples/ping/schema.capnp`
+- Streaming RPC example: `examples/streaming/` +
+  `examples/streaming/schema.capnp`
 - Real-wasm smoke example: `examples/smoke_real_wasm/smoke_real_wasm.ts` +
   `examples/smoke_real_wasm/smoke_real_wasm.capnp`
 - Interactive WebTransport peer node example:

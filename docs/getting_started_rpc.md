@@ -1,6 +1,6 @@
 # capnp-deno RPC Getting Started
 
-Updated: 2026-02-10
+Updated: 2026-07-11
 
 This guide is schema-first:
 
@@ -31,12 +31,12 @@ import {
   InMemoryRpcHarnessTransport,
   RpcServerRuntime,
   SessionRpcClientTransport,
-} from "../mod.ts";
+} from "@nullstyle/capnp";
 import {
   bootstrapPingerClient,
   PingerInterfaceId,
   registerPingerServer,
-} from "../generated/schema/pinger_types.ts";
+} from "./generated/schema/pinger_types.ts";
 
 const transport = new InMemoryRpcHarnessTransport();
 const runtime = await RpcServerRuntime.createWithRoot(
@@ -92,7 +92,7 @@ import type { RpcCallContext } from "@nullstyle/capnp";
 import {
   CounterSink,
   type CounterSinkService,
-} from "../generated/schema_types.ts";
+} from "./generated/schema_types.ts";
 
 class CounterServer implements CounterSinkService {
   #sum = 0n;
@@ -123,7 +123,7 @@ import { connect, TcpTransport } from "@nullstyle/capnp";
 import {
   CounterSink,
   createCounterSinkAddStreamSender,
-} from "../generated/schema_types.ts";
+} from "./generated/schema_types.ts";
 
 using counter = await connect(
   CounterSink,

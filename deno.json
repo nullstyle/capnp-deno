@@ -1,17 +1,18 @@
 {
   "name": "@nullstyle/capnp",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "license": "MIT",
   "exports": {
     ".": "./src/mod.ts",
     "./encoding": "./src/encoding.ts",
-    "./rpc": "./src/rpc.ts"
+    "./rpc": "./src/rpc.ts",
+    "./advanced": "./src/advanced.ts"
   },
   "imports": {
     "@cliffy/command": "jsr:@cliffy/command@1.0.0"
   },
   "publish": {
-    "include": ["src/**/*.ts", "generated/*.wasm", "README.md"],
+    "include": ["src/**/*.ts", "generated/*.wasm", "README.md", "LICENSE"],
     "exclude": [
       "tests/**",
       "bench/**",
