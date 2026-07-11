@@ -110,6 +110,25 @@ export interface RpcServiceTokenCreateOptions<
 
 /**
  * Construct a frozen token object from generated bootstrap/register helpers.
+ *
+ * Generated modules call this once per interface; applications normally use
+ * the generated token directly instead of creating one by hand.
+ *
+ * @param options - Interface id, interface name, optional debug method
+ * metadata, and the generated bootstrap/register helpers to bundle.
+ * @returns A frozen {@link RpcServiceToken} usable with {@link connect},
+ * {@link serve}, and {@link serveConnection}.
+ * @example
+ * ```ts
+ * const Pinger = createRpcServiceToken({
+ *   interfaceId: 0x1234n,
+ *   interfaceName: "Pinger",
+ *   bootstrapClient: bootstrapPingerClient,
+ *   registerServer: registerPingerServer,
+ * });
+ * const listener = TcpTransport.listen({ port: 4000 });
+ * using handle = serve(Pinger, listener, new PingServer());
+ * ```
  */
 export function createRpcServiceToken<
   TClient extends object,
@@ -179,11 +198,17 @@ export interface RpcServiceStats {
   readonly activeConnections: number;
   /** The number of connections accepted by this listener. */
   readonly acceptedConnections: number;
-  /** The number of accepted connections that failed before becoming active. */
+  /**
+   * The number of accepted connections that failed before becoming active,
+   * including initializations canceled by drain, close, or init timeout.
+   */
   readonly failedConnections: number;
   /** The number of connections refused before runtime creation. */
   readonly refusedConnections: number;
-  /** The number of active connections force-closed by drain or close. */
+  /**
+   * The number of active or initializing connections force-closed by drain,
+   * close, or init-timeout cleanup.
+   */
   readonly forcedClosedConnections: number;
   /** The configured active connection limit, when one is set. */
   readonly maxActiveConnections?: number;
@@ -604,9 +629,40 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
 interface InitializingServiceConnection {
   readonly accepted: RpcAcceptedTransport;
   readonly abortController: AbortController;
+  /**
+   * Settles when a shutdown force sweep abandons this initialization so the
+   * accept task stops waiting on a factory promise that may never settle.
+   */
+  readonly abandoned: Promise<SessionError>;
+  readonly abandon: (error: SessionError) => void;
   forceClosed: boolean;
   failureCounted: boolean;
 }
+
+function createInitializingServiceConnection(
+  accepted: RpcAcceptedTransport,
+): InitializingServiceConnection {
+  let abandon!: (error: SessionError) => void;
+  const abandoned = new Promise<SessionError>((resolve) => {
+    abandon = resolve;
+  });
+  return {
+    accepted,
+    abortController: new AbortController(),
+    abandoned,
+    abandon,
+    forceClosed: false,
+    failureCounted: false,
+  };
+}
+
+type ServiceConnectionInitializationOutcome =
+  | {
+    readonly kind: "initialized";
+    readonly handle: RpcServiceConnectionHandleImpl;
+  }
+  | { readonly kind: "failed"; readonly error: unknown }
+  | { readonly kind: "abandoned"; readonly error: SessionError };
 
 class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   readonly #service: RpcServiceToken<object, TServer>;
@@ -621,6 +677,7 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   readonly #observability: RpcObservability | undefined;
   readonly #connectionOptions: RpcServiceServeOptions;
   readonly #acceptLoop: Promise<void>;
+  readonly #acceptTasks = new Set<Promise<void>>();
   readonly #activeWaiters = new Set<() => void>();
   #acceptedConnections = 0;
   #failedConnections = 0;
@@ -744,10 +801,16 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
   }
 
   async #closeNow(): Promise<void> {
-    if (this.#closed && this.#active.size === 0) return;
+    if (
+      this.#closed && this.#active.size === 0 &&
+      this.#initializing.size === 0
+    ) {
+      return;
+    }
     this.#closed = true;
     this.#draining = false;
 
+    await this.#forceCloseInitializingConnections("rpc service close");
     await this.#forceCloseActiveConnections("rpc service close");
     await this.#closeAcceptor();
     await this.#acceptLoop;
@@ -773,12 +836,29 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
           await this.#refuseConnection(accepted);
           continue;
         }
-        await this.#acceptConnection(accepted);
+        // Initialize concurrently so one slow connection cannot head-of-line
+        // block the listener; #acceptConnection registers the connection in
+        // #initializing synchronously, keeping admission checks coherent.
+        this.#trackAcceptTask(this.#acceptConnection(accepted));
       }
     } catch (error) {
-      if (this.#closed) return;
-      await reportConnectionError(this.#options.onConnectionError, error);
+      if (!this.#closed) {
+        await reportConnectionError(this.#options.onConnectionError, error);
+      }
+    } finally {
+      while (this.#acceptTasks.size > 0) {
+        await Promise.allSettled([...this.#acceptTasks]);
+      }
     }
+  }
+
+  #trackAcceptTask(task: Promise<void>): void {
+    const tracked = task.catch((error) =>
+      reportConnectionError(this.#options.onConnectionError, error)
+    ).finally(() => {
+      this.#acceptTasks.delete(tracked);
+    });
+    this.#acceptTasks.add(tracked);
   }
 
   #shouldRefuseConnection(): boolean {
@@ -824,12 +904,7 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
 
   async #acceptConnection(accepted: RpcAcceptedTransport): Promise<void> {
     let handle: RpcServiceConnectionHandleImpl | null = null;
-    const initializing: InitializingServiceConnection = {
-      accepted,
-      abortController: new AbortController(),
-      forceClosed: false,
-      failureCounted: false,
-    };
+    const initializing = createInitializingServiceConnection(accepted);
     this.#acceptedConnections++;
     this.#initializing.add(initializing);
     emitObservabilityEvent(this.#observability, {
@@ -858,28 +933,54 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
       },
       initializing.abortController.signal,
     );
-    try {
-      handle = await this.#awaitConnectionInitialization(
-        initializing,
-        createPromise,
+    const initialization = this.#awaitConnectionInitialization(
+      initializing,
+      createPromise,
+    );
+    const outcome: ServiceConnectionInitializationOutcome = await Promise.race([
+      initialization.then(
+        (result) => ({ kind: "initialized" as const, handle: result }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      ),
+      initializing.abandoned.then(
+        (error) => ({ kind: "abandoned" as const, error }),
+      ),
+    ]);
+    if (outcome.kind === "abandoned") {
+      // A shutdown force sweep already counted this connection, aborted its
+      // signal, and closed the accepted transport. Stop waiting on the
+      // unsettled factory promise; if it eventually produces a handle, close
+      // that handle so it never leaks into #active.
+      void initialization.then((lateHandle) => lateHandle.close())
+        .catch(() => {
+          // createServiceConnectionHandle already closes/disposes failures.
+        });
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        outcome.error,
       );
-      this.#finishConnectionInitialization(initializing);
-    } catch (error) {
-      this.#finishConnectionInitialization(initializing);
+      return;
+    }
+    this.#finishConnectionInitialization(initializing);
+    if (outcome.kind === "failed") {
       if (!initializing.failureCounted) {
         initializing.failureCounted = true;
         this.#failedConnections++;
       }
-      await reportConnectionError(this.#options.onConnectionError, error);
+      await reportConnectionError(
+        this.#options.onConnectionError,
+        outcome.error,
+      );
       return;
     }
+    handle = outcome.handle;
     if (initializing.forceClosed) {
       await handle.close().catch((error) =>
         reportConnectionError(this.#options.onConnectionError, error)
       );
       return;
     }
-    if (!handle || handle.closed) return;
+    if (handle.closed) return;
     this.#active.add(handle);
     if (this.#closed && !this.#draining) {
       this.#forcedClosedConnections++;
@@ -909,11 +1010,13 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
         report: this.#options.onConnectionError,
         abort: (error) => initializing.abortController.abort(error),
         onLateHandle: async (lateHandle) => {
-          this.#forcedClosedConnections++;
-          this.#emitServiceEvent("rpc.service.connections_force_close", {
-            "rpc.force_close_reason": "rpc service init timeout late cleanup",
-            "rpc.force_close_count": 1,
-          });
+          if (!initializing.forceClosed) {
+            this.#forcedClosedConnections++;
+            this.#emitServiceEvent("rpc.service.connections_force_close", {
+              "rpc.force_close_reason": "rpc service init timeout late cleanup",
+              "rpc.force_close_count": 1,
+            });
+          }
           await lateHandle.close();
         },
       },
@@ -955,6 +1058,9 @@ class RpcServiceHandleImpl<TServer extends object> implements RpcServiceHandle {
         reason,
       );
       entry.abortController.abort(error);
+      // Release the accept task even when the factory ignores the abort
+      // signal and its promise never settles.
+      entry.abandon(error);
       await Promise.resolve(entry.accepted.transport.close()).catch(
         (closeError) =>
           reportConnectionError(this.#options.onConnectionError, closeError),
@@ -1429,6 +1535,10 @@ export function serveConnection<
 
 /**
  * Serve a typed RPC service over an accepted-transport source.
+ *
+ * Accepted connections initialize concurrently, so one slow connection does
+ * not delay later accepts; `maxActiveConnections` admission counts both
+ * active and still-initializing connections.
  *
  * @param service - Generated service token for the target interface.
  * @param acceptor - Accepted-transport source that yields server connections.

@@ -500,10 +500,11 @@ Deno.test("serve supervises accepted connections through the generic binder", as
   assert(events.includes("transport.close"));
 });
 
-Deno.test("serve close waits for runtimes that finish initializing during shutdown", async () => {
+Deno.test("serve close abandons stalled initialization and force-closes the late runtime", async () => {
   const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
   const runtimeCreateStarted = deferred<void>();
   const releaseRuntimeCreate = deferred<void>();
+  const lateRuntimeClosed = deferred<void>();
   const acceptClosed = deferred<void>();
   const events: string[] = [];
 
@@ -516,6 +517,7 @@ Deno.test("serve close waits for runtimes that finish initializing during shutdo
       close: async (): Promise<void> => {
         events.push("runtime.close");
         await transport.close();
+        lateRuntimeClosed.resolve();
       },
     } as RpcServerRuntime;
   };
@@ -568,23 +570,24 @@ Deno.test("serve close waits for runtimes that finish initializing during shutdo
       "runtime creation started",
     );
 
-    let closeResolved = false;
-    const closePromise = handle.close().then(() => {
-      closeResolved = true;
-      events.push("handle.close");
-    });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // close() must not block on the stalled runtime creation: it aborts the
+    // initialization, closes the accepted transport, and resolves promptly.
+    await withTimeout(handle.close(), 1000, "service close");
 
-    assertEquals(closeResolved, false);
     assertEquals(events.includes("runtime.close"), false);
-
-    releaseRuntimeCreate.resolve();
-    await withTimeout(closePromise, 1000, "service close");
-
-    assertEquals(events.includes("runtime.close"), true);
     assertEquals(events.includes("transport.close"), true);
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.initializingConnections, 0);
     assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
     assertEquals(handle.stats.forcedClosedConnections, 1);
+
+    // When the stalled creation finally settles, the late runtime must be
+    // force-closed instead of leaking into the active set.
+    releaseRuntimeCreate.resolve();
+    await withTimeout(lateRuntimeClosed.promise, 1000, "late runtime cleanup");
+    assertEquals(events.includes("runtime.close"), true);
+    assertEquals(handle.stats.activeConnections, 0);
   } finally {
     acceptClosed.resolve();
     releaseRuntimeCreate.resolve();
@@ -1279,6 +1282,420 @@ Deno.test("serve drain force aborts initializing service factories", async () =>
   } finally {
     acceptClosed.resolve();
     await handle.close();
+  }
+});
+
+Deno.test("serve close during drain force-closes initializing connections", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const runtimeCreateStarted = deferred<void>();
+  const releaseRuntimeCreate = deferred<void>();
+  const lateRuntimeClosed = deferred<void>();
+  const acceptClosed = deferred<void>();
+  const events: RpcObservabilityEvent[] = [];
+  let transportCloseCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = async (transport) => {
+    runtimeCreateStarted.resolve();
+    await releaseRuntimeCreate.promise;
+    return {
+      close: async (): Promise<void> => {
+        await transport.close();
+        lateRuntimeClosed.resolve();
+      },
+    } as RpcServerRuntime;
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x190n,
+    interfaceName: "ServeCloseDuringDrainProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: {
+          start(): void {
+            // no-op
+          },
+          send(): Promise<void> {
+            return Promise.resolve();
+          },
+          close(): Promise<void> {
+            transportCloseCount += 1;
+            return Promise.resolve();
+          },
+        },
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41244,
+        },
+        id: "close-during-drain-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, {}, {
+    observability: {
+      onEvent(event) {
+        events.push(event);
+      },
+    },
+  });
+
+  try {
+    await withTimeout(
+      runtimeCreateStarted.promise,
+      1000,
+      "runtime creation started",
+    );
+
+    const drained = handle.drain();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assertEquals(handle.stats.draining, true);
+    assertEquals(handle.stats.initializingConnections, 1);
+
+    // close() escalation during drain must force-close the initializing
+    // connection and resolve promptly (no waiting on the stalled factory).
+    await withTimeout(handle.close(), 1000, "close during drain");
+    await withTimeout(drained, 1000, "drain settles after close");
+
+    assertEquals(handle.closed, true);
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.draining, false);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assert(transportCloseCount >= 1);
+    assert(
+      events.some((event) =>
+        event.name === "rpc.service.connections_force_close"
+      ),
+    );
+
+    // The late-settling initialization must be force-closed, not served.
+    releaseRuntimeCreate.resolve();
+    await withTimeout(
+      lateRuntimeClosed.promise,
+      1000,
+      "late runtime force-closed",
+    );
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.draining, false);
+  } finally {
+    acceptClosed.resolve();
+    releaseRuntimeCreate.resolve();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
+  }
+});
+
+Deno.test("serve drain forceAfterMs resolves when a factory ignores the abort signal", async () => {
+  const acceptClosed = deferred<void>();
+  const factoryStarted = deferred<void>();
+  const errors: unknown[] = [];
+  let closeCount = 0;
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x191n,
+    interfaceName: "ServeDrainUncooperativeFactoryProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: {
+          start(): void {
+            // no-op
+          },
+          send(): Promise<void> {
+            return Promise.resolve();
+          },
+          close(): Promise<void> {
+            closeCount += 1;
+            return Promise.resolve();
+          },
+        },
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41245,
+        },
+        id: "uncooperative-factory-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, () => {
+    factoryStarted.resolve();
+    // Deliberately ignores the abort signal and never settles.
+    return new Promise<object>(() => {});
+  }, {
+    onConnectionError(error) {
+      errors.push(error);
+    },
+  });
+
+  try {
+    await withTimeout(factoryStarted.promise, 1000, "factory start");
+
+    const startedAt = Date.now();
+    await withTimeout(handle.drain({ forceAfterMs: 50 }), 2000, "forced drain");
+    const elapsedMs = Date.now() - startedAt;
+    assert(
+      elapsedMs < 1500,
+      `expected drain to resolve near forceAfterMs, took ${elapsedMs}ms`,
+    );
+
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.draining, false);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assertEquals(closeCount, 1);
+    assert(errors.some((error) => error instanceof SessionError));
+  } finally {
+    acceptClosed.resolve();
+    await handle.close();
+  }
+});
+
+Deno.test("serve close aborts initializing service factory signals promptly", async () => {
+  const acceptClosed = deferred<void>();
+  const signalSeen = deferred<AbortSignal>();
+  const signalAborted = deferred<AbortSignal>();
+  const errors: unknown[] = [];
+  let closeCount = 0;
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x192n,
+    interfaceName: "ServeCloseInitSignalProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: {
+          start(): void {
+            // no-op
+          },
+          send(): Promise<void> {
+            return Promise.resolve();
+          },
+          close(): Promise<void> {
+            closeCount += 1;
+            return Promise.resolve();
+          },
+        },
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41246,
+        },
+        id: "close-init-signal-peer",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, ({ signal }) => {
+    signalSeen.resolve(signal);
+    return new Promise<object>((_resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => {
+          signalAborted.resolve(signal);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    });
+  }, {
+    onConnectionError(error) {
+      errors.push(error);
+    },
+  });
+
+  try {
+    const signal = await withTimeout(
+      signalSeen.promise,
+      1000,
+      "factory signal",
+    );
+    assertEquals(signal.aborted, false);
+
+    await withTimeout(handle.close(), 1000, "service close");
+
+    const abortedSignal = await withTimeout(
+      signalAborted.promise,
+      1000,
+      "factory signal abort",
+    );
+    assert(abortedSignal === signal);
+    assertEquals(signal.aborted, true);
+    assert(signal.reason instanceof SessionError);
+    assert(
+      /rpc service close/i.test(signal.reason.message),
+      `expected close reason, got: ${String(signal.reason)}`,
+    );
+    assertEquals(handle.stats.closed, true);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.failedConnections, 1);
+    assertEquals(handle.stats.forcedClosedConnections, 1);
+    assert(closeCount >= 1);
+    assert(errors.some((error) => error instanceof SessionError));
+  } finally {
+    acceptClosed.resolve();
+    await handle.close();
+  }
+});
+
+Deno.test("serve initializes accepted connections concurrently", async () => {
+  const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
+  const acceptClosed = deferred<void>();
+  const firstFactoryStarted = deferred<void>();
+  const secondFactoryStarted = deferred<void>();
+  const releaseFactories = deferred<void>();
+  let factoryStarts = 0;
+  let runtimeCreateCount = 0;
+
+  (RpcServerRuntime as unknown as {
+    createWithRoot: typeof RpcServerRuntime.createWithRoot;
+  }).createWithRoot = (transport) => {
+    runtimeCreateCount += 1;
+    return Promise.resolve({
+      close: async (): Promise<void> => {
+        await transport.close();
+      },
+    } as RpcServerRuntime);
+  };
+
+  const service = createRpcServiceToken<Record<string, never>, object>({
+    interfaceId: 0x193n,
+    interfaceName: "ServeConcurrentInitProbe",
+    bootstrapClient: () => Promise.resolve({}),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  function createTransport() {
+    return {
+      start(): void {
+        // no-op
+      },
+      send(): Promise<void> {
+        return Promise.resolve();
+      },
+      close(): Promise<void> {
+        return Promise.resolve();
+      },
+    };
+  }
+
+  const acceptor = {
+    closed: false,
+    async *accept() {
+      yield {
+        transport: createTransport(),
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41247,
+        },
+        id: "concurrent-peer-1",
+      };
+      yield {
+        transport: createTransport(),
+        remoteAddress: {
+          transport: "tcp",
+          hostname: "127.0.0.1",
+          port: 41248,
+        },
+        id: "concurrent-peer-2",
+      };
+      await acceptClosed.promise;
+    },
+    close(): void {
+      acceptClosed.resolve();
+    },
+  };
+
+  const handle = serve(service, acceptor, async () => {
+    factoryStarts += 1;
+    if (factoryStarts === 1) firstFactoryStarted.resolve();
+    if (factoryStarts === 2) secondFactoryStarted.resolve();
+    await releaseFactories.promise;
+    return {};
+  });
+
+  try {
+    // Both factories must start while neither has finished: initialization
+    // may not be serialized behind the first accepted connection.
+    await withTimeout(
+      firstFactoryStarted.promise,
+      1000,
+      "first factory start",
+    );
+    await withTimeout(
+      secondFactoryStarted.promise,
+      1000,
+      "second factory start",
+    );
+    assertEquals(handle.stats.initializingConnections, 2);
+    assertEquals(handle.stats.acceptedConnections, 2);
+    assertEquals(handle.stats.activeConnections, 0);
+
+    releaseFactories.resolve();
+    await withTimeout(
+      (async () => {
+        while (handle.stats.activeConnections < 2) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1));
+        }
+      })(),
+      1000,
+      "both connections active",
+    );
+
+    assertEquals(runtimeCreateCount, 2);
+    assertEquals(handle.stats.initializingConnections, 0);
+    assertEquals(handle.stats.activeConnections, 2);
+    assertEquals(handle.stats.failedConnections, 0);
+
+    await handle.close();
+    assertEquals(handle.stats.activeConnections, 0);
+    assertEquals(handle.stats.forcedClosedConnections, 2);
+  } finally {
+    acceptClosed.resolve();
+    releaseFactories.resolve();
+    await handle.close();
+    (RpcServerRuntime as unknown as {
+      createWithRoot: typeof RpcServerRuntime.createWithRoot;
+    }).createWithRoot = originalCreateWithRoot;
   }
 });
 
