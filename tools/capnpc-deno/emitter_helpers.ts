@@ -3,7 +3,12 @@
  * formatting, and collection utilities.
  */
 
-import type { FieldModel, NodeModel, TypeModel } from "./model.ts";
+import type {
+  CodeGeneratorRequestModel,
+  FieldModel,
+  NodeModel,
+  TypeModel,
+} from "./model.ts";
 
 export interface EnumInfo {
   readonly id: bigint;
@@ -80,6 +85,31 @@ export function simpleNodeName(node: NodeModel): string {
   return node.displayName.slice(node.displayNamePrefixLength);
 }
 
+/**
+ * Assign deterministic per-module TypeScript names to a naming pool.
+ *
+ * This is the single naming/uniquing pass shared by the per-module local
+ * tables ({@link collectLocalTypes}, {@link collectLocalInterfaces}) and the
+ * cross-file {@link buildModuleIndex}, so index names always match what the
+ * owning module actually exports.
+ */
+function assignTypeNames(nodes: NodeModel[]): Map<bigint, string> {
+  const usedTypeNames = new Set<string>();
+  const typeNameById = new Map<bigint, string>();
+  for (const node of nodes) {
+    const base = toPascalCase(simpleNodeName(node));
+    let candidate = base;
+    let suffix = 2;
+    while (usedTypeNames.has(candidate)) {
+      candidate = `${base}${suffix}`;
+      suffix += 1;
+    }
+    usedTypeNames.add(candidate);
+    typeNameById.set(node.id, candidate);
+  }
+  return typeNameById;
+}
+
 export function collectLocalTypes(
   fileNode: NodeModel,
   nodeById: Map<bigint, NodeModel>,
@@ -106,19 +136,7 @@ export function collectLocalTypes(
   localEnums.sort((a, b) => a.displayName.localeCompare(b.displayName));
   localStructs.sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-  const usedTypeNames = new Set<string>();
-  const typeNameById = new Map<bigint, string>();
-  for (const node of [...localEnums, ...localStructs]) {
-    const base = toPascalCase(simpleNodeName(node));
-    let candidate = base;
-    let suffix = 2;
-    while (usedTypeNames.has(candidate)) {
-      candidate = `${base}${suffix}`;
-      suffix += 1;
-    }
-    usedTypeNames.add(candidate);
-    typeNameById.set(node.id, candidate);
-  }
+  const typeNameById = assignTypeNames([...localEnums, ...localStructs]);
 
   const enumInfos = localEnums.map((node): EnumInfo => {
     const typeName = typeNameById.get(node.id) ?? "GeneratedEnum";
@@ -166,24 +184,12 @@ export function collectLocalInterfaces(
     )
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-  const usedTypeNames = new Set<string>();
-  const out: InterfaceInfo[] = [];
-  for (const node of localInterfaces) {
-    const base = toPascalCase(simpleNodeName(node));
-    let candidate = base;
-    let suffix = 2;
-    while (usedTypeNames.has(candidate)) {
-      candidate = `${base}${suffix}`;
-      suffix += 1;
-    }
-    usedTypeNames.add(candidate);
-    out.push({
-      id: node.id,
-      typeName: candidate,
-      node,
-    });
-  }
-  return out;
+  const typeNameById = assignTypeNames(localInterfaces);
+  return localInterfaces.map((node): InterfaceInfo => ({
+    id: node.id,
+    typeName: typeNameById.get(node.id) ?? "GeneratedInterface",
+    node,
+  }));
 }
 
 export function inferUnionFields(
@@ -221,10 +227,346 @@ export function inferUnionFields(
   return fields.slice(-discriminantCount);
 }
 
+// ---------------------------------------------------------------------------
+// Cross-file module index + per-module import collection
+// ---------------------------------------------------------------------------
+
+/** One request-wide index entry: a named type and the module that owns it. */
+export type ModuleIndexEntry =
+  | {
+    kind: "enum";
+    fileId: bigint;
+    schemaFilename: string;
+    info: EnumInfo;
+  }
+  | {
+    kind: "struct";
+    fileId: bigint;
+    schemaFilename: string;
+    info: StructInfo;
+  }
+  | {
+    kind: "interface";
+    fileId: bigint;
+    schemaFilename: string;
+    info: InterfaceInfo;
+  };
+
+export interface ModuleFileTypes {
+  enumInfos: EnumInfo[];
+  structInfos: StructInfo[];
+  interfaceInfos: InterfaceInfo[];
+}
+
+/**
+ * Request-wide node-id -> owning-module index.
+ *
+ * Maps every enum/struct/interface node in the request (requested files AND
+ * import-only files) to the schema file that owns it and the TypeScript name
+ * its generated module exports for it.
+ */
+export interface ModuleIndex {
+  readonly byId: Map<bigint, ModuleIndexEntry>;
+  readonly byFileId: Map<bigint, ModuleFileTypes>;
+}
+
+/**
+ * Build the {@link ModuleIndex} for a request.
+ *
+ * Per-file names come from the exact same collection + naming pass the
+ * per-module emitters use ({@link collectLocalTypes} /
+ * {@link collectLocalInterfaces}), so cross-file references always agree with
+ * the owning module's actual exports. The owning schema filename prefers the
+ * requested-file spelling and falls back to the file node's display name for
+ * import-only files (capnp records the resolved path there).
+ */
+export function buildModuleIndex(
+  request: CodeGeneratorRequestModel,
+  nodeById: Map<bigint, NodeModel>,
+): ModuleIndex {
+  const filenameByFileId = new Map<bigint, string>();
+  for (const requested of request.requestedFiles) {
+    filenameByFileId.set(requested.id, requested.filename);
+  }
+
+  const byId = new Map<bigint, ModuleIndexEntry>();
+  const byFileId = new Map<bigint, ModuleFileTypes>();
+  for (const node of request.nodes) {
+    if (node.kind !== "file") continue;
+    const schemaFilename = filenameByFileId.get(node.id) ?? node.displayName;
+    const { enumInfos, structInfos } = collectLocalTypes(node, nodeById);
+    const interfaceInfos = collectLocalInterfaces(node, nodeById);
+    byFileId.set(node.id, { enumInfos, structInfos, interfaceInfos });
+    for (const info of enumInfos) {
+      byId.set(info.id, { kind: "enum", fileId: node.id, schemaFilename, info });
+    }
+    for (const info of structInfos) {
+      byId.set(info.id, {
+        kind: "struct",
+        fileId: node.id,
+        schemaFilename,
+        info,
+      });
+    }
+    for (const info of interfaceInfos) {
+      byId.set(info.id, {
+        kind: "interface",
+        fileId: node.id,
+        schemaFilename,
+        info,
+      });
+    }
+  }
+  return { byId, byFileId };
+}
+
+/** Cross-module import recorded on a generated file for layout-aware fixup. */
+export interface CrossSchemaImportRef {
+  /** Flat sibling specifier as emitted, e.g. `"./base_types.ts"`. */
+  specifier: string;
+  /** Schema source filename of the module the specifier points at. */
+  targetSourceFilename: string;
+}
+
+interface CollectedModuleImports {
+  specifier: string;
+  targetSourceFilename: string;
+  /** exported name -> local alias */
+  types: Map<string, string>;
+  /** exported name -> local alias */
+  values: Map<string, string>;
+}
+
+interface EnumImportMirror {
+  typeAlias: string;
+  valuesConst: string;
+  descriptorConst: string;
+  values: string[];
+}
+
+/**
+ * Per-module collector for cross-file references.
+ *
+ * Records `import type` entries for type-position names and value imports for
+ * codec/descriptor references (consumed only inside deferred getters, per the
+ * cross-file design), and materializes local descriptor mirrors for imported
+ * enums (whose descriptors are module-private in the owning module). Aliases
+ * are chosen deterministically and never collide with the module's own
+ * declarations.
+ */
+export class ModuleImportCollector {
+  readonly #fileId: bigint;
+  readonly #reservedNames: Set<string>;
+  readonly #moduleIndex: ModuleIndex;
+  readonly #modules = new Map<string, CollectedModuleImports>();
+  readonly #aliasByKey = new Map<string, string>();
+  readonly #enumMirrors = new Map<bigint, EnumImportMirror>();
+
+  constructor(options: {
+    fileId: bigint;
+    moduleIndex: ModuleIndex;
+    reservedNames: Iterable<string>;
+  }) {
+    this.#fileId = options.fileId;
+    this.#moduleIndex = options.moduleIndex;
+    this.#reservedNames = new Set(options.reservedNames);
+  }
+
+  /**
+   * Resolve a node id to an importable cross-file entry: the id must belong
+   * to another schema file in the request and be exported by that file's
+   * generated module. Returns `null` for local ids, unknown ids, and
+   * non-exported foreign types (callers keep their existing fallbacks).
+   */
+  crossFileEntry(id: bigint): ModuleIndexEntry | null {
+    const entry = this.#moduleIndex.byId.get(id);
+    if (!entry || entry.fileId === this.#fileId) return null;
+    if (entry.kind === "enum" || entry.kind === "struct") {
+      return entry.info.exported ? entry : null;
+    }
+    return entry;
+  }
+
+  /** Import a cross-file enum/struct type name (type position). */
+  importTypeName(entry: ModuleIndexEntry): string {
+    return this.#importName(entry, entry.info.typeName, "types");
+  }
+
+  /** Import a cross-file exported value (codec/descriptor const). */
+  importValueName(entry: ModuleIndexEntry, exportedName: string): string {
+    return this.#importName(entry, exportedName, "values");
+  }
+
+  /**
+   * Get (or create) the local descriptor mirror for an imported enum. The
+   * owning module does not export enum descriptors, so the importing module
+   * re-materializes the values/descriptor consts from the schema nodes; only
+   * the enum's TypeScript type is imported.
+   */
+  enumMirror(entry: ModuleIndexEntry & { kind: "enum" }): EnumImportMirror {
+    const existing = this.#enumMirrors.get(entry.info.id);
+    if (existing) return existing;
+    const typeAlias = this.importTypeName(entry);
+    const mirror: EnumImportMirror = {
+      typeAlias,
+      valuesConst: this.#claimLocalName(`${typeAlias}Values`),
+      descriptorConst: this.#claimLocalName(`${typeAlias}Type`),
+      values: entry.info.values,
+    };
+    this.#enumMirrors.set(entry.info.id, mirror);
+    return mirror;
+  }
+
+  hasImports(): boolean {
+    return this.#modules.size > 0;
+  }
+
+  /** Render the sibling-module import lines (sorted, deterministic). */
+  renderImportLines(): string[] {
+    const out: string[] = [];
+    const modules = [...this.#modules.values()].sort((left, right) =>
+      left.specifier.localeCompare(right.specifier)
+    );
+    for (const module of modules) {
+      const typeEntries = renderImportEntries(module.types);
+      if (typeEntries.length > 0) {
+        out.push(
+          `import type { ${typeEntries.join(", ")} } from ${
+            JSON.stringify(module.specifier)
+          };`,
+        );
+      }
+      const valueEntries = renderImportEntries(module.values);
+      if (valueEntries.length > 0) {
+        out.push(
+          `import { ${valueEntries.join(", ")} } from ${
+            JSON.stringify(module.specifier)
+          };`,
+        );
+      }
+    }
+    return out;
+  }
+
+  /** Render local descriptor mirrors for imported enums (sorted). */
+  renderEnumMirrorLines(): string[] {
+    const out: string[] = [];
+    const mirrors = [...this.#enumMirrors.values()].sort((left, right) =>
+      left.descriptorConst.localeCompare(right.descriptorConst)
+    );
+    for (const mirror of mirrors) {
+      const valuesLiteral = mirror.values
+        .map((value) => JSON.stringify(value))
+        .join(", ");
+      out.push(`const ${mirror.valuesConst} = [${valuesLiteral}] as const;`);
+      out.push(
+        `const ${mirror.descriptorConst}: EnumTypeDescriptor<${mirror.typeAlias}> = {`,
+      );
+      out.push('  kind: "enum",');
+      out.push(`  byOrdinal: ${mirror.valuesConst},`);
+      out.push("  toOrdinal: {");
+      for (let i = 0; i < mirror.values.length; i += 1) {
+        out.push(`    ${JSON.stringify(mirror.values[i])}: ${i},`);
+      }
+      out.push("  },");
+      out.push("};");
+      out.push("");
+    }
+    return out;
+  }
+
+  /** Metadata for layout-aware import-specifier fixup in the CLI. */
+  crossSchemaImports(): CrossSchemaImportRef[] {
+    return [...this.#modules.values()]
+      .sort((left, right) => left.specifier.localeCompare(right.specifier))
+      .map((module) => ({
+        specifier: module.specifier,
+        targetSourceFilename: module.targetSourceFilename,
+      }));
+  }
+
+  #importName(
+    entry: ModuleIndexEntry,
+    exportedName: string,
+    slot: "types" | "values",
+  ): string {
+    const module = this.#moduleFor(entry);
+    const existing = module[slot].get(exportedName);
+    if (existing) return existing;
+    const aliasKey = `${module.specifier} ${slot} ${exportedName}`;
+    let alias = this.#aliasByKey.get(aliasKey);
+    if (alias === undefined) {
+      alias = this.#claimImportAlias(exportedName, entry.schemaFilename);
+      this.#aliasByKey.set(aliasKey, alias);
+    }
+    module[slot].set(exportedName, alias);
+    return alias;
+  }
+
+  #moduleFor(entry: ModuleIndexEntry): CollectedModuleImports {
+    const specifier = `./${toOutputPath(entry.schemaFilename, "types")}`;
+    const existing = this.#modules.get(specifier);
+    if (existing) return existing;
+    const created: CollectedModuleImports = {
+      specifier,
+      targetSourceFilename: entry.schemaFilename,
+      types: new Map(),
+      values: new Map(),
+    };
+    this.#modules.set(specifier, created);
+    return created;
+  }
+
+  #claimImportAlias(exportedName: string, schemaFilename: string): string {
+    if (!this.#reservedNames.has(exportedName)) {
+      this.#reservedNames.add(exportedName);
+      return exportedName;
+    }
+    const stem = toPascalCase(schemaModuleStem(schemaFilename));
+    return this.#claimLocalName(`${exportedName}$${stem}`);
+  }
+
+  #claimLocalName(base: string): string {
+    let candidate = base;
+    let suffix = 2;
+    while (this.#reservedNames.has(candidate)) {
+      candidate = `${base}${suffix}`;
+      suffix += 1;
+    }
+    this.#reservedNames.add(candidate);
+    return candidate;
+  }
+}
+
+function renderImportEntries(entries: Map<string, string>): string[] {
+  return [...entries.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([exported, alias]) =>
+      exported === alias ? exported : `${exported} as ${alias}`
+    );
+}
+
+function schemaModuleStem(filename: string): string {
+  const normalized = filename.replaceAll("\\", "/");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  return base.endsWith(".capnp") ? base.slice(0, -6) : base;
+}
+
+/**
+ * Shared context threaded through the type-position and descriptor emission
+ * helpers: the request-wide node table, the current module's local tables,
+ * and the per-module cross-file import collector.
+ */
+export interface TypeEmitContext {
+  nodeById: Map<bigint, NodeModel>;
+  enumById: Map<bigint, EnumInfo>;
+  structById: Map<bigint, StructInfo>;
+  imports: ModuleImportCollector;
+}
+
 export function typeDescriptorExpression(
   type: TypeModel,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): string {
   switch (type.kind) {
     case "void":
@@ -257,16 +599,33 @@ export function typeDescriptorExpression(
       return "TYPE_DATA";
     case "list":
       return `{ kind: "list", element: ${
-        typeDescriptorExpression(type.elementType, enumById, structById)
+        typeDescriptorExpression(type.elementType, ctx)
       } }`;
     case "enum": {
-      const enumInfo = enumById.get(type.typeId);
-      return enumInfo ? enumInfo.descriptorConst : "TYPE_UINT16";
+      const enumInfo = ctx.enumById.get(type.typeId);
+      if (enumInfo) return enumInfo.descriptorConst;
+      const entry = ctx.imports.crossFileEntry(type.typeId);
+      if (entry?.kind === "enum") {
+        return ctx.imports.enumMirror(entry).descriptorConst;
+      }
+      return "TYPE_UINT16";
     }
     case "struct": {
-      const structInfo = structById.get(type.typeId);
-      if (!structInfo) return "TYPE_ANY_POINTER";
-      return `{ kind: "struct", get: () => ${structInfo.descriptorConst} }`;
+      const structInfo = ctx.structById.get(type.typeId);
+      if (structInfo) {
+        return `{ kind: "struct", get: () => ${structInfo.descriptorConst} }`;
+      }
+      const entry = ctx.imports.crossFileEntry(type.typeId);
+      if (entry?.kind === "struct") {
+        // Deferred getter: the imported descriptor is only dereferenced at
+        // use time, so mutually-importing schema modules cannot hit TDZ.
+        const descriptor = ctx.imports.importValueName(
+          entry,
+          entry.info.descriptorConst,
+        );
+        return `{ kind: "struct", get: () => ${descriptor} }`;
+      }
+      return "TYPE_ANY_POINTER";
     }
     case "interface":
       return "TYPE_INTERFACE";
@@ -277,9 +636,7 @@ export function typeDescriptorExpression(
 
 export function defaultValueExpression(
   type: TypeModel,
-  nodeById: Map<bigint, NodeModel>,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): string {
   switch (type.kind) {
     case "void":
@@ -305,22 +662,33 @@ export function defaultValueExpression(
     case "list":
       return "[]";
     case "enum": {
-      const info = enumById.get(type.typeId);
-      if (!info || info.values.length === 0) {
-        return `undefined as unknown as ${
-          typeToTs(type, nodeById, enumById, structById)
-        }`;
+      const info = ctx.enumById.get(type.typeId);
+      if (info) {
+        if (info.values.length === 0) {
+          return `undefined as unknown as ${typeToTs(type, ctx)}`;
+        }
+        return `${info.valuesConst}[0]`;
       }
-      return `${info.valuesConst}[0]`;
+      const entry = ctx.imports.crossFileEntry(type.typeId);
+      if (entry?.kind === "enum" && entry.info.values.length > 0) {
+        return `${ctx.imports.enumMirror(entry).valuesConst}[0]`;
+      }
+      return `undefined as unknown as ${typeToTs(type, ctx)}`;
     }
     case "struct": {
-      const info = structById.get(type.typeId);
-      if (!info) {
-        return `undefined as unknown as ${
-          typeToTs(type, nodeById, enumById, structById)
-        }`;
+      const info = ctx.structById.get(type.typeId);
+      if (info) return `${info.descriptorConst}.createDefault()`;
+      const entry = ctx.imports.crossFileEntry(type.typeId);
+      if (entry?.kind === "struct") {
+        // Evaluated inside the surrounding createDefault() lambda, so the
+        // imported descriptor is dereferenced lazily (no module-init TDZ).
+        const descriptor = ctx.imports.importValueName(
+          entry,
+          entry.info.descriptorConst,
+        );
+        return `${descriptor}.createDefault()`;
       }
-      return `${info.descriptorConst}.createDefault()`;
+      return `undefined as unknown as ${typeToTs(type, ctx)}`;
     }
     case "interface":
       return "null";
@@ -331,9 +699,7 @@ export function defaultValueExpression(
 
 export function typeToTs(
   type: TypeModel,
-  nodeById: Map<bigint, NodeModel>,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): string {
   switch (type.kind) {
     case "void":
@@ -357,10 +723,10 @@ export function typeToTs(
     case "data":
       return "Uint8Array";
     case "list":
-      return `${typeToTs(type.elementType, nodeById, enumById, structById)}[]`;
+      return `${typeToTs(type.elementType, ctx)}[]`;
     case "enum":
     case "struct":
-      return resolveTypeName(type.typeId, nodeById, enumById, structById);
+      return resolveTypeName(type.typeId, ctx);
     case "interface":
       return "CapabilityPointer | null";
     case "anyPointer":
@@ -370,15 +736,17 @@ export function typeToTs(
 
 export function resolveTypeName(
   id: bigint,
-  nodeById: Map<bigint, NodeModel>,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): string {
-  const enumInfo = enumById.get(id);
+  const enumInfo = ctx.enumById.get(id);
   if (enumInfo) return enumInfo.typeName;
-  const structInfo = structById.get(id);
+  const structInfo = ctx.structById.get(id);
   if (structInfo) return structInfo.typeName;
-  const node = nodeById.get(id);
+  const entry = ctx.imports.crossFileEntry(id);
+  if (entry && (entry.kind === "enum" || entry.kind === "struct")) {
+    return ctx.imports.importTypeName(entry);
+  }
+  const node = ctx.nodeById.get(id);
   if (!node) return "unknown";
   const simple = simpleNodeName(node);
   return toPascalCase(simple);

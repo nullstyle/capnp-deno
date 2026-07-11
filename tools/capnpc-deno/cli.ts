@@ -405,6 +405,60 @@ export function finalizeGeneratedFiles(
     ...options.srcDirs,
     ...absoluteSchemaLayoutRoots(schemas),
   ];
+  // Cross-schema import targets can be import-only files that were never a
+  // --schema input, so on top of reconstructSource they may also need
+  // re-anchoring under an absolute schema layout root (capnp strips the
+  // leading "/" from absolute paths).
+  const absoluteSchemaRoots = schemaRoots
+    .map((root) => trimTrailingSlash(normalizePath(root)))
+    .filter((root) => root.length > 0 && isAbsolutePath(root));
+  const reconstructImportTargetSource = (name: string): string => {
+    const source = reconstructSource(name);
+    if (isAbsolutePath(source)) return source;
+    const reconstructed = `/${normalizeRelativeSegments(source)}`;
+    if (
+      absoluteSchemaRoots.some((root) =>
+        reconstructed === root || reconstructed.startsWith(`${root}/`)
+      )
+    ) {
+      return reconstructed;
+    }
+    return source;
+  };
+  // The emitter writes cross-module imports as flat sibling specifiers
+  // (e.g. "./base_types.ts"). Remap each one through the same layout
+  // machinery as the files themselves so the specifier stays correct wherever
+  // the target module lands — including targets not emitted by this run.
+  const rewriteCrossSchemaImports = (
+    file: GeneratedFile,
+    mappedPath: string,
+  ): string => {
+    let contents = file.contents;
+    for (const ref of file.crossSchemaImports ?? []) {
+      const flatPath = ref.specifier.startsWith("./")
+        ? ref.specifier.slice(2)
+        : ref.specifier;
+      const targetMapped = ensureSafeOutputPath(mapGeneratedFilePath(
+        {
+          path: flatPath,
+          contents: "",
+          sourceFilename: reconstructImportTargetSource(
+            ref.targetSourceFilename,
+          ),
+        },
+        options.layout,
+        schemaRoots,
+      ));
+      const specifier = relativeModuleSpecifier(mappedPath, targetMapped);
+      if (specifier !== ref.specifier) {
+        contents = contents.replaceAll(
+          JSON.stringify(ref.specifier),
+          JSON.stringify(specifier),
+        );
+      }
+    }
+    return contents;
+  };
   const out: GeneratedFile[] = [];
   const pathToSource = new Map<string, string>();
   for (const file of generated) {
@@ -423,7 +477,7 @@ export function finalizeGeneratedFiles(
     pathToSource.set(safePath, source);
     out.push({
       path: safePath,
-      contents: file.contents,
+      contents: rewriteCrossSchemaImports(file, safePath),
       sourceFilename: file.sourceFilename,
     });
   }
@@ -1013,6 +1067,26 @@ function resolvePathFromBase(baseDir: string, value: string): string {
   if (isAbsolutePath(normalizedValue)) return normalizedValue;
   if (baseDir === ".") return normalizedValue;
   return normalizePath(joinPath(baseDir, normalizedValue));
+}
+
+// Relative import specifier from one generated module to another, both given
+// as normalized output-relative paths. Used only by finalizeGeneratedFiles to
+// rewrite cross-schema import specifiers after layout mapping.
+function relativeModuleSpecifier(fromFile: string, toFile: string): string {
+  const fromDir = fromFile.split("/").slice(0, -1);
+  const toParts = toFile.split("/");
+  let common = 0;
+  while (
+    common < fromDir.length &&
+    common < toParts.length - 1 &&
+    fromDir[common] === toParts[common]
+  ) {
+    common += 1;
+  }
+  const ups = fromDir.length - common;
+  const tail = toParts.slice(common).join("/");
+  if (ups === 0) return `./${tail}`;
+  return `${"../".repeat(ups)}${tail}`;
 }
 
 function normalizePath(value: string): string {

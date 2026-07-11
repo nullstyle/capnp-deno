@@ -6,10 +6,19 @@
  */
 
 import type { FieldModel, NodeModel } from "./model.ts";
+import type {
+  CrossSchemaImportRef,
+  EnumInfo,
+  InterfaceInfo,
+  ModuleIndex,
+  StructInfo,
+  TypeEmitContext,
+} from "./emitter_helpers.ts";
 import {
   collectLocalInterfaces,
   collectLocalTypes,
   formatBigint,
+  ModuleImportCollector,
   quoteIfNeeded,
   simpleNodeName,
   toCamelCase,
@@ -42,10 +51,132 @@ interface MethodShape {
   resultFieldInterfaceId?: bigint;
 }
 
+/** Result of emitting one `*_types.ts` module. */
+export interface EmittedTypesModule {
+  contents: string;
+  /** Sibling generated modules the contents import from (may be empty). */
+  crossSchemaImports: CrossSchemaImportRef[];
+}
+
+/**
+ * Module-scope identifiers every generated `*_types.ts` module declares or
+ * imports from the runtime, independent of the schema. Cross-file import
+ * aliases must never collide with these.
+ */
+const RESERVED_RUNTIME_MODULE_NAMES = [
+  // import type { ... } from "@nullstyle/capnp/encoding"
+  "AnyPointerValue",
+  "CapabilityPointer",
+  "EncodeWithCapsResult",
+  "EnumTypeDescriptor",
+  "PreambleCapDescriptor",
+  "StructCodec",
+  "StructDescriptor",
+  // import type { ... } from "@nullstyle/capnp/rpc"
+  "RpcBootstrapClientTransport",
+  "RpcCallContext",
+  "RpcCallOptions",
+  "RpcClientTransport",
+  "RpcExportCapabilityOptions",
+  "RpcServerDispatch",
+  "RpcDebugSchemaMethod",
+  "RpcServerDispatchResult",
+  "RpcServerRegistry",
+  "RpcServiceToken",
+  "RpcStub",
+  "StreamSender",
+  "StreamSenderOptions",
+  // import { ... } from "@nullstyle/capnp/rpc"
+  "ProtocolError",
+  "SessionError",
+  "annotateCapnpError",
+  "createRpcServiceToken",
+  "EMPTY_STRUCT_MESSAGE",
+  "createStreamSender",
+  // import { ... } from "@nullstyle/capnp/encoding"
+  "decodeStructMessage",
+  "decodeStructMessageWithCaps",
+  "encodeStructMessage",
+  "encodeStructMessageWithCaps",
+  "TYPE_ANY_POINTER",
+  "TYPE_BOOL",
+  "TYPE_DATA",
+  "TYPE_FLOAT32",
+  "TYPE_FLOAT64",
+  "TYPE_INT16",
+  "TYPE_INT32",
+  "TYPE_INT64",
+  "TYPE_INT8",
+  "TYPE_INTERFACE",
+  "TYPE_TEXT",
+  "TYPE_UINT16",
+  "TYPE_UINT32",
+  "TYPE_UINT64",
+  "TYPE_UINT8",
+  "TYPE_VOID",
+  // emitCapabilityBridgeHelpers declarations
+  "RPC_STUB_CAPABILITY",
+  "RpcClientTransportWithCapabilityExport",
+  "parseCapabilityPointer",
+  "requireRpcStubCapability",
+  "withCapabilityStubLifecycle",
+  "capabilityToServiceStub",
+  "requireOutboundClient",
+  "exportCapabilityFromTransport",
+  "exportCapabilityFromContext",
+] as const;
+
+function collectReservedModuleNames(
+  enumInfos: EnumInfo[],
+  structInfos: StructInfo[],
+  localInterfaces: InterfaceInfo[],
+  resolvedInterfaces: RpcResolvedInterfaceInfo[],
+): Set<string> {
+  const reserved = new Set<string>(RESERVED_RUNTIME_MODULE_NAMES);
+  for (const info of enumInfos) {
+    reserved.add(info.typeName);
+    reserved.add(info.valuesConst);
+    reserved.add(info.descriptorConst);
+  }
+  for (const info of structInfos) {
+    reserved.add(info.typeName);
+    reserved.add(info.descriptorConst);
+    reserved.add(info.codecConst);
+  }
+  for (const info of localInterfaces) {
+    const typeName = info.typeName;
+    reserved.add(typeName);
+    reserved.add(`${typeName}Client`);
+    reserved.add(`${typeName}Server`);
+    reserved.add(`${typeName}Service`);
+    reserved.add(`${typeName}InterfaceId`);
+    reserved.add(`${typeName}MethodOrdinals`);
+    reserved.add(`${typeName}DebugMethods`);
+    reserved.add(`create${typeName}Client`);
+    reserved.add(`create${typeName}Server`);
+    reserved.add(`create${typeName}ServiceClient`);
+    reserved.add(`create${typeName}ServiceServer`);
+    reserved.add(`bootstrap${typeName}Client`);
+    reserved.add(`register${typeName}Server`);
+  }
+  for (const resolved of resolvedInterfaces) {
+    for (const method of resolved.methods) {
+      if (!method.isStreaming) continue;
+      reserved.add(
+        `create${resolved.info.typeName}${
+          toPascalCase(method.methodName)
+        }StreamSender`,
+      );
+    }
+  }
+  return reserved;
+}
+
 export function emitTypesModule(
   fileNode: NodeModel,
   nodeById: Map<bigint, NodeModel>,
-): string {
+  moduleIndex: ModuleIndex,
+): EmittedTypesModule {
   const out: string[] = [];
   const resolvedInterfaces = resolveRpcInterfaces(fileNode, nodeById);
   const hasStreamingMethods = resolvedInterfaces.some((resolved) =>
@@ -133,61 +264,90 @@ export function emitTypesModule(
   out.push("  TYPE_UINT8,");
   out.push("  TYPE_VOID,");
   out.push('} from "@nullstyle/capnp/encoding";');
-  out.push("");
-  emitCapabilityBridgeHelpers(out);
 
-  const localTypes = collectLocalTypes(fileNode, nodeById);
-  const enumInfos = localTypes.enumInfos;
-  const structInfos = localTypes.structInfos;
+  const fileTypes = moduleIndex.byFileId.get(fileNode.id);
+  const enumInfos = fileTypes?.enumInfos ??
+    collectLocalTypes(fileNode, nodeById).enumInfos;
+  const structInfos = fileTypes?.structInfos ??
+    collectLocalTypes(fileNode, nodeById).structInfos;
+  const localInterfaces = fileTypes?.interfaceInfos ??
+    collectLocalInterfaces(fileNode, nodeById);
   const enumById = new Map(enumInfos.map((item) => [item.id, item] as const));
   const structById = new Map(
     structInfos.map((item) => [item.id, item] as const),
   );
+  const imports = new ModuleImportCollector({
+    fileId: fileNode.id,
+    moduleIndex,
+    reservedNames: collectReservedModuleNames(
+      enumInfos,
+      structInfos,
+      localInterfaces,
+      resolvedInterfaces,
+    ),
+  });
+  const ctx: TypeEmitContext = { nodeById, enumById, structById, imports };
+
+  // Body is buffered separately so cross-module import lines (discovered
+  // while emitting it) can be rendered into the module header, and imported
+  // enum descriptor mirrors can be spliced in right after the local enums
+  // (before any struct descriptor references them at module init).
+  const body: string[] = [];
+  emitCapabilityBridgeHelpers(body);
 
   for (const enumInfo of enumInfos) {
-    emitEnum(out, enumInfo);
+    emitEnum(body, enumInfo);
+  }
+  const enumMirrorSpliceIndex = body.length;
+
+  for (const structInfo of structInfos) {
+    emitStructInterface(body, structInfo, ctx);
   }
 
   for (const structInfo of structInfos) {
-    emitStructInterface(out, structInfo, nodeById, enumById, structById);
+    emitStructDescriptor(body, structInfo, ctx);
   }
 
-  for (const structInfo of structInfos) {
-    emitStructDescriptor(out, structInfo, nodeById, enumById, structById);
-  }
+  emitRpcInterfaceDefinitions(body, resolvedInterfaces);
 
-  emitRpcInterfaceDefinitions(out, resolvedInterfaces);
-
-  const localInterfaces = collectLocalInterfaces(fileNode, nodeById);
   const interfaceById = new Map(
     localInterfaces.map((info) => [info.id, info.typeName] as const),
   );
 
   for (const resolved of resolvedInterfaces) {
     const separateServerTypeName = highLevelServerTypeName(resolved);
-    emitHighLevelInterface(out, resolved, interfaceById, nodeById);
+    emitHighLevelInterface(body, resolved, interfaceById, nodeById);
     if (separateServerTypeName) {
       emitHighLevelServerInterface(
-        out,
+        body,
         resolved,
         separateServerTypeName,
         interfaceById,
         nodeById,
       );
     }
-    emitClientAdapter(out, resolved, interfaceById, nodeById);
+    emitClientAdapter(body, resolved, interfaceById, nodeById);
     emitServerAdapter(
-      out,
+      body,
       resolved,
       interfaceById,
       nodeById,
       separateServerTypeName,
     );
-    emitServiceToken(out, resolved, separateServerTypeName);
-    emitStreamSenderHelpers(out, resolved, interfaceById, nodeById);
+    emitServiceToken(body, resolved, separateServerTypeName);
+    emitStreamSenderHelpers(body, resolved, interfaceById, nodeById);
   }
 
-  return `${out.join("\n")}\n`;
+  body.splice(enumMirrorSpliceIndex, 0, ...imports.renderEnumMirrorLines());
+
+  out.push(...imports.renderImportLines());
+  out.push("");
+  out.push(...body);
+
+  return {
+    contents: `${out.join("\n")}\n`,
+    crossSchemaImports: imports.crossSchemaImports(),
+  };
 }
 
 function emitCapabilityBridgeHelpers(out: string[]): void {
