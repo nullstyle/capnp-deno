@@ -89,21 +89,21 @@ export interface RpcConnectionPoolConnectContext {
  */
 export interface RpcConnectionPoolStats {
   /** Whether the pool has been closed and rejects new acquires. */
-  closed: boolean;
+  readonly closed: boolean;
   /** Total number of connections managed by the pool (idle + active). */
-  total: number;
+  readonly total: number;
   /** Number of connection attempts currently in progress. */
-  connecting: number;
+  readonly connecting: number;
   /** Number of idle connections available for acquisition. */
-  idle: number;
+  readonly idle: number;
   /** Number of connections currently in use. */
-  active: number;
+  readonly active: number;
   /** Number of pending acquire requests waiting for a connection. */
-  pending: number;
+  readonly pending: number;
   /** Configured minimum number of idle/warm connections to retain. */
-  minConnections: number;
+  readonly minConnections: number;
   /** Configured maximum number of managed or connecting connections. */
-  maxConnections: number;
+  readonly maxConnections: number;
 }
 
 /**
@@ -111,11 +111,11 @@ export interface RpcConnectionPoolStats {
  */
 export interface RpcConnectionPoolWarmupStats {
   /** Number of warm-up connections requested (same as minConnections). */
-  requested: number;
+  readonly requested: number;
   /** Number of warm-up connections that successfully connected. */
-  succeeded: number;
+  readonly succeeded: number;
   /** Number of warm-up connections that failed. */
-  failed: number;
+  readonly failed: number;
 }
 
 interface IdleEntry {
@@ -361,7 +361,19 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
         }
       }
 
-      this.#throwIfAcquireAborted(options.signal);
+      if (options.signal?.aborted) {
+        // The acquire was aborted while the health check was awaited. The
+        // connection was already removed from the idle set, so it must be
+        // handed off, re-parked, or -- when the pool closed mid-check --
+        // closed before throwing; otherwise it would leak outside the pool's
+        // tracking and never be closed.
+        if (this.#closed) {
+          void this.#closeConnection(entry.conn);
+        } else if (!this.#handoffPendingAcquire(entry.conn)) {
+          this.#parkIdleConnection(entry.conn);
+        }
+        throw this.#createAcquireAbortError(options.signal);
+      }
       this.#active.add(entry.conn);
       return entry.conn;
     }
@@ -709,8 +721,17 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
       return conn;
     } finally {
       if (!settled && signal.aborted) {
-        void connectAttempt.then((conn) => this.#closeConnection(conn), () => {
-          // no-op; the caller receives the abort error.
+        // The caller receives the abort error; once the in-flight attempt
+        // settles (after #connecting has been decremented), route its outcome
+        // through the pool machinery so waiters queued behind the aborted
+        // acquire wake up promptly instead of sitting out their timeout.
+        void connectAttempt.then((conn) => {
+          if (this.#closed || !this.#handoffPendingAcquire(conn)) {
+            void this.#closeConnection(conn);
+          }
+          this.#schedulePendingCreateDrain();
+        }, () => {
+          this.#schedulePendingCreateDrain();
         });
       }
     }
@@ -855,6 +876,19 @@ export class RpcConnectionPool implements Disposable, AsyncDisposable {
  * @param options - Optional acquire timeout and abort signal.
  * @returns The return value of `fn`.
  * @throws Rethrows any error from `fn` after releasing the connection.
+ *
+ * @example
+ * ```ts
+ * const pool = new RpcConnectionPool(() => createMyTransport(), {
+ *   maxConnections: 4,
+ * });
+ * const response = await withConnection(
+ *   pool,
+ *   (conn) => conn.call(capability, 0, paramsBytes),
+ *   { timeoutMs: 1000 },
+ * );
+ * await pool.close();
+ * ```
  */
 export async function withConnection<T>(
   pool: RpcConnectionPool,

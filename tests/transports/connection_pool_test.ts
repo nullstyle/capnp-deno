@@ -271,6 +271,240 @@ Deno.test("RpcConnectionPool forwards abort signal to connection factory and clo
   }
 });
 
+Deno.test("RpcConnectionPool re-parks healthy connection when acquire aborts during health check", async () => {
+  const healthCheckStarted = deferred<void>();
+  const healthCheckResult = deferred<boolean>();
+  const created: Array<ReturnType<typeof makeConn>> = [];
+  const pool = new RpcConnectionPool(() => {
+    const conn = makeConn(created.length + 1);
+    created.push(conn);
+    return Promise.resolve(conn);
+  }, {
+    maxConnections: 1,
+    healthCheck: () => {
+      healthCheckStarted.resolve();
+      return healthCheckResult.promise;
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn = await pool.acquire();
+    pool.release(conn);
+    assertEquals(pool.stats.idle, 1);
+
+    const controller = new AbortController();
+    const pending = pool.acquire({ signal: controller.signal });
+    await withTimeout(healthCheckStarted.promise, 1_000, "health check start");
+
+    controller.abort("request canceled");
+    healthCheckResult.resolve(true);
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+
+    // The healthy connection must stay tracked by the pool, not leak.
+    assertEquals(pool.stats.total, 1);
+    assertEquals(pool.stats.idle, 1);
+    assertEquals(pool.stats.active, 0);
+    assertEquals(created[0].closed, false);
+
+    await pool.close();
+    assert(
+      created[0].closed,
+      "expected pool.close() to close the re-parked connection",
+    );
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool closes connection when pool closes during aborted health check", async () => {
+  const healthCheckStarted = deferred<void>();
+  const healthCheckResult = deferred<boolean>();
+  const created: Array<ReturnType<typeof makeConn>> = [];
+  const pool = new RpcConnectionPool(() => {
+    const conn = makeConn(created.length + 1);
+    created.push(conn);
+    return Promise.resolve(conn);
+  }, {
+    maxConnections: 1,
+    healthCheck: () => {
+      healthCheckStarted.resolve();
+      return healthCheckResult.promise;
+    },
+    healthCheckIdleMs: 0,
+  });
+
+  try {
+    const conn = await pool.acquire();
+    pool.release(conn);
+    assertEquals(pool.stats.idle, 1);
+
+    const controller = new AbortController();
+    const pending = pool.acquire({ signal: controller.signal });
+    await withTimeout(healthCheckStarted.promise, 1_000, "health check start");
+
+    // Close the pool while the health check holds the connection outside the
+    // idle set, then abort: the connection must be closed, not re-parked into
+    // the already-closed pool.
+    await pool.close();
+    controller.abort("request canceled");
+    healthCheckResult.resolve(true);
+
+    let thrown: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+
+    await withTimeout(
+      (async () => {
+        while (!created[0].closed) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      })(),
+      1_000,
+      "connection close after aborted health check on closed pool",
+    );
+    assertEquals(pool.stats.total, 0);
+    assertEquals(pool.stats.idle, 0);
+  } finally {
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool wakes pending acquires when an aborted in-flight connect resolves", async () => {
+  const connectStarted = deferred<void>();
+  const releaseConnect = deferred<void>();
+  const created: Array<ReturnType<typeof makeConn>> = [];
+  let connectCalls = 0;
+  const pool = new RpcConnectionPool(async () => {
+    connectCalls += 1;
+    if (connectCalls === 1) {
+      connectStarted.resolve();
+      await releaseConnect.promise;
+    }
+    const conn = makeConn(connectCalls);
+    created.push(conn);
+    return conn;
+  }, { maxConnections: 1, acquireTimeoutMs: 5_000 });
+
+  try {
+    const controller = new AbortController();
+    const first = pool.acquire({ signal: controller.signal });
+    await withTimeout(connectStarted.promise, 1_000, "connect started");
+
+    const second = pool.acquire();
+    assertEquals(pool.stats.pending, 1);
+    assertEquals(pool.stats.connecting, 1);
+
+    controller.abort("request canceled");
+    let thrown: unknown;
+    try {
+      await first;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+
+    releaseConnect.resolve();
+    // The pending acquire must be woken promptly (well under
+    // acquireTimeoutMs) once the aborted acquire's connect attempt settles.
+    const conn = await withTimeout(
+      second,
+      1_000,
+      "pending acquire after aborted connect",
+    );
+    assertEquals(connectCalls, 1);
+    assert(conn === created[0], "expected handoff of the late connection");
+    assertEquals(created[0].closed, false);
+    assertEquals(pool.stats.active, 1);
+    assertEquals(pool.stats.pending, 0);
+    assertEquals(pool.stats.total, 1);
+    pool.release(conn);
+  } finally {
+    releaseConnect.resolve();
+    await pool.close();
+  }
+});
+
+Deno.test("RpcConnectionPool wakes pending acquires when an aborted in-flight connect rejects", async () => {
+  const connectStarted = deferred<void>();
+  const failConnect = deferred<void>();
+  const created: Array<ReturnType<typeof makeConn>> = [];
+  let connectCalls = 0;
+  const pool = new RpcConnectionPool(async () => {
+    connectCalls += 1;
+    if (connectCalls === 1) {
+      connectStarted.resolve();
+      await failConnect.promise;
+      throw new Error("dial failed");
+    }
+    const conn = makeConn(connectCalls);
+    created.push(conn);
+    return conn;
+  }, { maxConnections: 1, acquireTimeoutMs: 5_000 });
+
+  try {
+    const controller = new AbortController();
+    const first = pool.acquire({ signal: controller.signal });
+    await withTimeout(connectStarted.promise, 1_000, "connect started");
+
+    const second = pool.acquire();
+    assertEquals(pool.stats.pending, 1);
+
+    controller.abort("request canceled");
+    let thrown: unknown;
+    try {
+      await first;
+    } catch (error) {
+      thrown = error;
+    }
+    assert(
+      thrown instanceof SessionError &&
+        /acquire aborted/i.test(thrown.message),
+      `expected aborted acquire SessionError, got: ${String(thrown)}`,
+    );
+
+    failConnect.resolve();
+    // Once the failed attempt frees connect capacity, the pool must retry
+    // for the pending acquire instead of leaving it to time out.
+    const conn = await withTimeout(
+      second,
+      1_000,
+      "pending acquire after failed aborted connect",
+    );
+    assertEquals(connectCalls, 2);
+    assert(conn === created[0], "expected a freshly created connection");
+    assertEquals(pool.stats.active, 1);
+    assertEquals(pool.stats.pending, 0);
+    pool.release(conn);
+  } finally {
+    failConnect.resolve();
+    await pool.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Idle timeout closes unused connections
 // ---------------------------------------------------------------------------

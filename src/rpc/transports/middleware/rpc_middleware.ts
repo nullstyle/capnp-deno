@@ -397,15 +397,15 @@ export interface RpcMetricsFramesByType {
  */
 export interface RpcMetricsSnapshot {
   /** Total number of frames sent. */
-  totalFramesSent: number;
+  readonly totalFramesSent: number;
   /** Total number of frames received. */
-  totalFramesReceived: number;
+  readonly totalFramesReceived: number;
   /** Total bytes sent across all frames. */
-  totalBytesSent: number;
+  readonly totalBytesSent: number;
   /** Total bytes received across all frames. */
-  totalBytesReceived: number;
+  readonly totalBytesReceived: number;
   /** Frame counts broken down by RPC message type. */
-  framesByType: RpcMetricsFramesByType;
+  readonly framesByType: RpcMetricsFramesByType;
 }
 
 /**
