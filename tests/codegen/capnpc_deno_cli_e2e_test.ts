@@ -115,6 +115,62 @@ Deno.test("capnpc-deno CLI e2e merges barrels across successive per-schema runs"
   }
 });
 
+Deno.test("capnpc-deno CLI e2e roots absolute --schema inputs at their common ancestor", async () => {
+  // realPath keeps generated paths comparable on platforms where the temp
+  // directory sits behind a symlink (macOS /var -> /private/var).
+  const baseRoot = await Deno.realPath(
+    await Deno.makeTempDir({ prefix: "capnpc_deno_cli_e2e_abs_" }),
+  );
+  try {
+    // Two schemas with the SAME basename in sibling directories, passed as
+    // absolute paths. capnp reports them as their full path minus the leading
+    // "/", so before the fix both flattened to schema_types.ts and the run
+    // aborted with an output-path collision. They must instead root at their
+    // common ancestor, keeping the disambiguating directory.
+    await Deno.mkdir(`${baseRoot}/a`, { recursive: true });
+    await Deno.mkdir(`${baseRoot}/b`, { recursive: true });
+    const outRoot = `${baseRoot}/out`;
+    await Deno.mkdir(outRoot, { recursive: true });
+    // Distinct file IDs (distinct schemas) avoid capnp's duplicate-ID error;
+    // the shared basename is what forces the previously-colliding layout.
+    await Deno.copyFile(PERSON_SCHEMA, `${baseRoot}/a/schema.capnp`);
+    await Deno.copyFile(UNION_SCHEMA, `${baseRoot}/b/schema.capnp`);
+
+    // Run from outRoot (not an ancestor of the schemas) so capnp reports the
+    // stripped-absolute source names that trigger the bug.
+    await runCodegenCli(
+      [
+        "--schema",
+        `${baseRoot}/a/schema.capnp`,
+        "--schema",
+        `${baseRoot}/b/schema.capnp`,
+        "--out",
+        outRoot,
+      ],
+      outRoot,
+    );
+
+    const barrel = await Deno.readTextFile(`${outRoot}/mod.ts`);
+    for (const entry of ["a/schema_types.ts", "b/schema_types.ts"]) {
+      assertBarrelExports(
+        barrel,
+        entry,
+        `expected barrel to export ${entry} rooted at the common ancestor`,
+      );
+      assert(
+        await isExistingFile(`${outRoot}/${entry}`),
+        `expected generated module ${entry} to exist on disk`,
+      );
+    }
+    assert(
+      !barrel.includes('export * from "./schema_types.ts";'),
+      "expected no flattened schema_types.ts that would collide across the two inputs",
+    );
+  } finally {
+    await Deno.remove(baseRoot, { recursive: true });
+  }
+});
+
 Deno.test("capnpc-deno CLI e2e keeps overwrite semantics for --src directory runs", async () => {
   // realPath keeps the child's --allow-write scope aligned with its cwd on
   // platforms where the temp directory sits behind a symlink (macOS /var).

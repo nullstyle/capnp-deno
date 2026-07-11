@@ -392,12 +392,26 @@ export function computeIncludePaths(
 
 export function finalizeGeneratedFiles(
   generated: GeneratedFile[],
-  options: Pick<CliOptions, "layout" | "srcDirs" | "emitBarrel">,
+  options:
+    & Pick<CliOptions, "layout" | "srcDirs" | "emitBarrel">
+    & Partial<Pick<CliOptions, "schemas">>,
 ): GeneratedFile[] {
+  const schemas = options.schemas ?? [];
+  const reconstructSource = createAbsoluteSourceReconstructor(
+    schemas,
+    options.srcDirs,
+  );
+  const schemaRoots = [
+    ...options.srcDirs,
+    ...absoluteSchemaLayoutRoots(schemas),
+  ];
   const out: GeneratedFile[] = [];
   const pathToSource = new Map<string, string>();
   for (const file of generated) {
-    const mapped = mapGeneratedFilePath(file, options.layout, options.srcDirs);
+    const resolved = file.sourceFilename === undefined
+      ? file
+      : { ...file, sourceFilename: reconstructSource(file.sourceFilename) };
+    const mapped = mapGeneratedFilePath(resolved, options.layout, schemaRoots);
     const safePath = ensureSafeOutputPath(mapped);
     const source = file.sourceFilename ?? file.path;
     const prior = pathToSource.get(safePath);
@@ -435,13 +449,105 @@ export function finalizeGeneratedFiles(
 export function mapGeneratedFilePath(
   file: GeneratedFile,
   layout: OutputLayout,
-  srcDirs: string[],
+  schemaRoots: string[],
 ): string {
   if (layout === "flat") return normalizePath(file.path);
   if (!file.sourceFilename) return normalizePath(file.path);
-  const schemaRel = deriveSchemaRelativePath(file.sourceFilename, srcDirs);
+  const schemaRel = deriveSchemaRelativePath(file.sourceFilename, schemaRoots);
   if (!schemaRel) return normalizePath(file.path);
   return toModulePathFromSchema(schemaRel, detectGeneratedSuffix(file.path));
+}
+
+// capnp reports absolute command-line schema paths with their leading "/"
+// stripped (e.g. "/tmp/a/x.capnp" surfaces as "tmp/a/x.capnp"), which is
+// textually indistinguishable from a relative path. Without disambiguation the
+// "schema" layout would mirror the whole filesystem path under the output
+// directory. This reconstructs the original absolute form, but only for names
+// that provably came from an absolute input — resolving the ambiguity toward
+// the relative interpretation first so a genuinely relative schema is never
+// re-anchored onto an unrelated absolute root.
+function createAbsoluteSourceReconstructor(
+  schemas: string[],
+  srcDirs: string[],
+): (sourceFilename: string) => string {
+  const absoluteSchemaInputs = new Set(
+    schemas.map(normalizePath).filter(isAbsolutePath),
+  );
+  const relativeSchemaInputs = new Set(
+    schemas
+      .map(normalizePath)
+      .filter((path) => !isAbsolutePath(path))
+      .map(normalizeRelativeSegments),
+  );
+  const normalizedSrcDirs = srcDirs
+    .map((dir) => trimTrailingSlash(normalizePath(dir)))
+    .filter((dir) => dir.length > 0);
+  const relativeSrcDirs = normalizedSrcDirs.filter((dir) =>
+    !isAbsolutePath(dir)
+  );
+  const absoluteSrcDirs = normalizedSrcDirs.filter(isAbsolutePath);
+
+  const isUnder = (path: string, root: string): boolean =>
+    path === root || path.startsWith(`${root}/`);
+
+  return function reconstructAbsoluteSource(sourceFilename: string): string {
+    const source = normalizePath(sourceFilename);
+    if (isAbsolutePath(source)) return source;
+    const relative = normalizeRelativeSegments(source);
+    // Prefer the relative reading: a name matching a relative input can never
+    // have come from an absolute one, so it must not gain an absolute root.
+    if (relativeSchemaInputs.has(relative)) return source;
+    if (relativeSrcDirs.some((root) => isUnder(relative, root))) return source;
+    const reconstructed = `/${relative}`;
+    if (absoluteSchemaInputs.has(reconstructed)) return reconstructed;
+    if (absoluteSrcDirs.some((root) => isUnder(reconstructed, root))) {
+      return reconstructed;
+    }
+    return source;
+  };
+}
+
+// Absolute --schema inputs carry no srcDir root, so the "schema" layout would
+// otherwise mirror their full path. Rooting them at their common ancestor
+// directory flattens the shared prefix while preserving the relative structure
+// between sibling schemas (so distinct dirs never collide and nesting under a
+// shared parent is kept). POSIX ("/"-rooted) paths only; drive-letter absolutes
+// fall through to the basename fallback in deriveSchemaRelativePath.
+function absoluteSchemaLayoutRoots(schemas: string[]): string[] {
+  const dirs = schemas
+    .map(normalizePath)
+    .filter((path) => path.startsWith("/"))
+    .map(dirnamePath);
+  if (dirs.length === 0) return [];
+  return [commonAbsoluteAncestorDir(dirs)];
+}
+
+function commonAbsoluteAncestorDir(dirs: string[]): string {
+  let common: string[] | null = null;
+  for (const dir of dirs) {
+    const segments = dir.split("/").filter((segment) => segment.length > 0);
+    if (common === null) {
+      common = segments;
+      continue;
+    }
+    let index = 0;
+    while (
+      index < common.length &&
+      index < segments.length &&
+      common[index] === segments[index]
+    ) {
+      index += 1;
+    }
+    common = common.slice(0, index);
+  }
+  return `/${(common ?? []).join("/")}`;
+}
+
+function normalizeRelativeSegments(value: string): string {
+  return normalizePath(value)
+    .split("/")
+    .filter((segment) => segment.length > 0 && segment !== ".")
+    .join("/");
 }
 
 const GENERATED_MODULE_HEADER = "// Generated by capnpc-deno";
@@ -836,11 +942,11 @@ function isBracketLiteralClosed(value: string): boolean {
 
 function deriveSchemaRelativePath(
   sourceFilename: string,
-  srcDirs: string[],
+  schemaRoots: string[],
 ): string | null {
   const source = normalizePath(sourceFilename);
   const sourceIsAbsolute = isAbsolutePath(source);
-  const normalizedRoots = srcDirs.map((root) =>
+  const normalizedRoots = schemaRoots.map((root) =>
     trimTrailingSlash(normalizePath(root))
   )
     .filter((root) => root.length > 0)
@@ -848,9 +954,14 @@ function deriveSchemaRelativePath(
 
   for (const root of normalizedRoots) {
     if (sourceIsAbsolute !== isAbsolutePath(root)) continue;
-    if (!source.startsWith(`${root}/`) && source !== root) continue;
+    const isFilesystemRoot = root === "/";
+    const prefix = isFilesystemRoot ? "/" : `${root}/`;
+    if (source !== root && !source.startsWith(prefix)) continue;
     if (source === root) return null;
-    return normalizeRelativePath(source.slice(root.length + 1), {
+    const relative = isFilesystemRoot
+      ? source.slice(1)
+      : source.slice(root.length + 1);
+    return normalizeRelativePath(relative, {
       allowParentTraversal: false,
       context: "schema source filename",
     });

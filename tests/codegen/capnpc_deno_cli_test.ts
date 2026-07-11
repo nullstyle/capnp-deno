@@ -916,6 +916,174 @@ Deno.test("capnpc-deno CLI schema mapping handles root precedence and suffix fal
   assertEquals(emptyStem, "schema_meta.ts");
 });
 
+// capnp reports absolute schema paths (not under the invocation cwd) as the
+// full path minus its leading "/", so `sourceFilename` here is that stripped
+// form and `schemas` carries the original absolute input the user passed.
+function typesFileFor(sourceFilename: string): GeneratedFile {
+  return { path: "s_types.ts", sourceFilename, contents: "// types" };
+}
+
+function assertHasPath(files: GeneratedFile[], path: string): void {
+  assert(
+    files.some((file) => file.path === path),
+    `expected output to include ${path}, got ${
+      files.map((file) => file.path).join(", ")
+    }`,
+  );
+}
+
+Deno.test("capnpc-deno CLI flattens a single absolute --schema input to its basename", () => {
+  const output = finalizeGeneratedFiles(
+    [typesFileFor("private/tmp/foo/schemas/person_codegen.capnp")],
+    {
+      layout: "schema",
+      srcDirs: [],
+      emitBarrel: true,
+      schemas: ["/private/tmp/foo/schemas/person_codegen.capnp"],
+    },
+  );
+  assertEquals(output.length, 2);
+  assertEquals(output[0].path, "person_codegen_types.ts");
+  assertEquals(output[1].path, "mod.ts");
+  assert(
+    output[1].contents.includes('export * from "./person_codegen_types.ts";'),
+    "expected barrel to export the flattened, non-mirrored module",
+  );
+});
+
+Deno.test("capnpc-deno CLI roots multiple absolute --schema inputs at their common ancestor", () => {
+  // Same basename in sibling directories must not collide, and nesting under a
+  // shared parent must be preserved (common ancestor "/proj").
+  const output = finalizeGeneratedFiles(
+    [
+      { path: "a_types.ts", sourceFilename: "proj/a.capnp", contents: "// a" },
+      {
+        path: "b_types.ts",
+        sourceFilename: "proj/sub/b.capnp",
+        contents: "// b",
+      },
+    ],
+    {
+      layout: "schema",
+      srcDirs: [],
+      emitBarrel: false,
+      schemas: ["/proj/a.capnp", "/proj/sub/b.capnp"],
+    },
+  );
+  assertHasPath(output, "a_types.ts");
+  assertHasPath(output, "sub/b_types.ts");
+});
+
+Deno.test("capnpc-deno CLI keeps distinct absolute --schema siblings from colliding", () => {
+  // "/a/x.capnp" and "/b/x.capnp" share a basename; their common ancestor is
+  // the filesystem root, so each keeps its distinguishing directory instead of
+  // both flattening to x_types.ts (which would abort with a path collision).
+  const output = finalizeGeneratedFiles(
+    [
+      { path: "x_types.ts", sourceFilename: "a/x.capnp", contents: "// a" },
+      { path: "x_types.ts", sourceFilename: "b/x.capnp", contents: "// b" },
+    ],
+    {
+      layout: "schema",
+      srcDirs: [],
+      emitBarrel: false,
+      schemas: ["/a/x.capnp", "/b/x.capnp"],
+    },
+  );
+  assertHasPath(output, "a/x_types.ts");
+  assertHasPath(output, "b/x_types.ts");
+});
+
+Deno.test("capnpc-deno CLI keeps mirroring relative --schema inputs", () => {
+  const output = finalizeGeneratedFiles(
+    [typesFileFor("schemas/person_codegen.capnp")],
+    {
+      layout: "schema",
+      srcDirs: [],
+      emitBarrel: false,
+      schemas: ["schemas/person_codegen.capnp"],
+    },
+  );
+  assertEquals(output[0].path, "schemas/person_codegen_types.ts");
+});
+
+Deno.test("capnpc-deno CLI does not re-anchor a relative --schema onto an unrelated absolute --src", () => {
+  // The relative schema shares its first segment with the absolute srcDir's
+  // basename; it must still mirror, not flatten under /schema.
+  const output = finalizeGeneratedFiles(
+    [{
+      path: "foo_types.ts",
+      sourceFilename: "schema/foo.capnp",
+      contents: "",
+    }],
+    {
+      layout: "schema",
+      srcDirs: ["/schema"],
+      emitBarrel: false,
+      schemas: ["schema/foo.capnp"],
+    },
+  );
+  assertEquals(output[0].path, "schema/foo_types.ts");
+});
+
+Deno.test("capnpc-deno CLI flattens absolute but mirrors relative when --schema mixes both", () => {
+  // Both siblings report under "home/"; the absolute one flattens to its
+  // basename, the relative one keeps mirroring — presence of the absolute
+  // sibling must not change where the relative input lands.
+  const output = finalizeGeneratedFiles(
+    [
+      {
+        path: "foo_types.ts",
+        sourceFilename: "home/foo.capnp",
+        contents: "// abs",
+      },
+      {
+        path: "bar_types.ts",
+        sourceFilename: "home/bar.capnp",
+        contents: "// rel",
+      },
+    ],
+    {
+      layout: "schema",
+      srcDirs: [],
+      emitBarrel: false,
+      schemas: ["/home/foo.capnp", "home/bar.capnp"],
+    },
+  );
+  assertHasPath(output, "foo_types.ts");
+  assertHasPath(output, "home/bar_types.ts");
+});
+
+Deno.test("capnpc-deno CLI roots absolute --src directory schemas at the srcDir", () => {
+  const output = finalizeGeneratedFiles(
+    [
+      {
+        path: "person_types.ts",
+        sourceFilename: "abs/schemas/nested/person.capnp",
+        contents: "",
+      },
+    ],
+    {
+      layout: "schema",
+      srcDirs: ["/abs/schemas"],
+      emitBarrel: false,
+      schemas: [],
+    },
+  );
+  assertEquals(output[0].path, "nested/person_types.ts");
+});
+
+Deno.test("capnpc-deno CLI maps an absolute source at the filesystem root", () => {
+  // Reconstructed absolute source with a filesystem-root ("/") layout root:
+  // the leading slash is stripped without doubling the separator.
+  const mapped = mapGeneratedFilePath(
+    { path: "x_types.ts", sourceFilename: "/a/x.capnp", contents: "" },
+    "schema",
+    ["/"],
+  );
+  assertEquals(mapped, "a/x_types.ts");
+});
+
 Deno.test("capnpc-deno CLI normalizes output paths and rejects empty normalized output", () => {
   assertThrows(
     () =>
