@@ -30,6 +30,7 @@ import type {
   CircuitBreakerOptions,
   CircuitBreakerState,
   CircuitBreakerStats,
+  ClientMiddlewareContext,
   ConnectTcpTransportWithReconnectOptions,
   ConnectWebSocketTransportWithReconnectOptions,
   ConnectWebTransportTransportWithReconnectOptions,
@@ -50,20 +51,28 @@ import type {
   ReconnectPolicyContext,
   ReconnectRetryInfo,
   RpcAcceptedTransport,
+  RpcBootstrapClientFactory,
+  RpcBootstrapClientTransport,
   RpcBootstrapRequest,
   RpcCallContext,
   RpcCallFrameRequest,
+  RpcCallOptions,
   RpcCallRequest,
   RpcCallTarget,
   RpcCapabilityPointer,
   RpcCapDescriptor,
   RpcClientCallOptions,
   RpcClientCallResult,
+  RpcClientMiddleware,
+  RpcClientTransport,
   RpcClientTransportLike,
+  RpcConnectedClient,
+  RpcConnectionPool,
   RpcConnectionPoolAcquireOptions,
   RpcConnectionPoolConnectContext,
   RpcConnectionPoolOptions,
   RpcConnectionPoolStats,
+  RpcConnectionPoolWarmupStats,
   RpcDebugEvent,
   RpcDebugEventFormatOptions,
   RpcDebugPayloadSummary,
@@ -73,7 +82,17 @@ import type {
   RpcFinishOptions,
   RpcFinishRequest,
   RpcFrameDirection,
+  RpcFrameDirectionFilter,
   RpcIntrospectionCallbacks,
+  RpcMessage,
+  RpcMessageHandlers,
+  RpcMessageTagBootstrap,
+  RpcMessageTagCall,
+  RpcMessageTagDisembargo,
+  RpcMessageTagFinish,
+  RpcMessageTagRelease,
+  RpcMessageTagResolve,
+  RpcMessageTagReturn,
   RpcMetricsFramesByType,
   RpcMetricsMiddleware,
   RpcMetricsMiddlewareOptions,
@@ -100,6 +119,7 @@ import type {
   RpcServerCallContext,
   RpcServerCallResponse,
   RpcServerDispatch,
+  RpcServerMiddleware,
   RpcServerRuntimeCreateOptions,
   RpcServerRuntimeCreateWithRootOptions,
   RpcServerRuntimeHostCallPumpOptions,
@@ -137,6 +157,11 @@ import type {
   RpcWireClient,
   RpcWireClientOptions,
   RpcWireClientStats,
+  RpcWireMessageBuilder,
+  SegmentTable,
+  ServerMiddlewareContext,
+  ServerMiddlewareDispatchResult,
+  ServerMiddlewareFrameResult,
   SessionRpcClientTransport,
   SessionRpcClientTransportCreateOptions,
   SessionRpcClientTransportOptions,
@@ -168,6 +193,7 @@ import type {
 import type {
   annotateCapnpError,
   connect,
+  connectAndBootstrap,
   createRpcDebugTracer,
   createWebTransportCertificateHash,
   createWebTransportCertificateHashOptions,
@@ -191,6 +217,7 @@ type PublicTypeExportSmoke = {
   rpcTransportMiddleware: RpcTransportMiddleware;
   rpcWireClientOptions: RpcWireClientOptions;
   rpcFrameDirection: RpcFrameDirection;
+  rpcFrameDirectionFilter: RpcFrameDirectionFilter;
   rpcIntrospectionCallbacks: RpcIntrospectionCallbacks;
   rpcMetricsFramesByType: RpcMetricsFramesByType;
   rpcMetricsMiddleware: RpcMetricsMiddleware;
@@ -223,20 +250,30 @@ type PublicTypeExportSmoke = {
   reconnectingRpcClientTransportStats: ReconnectingRpcClientTransportStats;
   rpcPeerAddress: RpcPeerAddress;
   rpcPeerOptions: RpcPeerOptions;
+  rpcBootstrapClientFactory: RpcBootstrapClientFactory<{
+    ping(): Promise<void>;
+  }>;
+  rpcBootstrapClientTransport: RpcBootstrapClientTransport;
   rpcBootstrapRequest: RpcBootstrapRequest;
   rpcCallFrameRequest: RpcCallFrameRequest;
   rpcCallContext: RpcCallContext;
+  rpcCallOptions: RpcCallOptions;
   rpcCallRequest: RpcCallRequest;
   rpcCallTarget: RpcCallTarget;
   rpcCapDescriptor: RpcCapDescriptor;
   rpcCapabilityPointer: RpcCapabilityPointer;
+  clientMiddlewareContext: ClientMiddlewareContext;
   rpcClientCallOptions: RpcClientCallOptions;
   rpcClientCallResult: RpcClientCallResult;
+  rpcClientMiddleware: RpcClientMiddleware;
+  rpcClientTransport: RpcClientTransport;
   rpcClientTransportLike: RpcClientTransportLike;
+  rpcConnectedClient: RpcConnectedClient<{ ping(): Promise<void> }>;
   rpcConnectionPoolAcquireOptions: RpcConnectionPoolAcquireOptions;
   rpcConnectionPoolConnectContext: RpcConnectionPoolConnectContext;
   rpcConnectionPoolOptions: RpcConnectionPoolOptions;
   rpcConnectionPoolStats: RpcConnectionPoolStats;
+  rpcConnectionPoolWarmupStats: RpcConnectionPoolWarmupStats;
   rpcDebugEvent: RpcDebugEvent;
   rpcDebugEventFormatOptions: RpcDebugEventFormatOptions;
   rpcDebugPayloadSummary: RpcDebugPayloadSummary;
@@ -256,6 +293,17 @@ type PublicTypeExportSmoke = {
   rpcReturnMessage: RpcReturnMessage;
   rpcReturnResults: RpcReturnResults;
   rpcReturnResultsFrameRequest: RpcReturnResultsFrameRequest;
+  rpcMessage: RpcMessage;
+  rpcMessageHandlers: RpcMessageHandlers<void>;
+  rpcMessageTagBootstrap: RpcMessageTagBootstrap;
+  rpcMessageTagCall: RpcMessageTagCall;
+  rpcMessageTagDisembargo: RpcMessageTagDisembargo;
+  rpcMessageTagFinish: RpcMessageTagFinish;
+  rpcMessageTagRelease: RpcMessageTagRelease;
+  rpcMessageTagResolve: RpcMessageTagResolve;
+  rpcMessageTagReturn: RpcMessageTagReturn;
+  rpcWireMessageBuilder: RpcWireMessageBuilder;
+  segmentTable: SegmentTable;
   rpcPromisedAnswerOp: RpcPromisedAnswerOp;
   rpcPromisedAnswerTarget: RpcPromisedAnswerTarget;
   rpcServiceBinding: RpcServiceBinding<{ ping(): Promise<void> }>;
@@ -293,6 +341,10 @@ type PublicTypeExportSmoke = {
   rpcServerRuntimeCreateOptions: RpcServerRuntimeCreateOptions;
   rpcServerRuntimeCreateWithRootOptions: RpcServerRuntimeCreateWithRootOptions;
   rpcServerDispatch: RpcServerDispatch;
+  rpcServerMiddleware: RpcServerMiddleware;
+  serverMiddlewareContext: ServerMiddlewareContext;
+  serverMiddlewareDispatchResult: ServerMiddlewareDispatchResult;
+  serverMiddlewareFrameResult: ServerMiddlewareFrameResult;
   rpcServerWasmHost: RpcServerWasmHost;
   rpcRuntimeModuleOptions: RpcRuntimeModuleOptions;
   rpcSession: RpcSession;
@@ -527,6 +579,25 @@ type AssertRpcConnectionPoolStatsConnecting = Assert<
 
 type AssertRpcConnectionPoolStatsClosed = Assert<
   IsEqual<RpcConnectionPoolStats["closed"], boolean>
+>;
+
+type AssertRpcConnectionPoolWarmupStatsMethod = Assert<
+  IsEqual<
+    RpcConnectionPool["warmupStats"],
+    () => RpcConnectionPoolWarmupStats
+  >
+>;
+
+type AssertConnectAndBootstrapReturn = Assert<
+  IsEqual<
+    ReturnType<
+      typeof connectAndBootstrap<
+        { ping(): Promise<void> },
+        RpcBootstrapClientTransport
+      >
+    >,
+    Promise<RpcConnectedClient<{ ping(): Promise<void> }>>
+  >
 >;
 
 type AssertCircuitBreakerStatsState = Assert<
@@ -805,6 +876,8 @@ type StaticAssertions = [
   AssertRpcConnectionPoolStatsTotal,
   AssertRpcConnectionPoolStatsConnecting,
   AssertRpcConnectionPoolStatsClosed,
+  AssertRpcConnectionPoolWarmupStatsMethod,
+  AssertConnectAndBootstrapReturn,
   AssertCircuitBreakerStatsState,
   AssertCircuitBreakerStateChangeError,
   AssertCreateRpcDebugTracerReturn,
@@ -925,8 +998,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 77);
+  assert(STATIC_ASSERTIONS.length === 79);
 });

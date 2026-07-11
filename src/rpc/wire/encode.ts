@@ -98,10 +98,30 @@ import {
 import { encodeSigned30, ensureU16, ensureU32, ensureU64 } from "./segments.ts";
 
 // ---------------------------------------------------------------------------
-// MessageBuilder
+// RpcWireMessageBuilder
 // ---------------------------------------------------------------------------
 
-export class MessageBuilder {
+/**
+ * Low-level, single-segment builder for Cap'n Proto RPC wire messages.
+ *
+ * Allocates words on demand, writes struct/list pointers and scalar fields at
+ * explicit word/byte offsets, and produces a framed message (segment table +
+ * segment payload) via {@link RpcWireMessageBuilder.toMessageBytes}.
+ *
+ * This is distinct from the schema-driven `MessageBuilder` exported by
+ * `@nullstyle/capnp/encoding`: this class works at the raw RPC frame layout
+ * level and is primarily useful when hand-crafting RPC protocol frames.
+ *
+ * @example
+ * ```ts
+ * const builder = new RpcWireMessageBuilder();
+ * const structWord = builder.allocWords(1); // one data word, no pointers
+ * builder.setStructPointer(0, structWord, 1, 0);
+ * builder.writeU32(structWord, 0, 42);
+ * const frame: Uint8Array = builder.toMessageBytes();
+ * ```
+ */
+export class RpcWireMessageBuilder {
   private bytes: Uint8Array;
   private words: number;
   private cachedView: DataView | null = null;
@@ -306,7 +326,7 @@ function pointerWordIndex(
 }
 
 function encodeCapTable(
-  builder: MessageBuilder,
+  builder: RpcWireMessageBuilder,
   listPointerWord: number,
   capTable: RpcCapDescriptor[] | undefined,
 ): void {
@@ -344,7 +364,7 @@ function encodeCapTable(
 }
 
 function encodeReturnFlags(
-  builder: MessageBuilder,
+  builder: RpcWireMessageBuilder,
   returnWord: number,
   releaseParamCaps: boolean,
   noFinishNeeded: boolean,
@@ -356,7 +376,7 @@ function encodeReturnFlags(
 }
 
 function writePayloadContentPointer(
-  builder: MessageBuilder,
+  builder: RpcWireMessageBuilder,
   contentPointerWord: number,
   content: Uint8Array | undefined,
   fieldName: string,
@@ -437,7 +457,7 @@ function normalizePromisedAnswerOp(
 }
 
 function encodePromisedAnswerTransform(
-  builder: MessageBuilder,
+  builder: RpcWireMessageBuilder,
   pointerWord: number,
   transform: RpcPromisedAnswerOp[] | undefined,
 ): void {
@@ -493,7 +513,7 @@ export function encodeBootstrapRequestFrame(
   request: RpcBootstrapRequest,
 ): Uint8Array {
   const questionId = ensureU32(request.questionId, "questionId");
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
 
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
@@ -572,7 +592,7 @@ export function encodeCallRequestFrame(
   const methodId = ensureU16(request.methodId, "methodId");
   const target = normalizeCallTarget(request);
 
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
 
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
@@ -721,7 +741,7 @@ export function encodeFinishFrame(request: {
   const releaseResultCaps = request.releaseResultCaps ?? true;
   const requireEarlyCancellation = request.requireEarlyCancellation ?? false;
 
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
   );
@@ -773,7 +793,7 @@ export function encodeReleaseFrame(request: RpcReleaseRequest): Uint8Array {
   const id = ensureU32(request.id, "id");
   const referenceCount = ensureU32(request.referenceCount, "referenceCount");
 
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
   );
@@ -826,7 +846,7 @@ export function encodeReturnResultsFrame(
   const releaseParamCaps = request.releaseParamCaps ?? true;
   const noFinishNeeded = request.noFinishNeeded ?? false;
 
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
   );
@@ -911,7 +931,7 @@ export function encodeReturnExceptionFrame(
   const noFinishNeeded = request.noFinishNeeded ?? false;
   const reasonBytes = TEXT_ENCODER.encode(request.reason);
 
-  const builder = new MessageBuilder();
+  const builder = new RpcWireMessageBuilder();
   const messageWord = builder.allocWords(
     MESSAGE_DATA_WORD_COUNT + MESSAGE_POINTER_COUNT,
   );

@@ -23,7 +23,12 @@ export {
 
 export {
   connectAndBootstrap,
+  type RpcBootstrapClientFactory,
+  type RpcBootstrapClientTransport,
   type RpcCallContext,
+  type RpcCallOptions,
+  type RpcClientTransport,
+  type RpcConnectedClient,
 } from "./rpc/server/rpc_runtime.ts";
 
 // === High-Level Service API (DX V2) ===
@@ -78,7 +83,6 @@ export {
   encodeReturnResultsFrame,
   extractBootstrapCapabilityIndex,
   frameFromSegment,
-  MessageBuilder,
   RETURN_TAG_EXCEPTION,
   RETURN_TAG_RESULTS,
   RPC_CALL_TARGET_TAG_IMPORTED_CAP,
@@ -115,6 +119,7 @@ export {
   type RpcReturnMessage,
   type RpcReturnResults,
   type RpcReturnResultsFrameRequest,
+  RpcWireMessageBuilder,
   segmentsFromFrame,
   type SegmentTable,
 } from "./rpc/wire.ts";

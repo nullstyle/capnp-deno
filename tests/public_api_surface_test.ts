@@ -1,4 +1,6 @@
 import * as capnp from "../src/mod.ts";
+import * as capnpAdvanced from "../src/advanced.ts";
+import * as capnpEncoding from "../src/encoding.ts";
 import { assertEquals } from "./test_utils.ts";
 
 const EXPECTED_RUNTIME_EXPORTS = [
@@ -15,7 +17,6 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "EMPTY_STRUCT_MESSAGE",
   "InMemoryRpcHarnessTransport",
   "InstantiationError",
-  "MessageBuilder",
   "MessagePortTransport",
   "MiddlewareTransport",
   "NetworkRpcHarnessTransport",
@@ -43,6 +44,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "RpcServerRuntime",
   "RpcSession",
   "RpcWireClient",
+  "RpcWireMessageBuilder",
   "SessionError",
   "SessionRpcClientTransport",
   "TcpTransport",
@@ -100,11 +102,90 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "withConnection",
 ].sort();
 
+const EXPECTED_ENCODING_RUNTIME_EXPORTS = [
+  "CAP_DESCRIPTOR_TAG_SENDER_HOSTED",
+  "MessageBuilder",
+  "MessageReader",
+  "TYPE_ANY_POINTER",
+  "TYPE_BOOL",
+  "TYPE_DATA",
+  "TYPE_FLOAT32",
+  "TYPE_FLOAT64",
+  "TYPE_INT16",
+  "TYPE_INT32",
+  "TYPE_INT64",
+  "TYPE_INT8",
+  "TYPE_INTERFACE",
+  "TYPE_TEXT",
+  "TYPE_UINT16",
+  "TYPE_UINT32",
+  "TYPE_UINT64",
+  "TYPE_UINT8",
+  "TYPE_VOID",
+  "WORD_BYTES",
+  "WasmSerde",
+  "collectCapabilityPointersFromStruct",
+  "decodeAnyPointerMessageFromReader",
+  "decodeCapabilityPointerWord",
+  "decodeDataField",
+  "decodeListField",
+  "decodePointerField",
+  "decodeStructAt",
+  "decodeStructMessage",
+  "decodeStructMessageWithCaps",
+  "defaultValueForType",
+  "encodeAnyPointerMessageIntoBuilder",
+  "encodeCapabilityPointerWord",
+  "encodeDataField",
+  "encodeListField",
+  "encodePointerField",
+  "encodeStructAt",
+  "encodeStructMessage",
+  "encodeStructMessageWithCaps",
+  "enumOrdinal",
+  "enumValue",
+  "isDataType",
+  "isPointerType",
+  "isPresentField",
+  "remapCapabilityIndices",
+  "resolveActiveDiscriminant",
+  "resolveDecodedCapabilities",
+].sort();
+
 Deno.test("public API runtime exports remain stable", () => {
   const actual = Object.keys(capnp).sort();
   assertEquals(
     JSON.stringify(actual),
     JSON.stringify(EXPECTED_RUNTIME_EXPORTS),
     "runtime export surface changed; update snapshot intentionally",
+  );
+});
+
+Deno.test("encoding entrypoint runtime exports remain curated", () => {
+  const actual = Object.keys(capnpEncoding).sort();
+  assertEquals(
+    JSON.stringify(actual),
+    JSON.stringify(EXPECTED_ENCODING_RUNTIME_EXPORTS),
+    "encoding export surface changed; update snapshot intentionally " +
+      "(internal helpers such as MASK_29/asString/TEXT_ENCODER must stay " +
+      "unexported)",
+  );
+});
+
+Deno.test("advanced entrypoint exposes the low-level WASM surface", () => {
+  const required = [
+    "WasmAbi",
+    "WasmPeer",
+    "WasmSerde",
+    "createRuntimePeer",
+    "getCapnpWasmExports",
+    "getRuntimeWasmExports",
+    "instantiatePeer",
+  ];
+  const missing = required.filter((name) => !(name in capnpAdvanced));
+  assertEquals(
+    JSON.stringify(missing),
+    JSON.stringify([]),
+    "advanced entrypoint is missing low-level exports",
   );
 });

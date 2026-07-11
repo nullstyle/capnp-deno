@@ -97,7 +97,7 @@ export {
   encodeReleaseFrame,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
-  MessageBuilder,
+  RpcWireMessageBuilder,
 } from "./encode.ts";
 
 // decode ------------------------------------------------------------------
