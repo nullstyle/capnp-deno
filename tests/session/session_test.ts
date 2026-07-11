@@ -7,7 +7,7 @@ import {
   WasmPeer,
 } from "../../src/advanced.ts";
 import { FakeCapnpWasm } from "../fake_wasm.ts";
-import { assert, assertBytes, assertEquals } from "../test_utils.ts";
+import { assert, assertBytes, assertEquals, deferred } from "../test_utils.ts";
 
 class MockTransport implements RpcTransport {
   private onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
@@ -18,6 +18,8 @@ class MockTransport implements RpcTransport {
   throwOnStart: unknown = null;
   throwOnSend: unknown = null;
   throwOnClose: unknown = null;
+  sendStarted: (() => void) | null = null;
+  sendGate: Promise<void> | null = null;
 
   start(
     onFrame: (frame: Uint8Array) => void | Promise<void>,
@@ -31,8 +33,10 @@ class MockTransport implements RpcTransport {
     this.onFrame = onFrame;
   }
 
-  send(frame: Uint8Array): void {
+  async send(frame: Uint8Array): Promise<void> {
     if (this.throwOnSend !== null) throw this.throwOnSend;
+    this.sendStarted?.();
+    if (this.sendGate) await this.sendGate;
     this.sent.push(new Uint8Array(frame));
   }
 
@@ -60,7 +64,13 @@ Deno.test("RpcSession pumps inbound to transport and drains all outbound frames"
   const transport = new MockTransport();
 
   const session = new RpcSession(peer, transport);
+  assertEquals(session.stats.started, false);
+  assertEquals(session.stats.startAttempts, 0);
+  assertEquals(session.stats.inboundFramesStarted, 0);
   await session.start();
+  assertEquals(session.stats.started, true);
+  assertEquals(session.stats.startAttempts, 1);
+  assertEquals(session.stats.startFailures, 0);
   await transport.emit(new Uint8Array([0x42]));
   await session.flush();
 
@@ -69,6 +79,13 @@ Deno.test("RpcSession pumps inbound to transport and drains all outbound frames"
   assertBytes(transport.sent[0], [0x42, 0x10]);
   assertBytes(transport.sent[1], [0x42, 0x20]);
   assertEquals(fake.commitCalls.length, 2, "expected two pop commits");
+  assertEquals(session.stats.inboundFramesStarted, 1);
+  assertEquals(session.stats.inboundFramesSucceeded, 1);
+  assertEquals(session.stats.inboundFramesFailed, 0);
+  assertEquals(session.stats.inboundFramesInFlight, 0);
+  assertEquals(session.stats.inboundBytesReceived, 1);
+  assertEquals(session.stats.outboundFramesSent, 2);
+  assertEquals(session.stats.outboundBytesSent, 4);
 });
 
 Deno.test("RpcSession.close closes transport and peer", async () => {
@@ -83,6 +100,40 @@ Deno.test("RpcSession.close closes transport and peer", async () => {
 
   assert(transport.closed, "transport should be closed");
   assert(peer.closed, "peer should be closed");
+  assertEquals(session.stats.closed, true);
+  assertEquals(session.stats.started, true);
+});
+
+Deno.test("RpcSession stats report in-flight frame processing", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => [new Uint8Array([frame[0], 0xee])],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const sendStarted = deferred<void>();
+  const sendGate = deferred<void>();
+  transport.sendStarted = () => sendStarted.resolve();
+  transport.sendGate = sendGate.promise;
+  const session = new RpcSession(peer, transport);
+
+  try {
+    await session.start();
+    const pending = transport.emit(new Uint8Array([0x77]));
+    await sendStarted.promise;
+
+    assertEquals(session.stats.inboundFramesStarted, 1);
+    assertEquals(session.stats.inboundFramesInFlight, 1);
+    assertEquals(session.stats.outboundFramesSent, 0);
+
+    sendGate.resolve();
+    await pending;
+
+    assertEquals(session.stats.inboundFramesInFlight, 0);
+    assertEquals(session.stats.inboundFramesSucceeded, 1);
+    assertEquals(session.stats.outboundFramesSent, 1);
+  } finally {
+    await session.close();
+  }
 });
 
 Deno.test("RpcSession.create can create and auto-start without explicit peer wiring", async () => {
@@ -175,11 +226,15 @@ Deno.test("RpcSession can retry start after an initial start failure", async () 
     `expected normalized start failure, got: ${String(firstError)}`,
   );
   assertEquals(session.started, false);
+  assertEquals(session.stats.startAttempts, 1);
+  assertEquals(session.stats.startFailures, 1);
   assertEquals(transport.started, false);
 
   await session.start();
   assertEquals(session.started, true);
   assertEquals(transport.started, true);
+  assertEquals(session.stats.startAttempts, 2);
+  assertEquals(session.stats.startFailures, 1);
 
   await session.close();
 });
@@ -209,6 +264,13 @@ Deno.test("RpcSession pumpInboundFrame normalizes transport send failures", asyn
         /send exploded/i.test(thrown.message),
       `expected normalized inbound failure, got: ${String(thrown)}`,
     );
+    assertEquals(session.stats.inboundFramesStarted, 1);
+    assertEquals(session.stats.inboundFramesSucceeded, 0);
+    assertEquals(session.stats.inboundFramesFailed, 1);
+    assertEquals(session.stats.inboundFramesInFlight, 0);
+    assertEquals(session.stats.inboundBytesReceived, 1);
+    assertEquals(session.stats.outboundFramesSent, 0);
+    assertEquals(session.stats.outboundBytesSent, 0);
   } finally {
     await session.close();
   }
@@ -235,6 +297,8 @@ Deno.test("RpcSession close swallows flush failures and still closes transport a
     inboundError instanceof SessionError,
     `expected inbound SessionError, got: ${String(inboundError)}`,
   );
+  assertEquals(session.stats.inboundFramesFailed, 1);
+  assertEquals(session.stats.inboundFramesInFlight, 0);
 
   await session.close();
   assertEquals(transport.closed, true);
@@ -265,6 +329,9 @@ Deno.test("RpcSession routes inbound failures through onError callback", async (
       seenErrors[0] instanceof SessionError,
       `expected SessionError callback argument, got: ${String(seenErrors[0])}`,
     );
+    assertEquals(session.stats.inboundFramesStarted, 1);
+    assertEquals(session.stats.inboundFramesFailed, 1);
+    assertEquals(session.stats.inboundFramesInFlight, 0);
   } finally {
     await session.close();
   }

@@ -123,9 +123,11 @@ import type {
   RpcServiceStats,
   RpcServiceToken,
   RpcServiceTokenCreateOptions,
+  RpcSession,
   RpcSessionCreateOptions,
   RpcSessionHarnessTransport,
   RpcSessionOptions,
+  RpcSessionStats,
   RpcStub,
   RpcStubLifecycle,
   RpcTransport,
@@ -293,9 +295,11 @@ type PublicTypeExportSmoke = {
   rpcServerDispatch: RpcServerDispatch;
   rpcServerWasmHost: RpcServerWasmHost;
   rpcRuntimeModuleOptions: RpcRuntimeModuleOptions;
+  rpcSession: RpcSession;
   rpcSessionCreateOptions: RpcSessionCreateOptions;
   rpcSessionHarnessTransport: RpcSessionHarnessTransport;
   rpcSessionOptions: RpcSessionOptions;
+  rpcSessionStats: RpcSessionStats;
   rpcTransportAcceptor: RpcTransportAcceptor;
   rpcTransport: RpcTransport;
   rpcWireClientStats: RpcWireClientStats;
@@ -484,6 +488,14 @@ type AssertCreateSessionAutoStart = Assert<
 
 type AssertSessionCreateAutoStart = Assert<
   IsEqual<RpcSessionCreateOptions["autoStart"], boolean | undefined>
+>;
+
+type AssertRpcSessionStatsGetter = Assert<
+  IsEqual<RpcSession["stats"], RpcSessionStats>
+>;
+
+type AssertRpcSessionStatsInboundFailures = Assert<
+  IsEqual<RpcSessionStats["inboundFramesFailed"], number>
 >;
 
 type AssertClientCreateStartSession = Assert<
@@ -784,6 +796,8 @@ type StaticAssertions = [
   AssertReconnectOnRetryErrorSignature,
   AssertCreateSessionAutoStart,
   AssertSessionCreateAutoStart,
+  AssertRpcSessionStatsGetter,
+  AssertRpcSessionStatsInboundFailures,
   AssertClientCreateStartSession,
   AssertRpcConnectionPoolOptionsMaxConnections,
   AssertRpcConnectionPoolAcquireSignal,
@@ -909,8 +923,10 @@ const STATIC_ASSERTIONS: StaticAssertions = [
   true,
   true,
   true,
+  true,
+  true,
 ];
 
 Deno.test("public API type contracts compile", () => {
-  assert(STATIC_ASSERTIONS.length === 75);
+  assert(STATIC_ASSERTIONS.length === 77);
 });

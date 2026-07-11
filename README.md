@@ -242,10 +242,11 @@ Built-in transports:
 
 All built-in transports expose `transport.stats` snapshots for lifecycle state,
 outbound queue depth, in-flight writes/posts, and configured outbound limits.
-Client adapters expose `client.stats` snapshots for pending Return waits, local
-callback exports, next question IDs, and close state. `RpcServerBridge.stats`
-exposes answer-table, promise-pipelining, and exported capability pressure for
-server-side health checks.
+`RpcSession.stats` exposes start state, inbound frame successes/failures, and
+outbound frame/byte counters. Client adapters expose `client.stats` snapshots
+for pending Return waits, local callback exports, next question IDs, and close
+state. `RpcServerBridge.stats` exposes answer-table, promise-pipelining, and
+exported capability pressure for server-side health checks.
 
 Browser WebTransport clients must connect over `https:` and trust the server
 certificate by hash:

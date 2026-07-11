@@ -44,6 +44,36 @@ export interface RpcSessionCreateOptions extends RpcSessionOptions {
 }
 
 /**
+ * Operational snapshot for {@link RpcSession}.
+ */
+export interface RpcSessionStats {
+  /** Whether {@link RpcSession.start} has completed successfully. */
+  readonly started: boolean;
+  /** Whether {@link RpcSession.start} is currently in progress. */
+  readonly starting: boolean;
+  /** Whether {@link RpcSession.close} has been called. */
+  readonly closed: boolean;
+  /** Number of transport start attempts made by this session. */
+  readonly startAttempts: number;
+  /** Number of failed transport start attempts. */
+  readonly startFailures: number;
+  /** Number of inbound frames whose processing has started. */
+  readonly inboundFramesStarted: number;
+  /** Number of inbound frames processed successfully. */
+  readonly inboundFramesSucceeded: number;
+  /** Number of inbound frames that failed during processing or outbound send. */
+  readonly inboundFramesFailed: number;
+  /** Number of inbound frame handlers currently running. */
+  readonly inboundFramesInFlight: number;
+  /** Total inbound frame bytes accepted for processing. */
+  readonly inboundBytesReceived: number;
+  /** Number of outbound frames successfully sent through the transport. */
+  readonly outboundFramesSent: number;
+  /** Total outbound frame bytes successfully sent through the transport. */
+  readonly outboundBytesSent: number;
+}
+
+/**
  * Manages the lifecycle of a Cap'n Proto RPC session.
  *
  * An `RpcSession` binds a {@link WasmPeer} to an {@link RpcTransport},
@@ -76,6 +106,15 @@ export class RpcSession {
   #inboundChain: Promise<void> = Promise.resolve();
   #onError: RpcSessionOptions["onError"];
   #observability: RpcSessionOptions["observability"];
+  #startAttempts = 0;
+  #startFailures = 0;
+  #inboundFramesStarted = 0;
+  #inboundFramesSucceeded = 0;
+  #inboundFramesFailed = 0;
+  #inboundFramesInFlight = 0;
+  #inboundBytesReceived = 0;
+  #outboundFramesSent = 0;
+  #outboundBytesSent = 0;
 
   /**
    * @param peer - The WASM peer that will process inbound frames.
@@ -135,6 +174,34 @@ export class RpcSession {
   }
 
   /**
+   * Current session lifecycle and frame-processing counters.
+   *
+   * @returns A point-in-time stats snapshot suitable for logs and health checks.
+   *
+   * @example
+   * ```ts
+   * const stats = session.stats;
+   * console.log(stats.inboundFramesFailed, stats.outboundFramesSent);
+   * ```
+   */
+  get stats(): RpcSessionStats {
+    return {
+      started: this.#started,
+      starting: this.#starting,
+      closed: this.#closed,
+      startAttempts: this.#startAttempts,
+      startFailures: this.#startFailures,
+      inboundFramesStarted: this.#inboundFramesStarted,
+      inboundFramesSucceeded: this.#inboundFramesSucceeded,
+      inboundFramesFailed: this.#inboundFramesFailed,
+      inboundFramesInFlight: this.#inboundFramesInFlight,
+      inboundBytesReceived: this.#inboundBytesReceived,
+      outboundFramesSent: this.#outboundFramesSent,
+      outboundBytesSent: this.#outboundBytesSent,
+    };
+  }
+
+  /**
    * Starts the session by activating the transport.
    *
    * Once started, inbound frames are automatically received and processed
@@ -151,6 +218,7 @@ export class RpcSession {
       throw new SessionError("RpcSession start is already in progress");
     }
     this.#starting = true;
+    this.#startAttempts += 1;
     try {
       await this.transport.start((frame) => {
         this.#inboundChain = this.#inboundChain
@@ -172,6 +240,7 @@ export class RpcSession {
         durationMs: performance.now() - startedAt,
       });
     } catch (error) {
+      this.#startFailures += 1;
       const normalized = normalizeSessionError(
         error,
         "rpc session start failed",
@@ -204,13 +273,19 @@ export class RpcSession {
   async pumpInboundFrame(frame: Uint8Array): Promise<void> {
     const startedAt = performance.now();
     this.assertOpen();
+    this.#inboundFramesStarted += 1;
+    this.#inboundFramesInFlight += 1;
+    this.#inboundBytesReceived += frame.byteLength;
     try {
       const { frames: outbound } = this.peer.pushFrame(frame);
       let outboundBytes = 0;
       for (const out of outbound) {
-        outboundBytes += out.byteLength;
         await this.transport.send(out);
+        outboundBytes += out.byteLength;
+        this.#outboundFramesSent += 1;
+        this.#outboundBytesSent += out.byteLength;
       }
+      this.#inboundFramesSucceeded += 1;
       emitObservabilityEvent(this.#observability, {
         name: "rpc.session.inbound_frame",
         attributes: {
@@ -222,6 +297,7 @@ export class RpcSession {
         durationMs: performance.now() - startedAt,
       });
     } catch (error) {
+      this.#inboundFramesFailed += 1;
       const normalized = normalizeSessionError(
         error,
         "rpc session inbound frame failed",
@@ -236,6 +312,8 @@ export class RpcSession {
         error: normalized,
       });
       throw normalized;
+    } finally {
+      this.#inboundFramesInFlight -= 1;
     }
   }
 

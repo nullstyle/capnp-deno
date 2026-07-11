@@ -667,6 +667,10 @@ the configured timeout.
 2. Check server-side logs for dispatch errors.
 3. Ensure the server's `RpcServerBridge.handleFrame()` is returning response
    frames correctly.
+4. Inspect `session.stats.inboundFramesStarted`,
+   `session.stats.inboundFramesFailed`, and `session.stats.outboundFramesSent`
+   on the server session to distinguish a missing inbound Call from a handler or
+   outbound-send failure.
 
 #### `rpc wait aborted`
 

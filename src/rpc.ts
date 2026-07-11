@@ -86,6 +86,7 @@ export {
   RpcSession,
   type RpcSessionCreateOptions,
   type RpcSessionOptions,
+  type RpcSessionStats,
 } from "./rpc/session/session.ts";
 
 // === RPC Client ===

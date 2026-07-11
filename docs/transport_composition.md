@@ -98,6 +98,8 @@ with built-in factories: `createLoggingMiddleware`,
 
 Binds a WASM peer to a transport. Receives inbound frames, processes them
 through the peer, and sends outbound responses. One session per connection.
+`session.stats` reports start/close state, inbound frame success/failure counts,
+in-flight frame processing, and outbound frame/byte totals.
 
 ### `SessionRpcClientTransport`
 
