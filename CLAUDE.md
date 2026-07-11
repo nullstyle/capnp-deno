@@ -26,6 +26,9 @@ deno test tests/session/session_test.ts
 # Socket integration tests (needs --allow-net)
 deno task test:integration
 
+# Codegen CLI end-to-end tests (needs capnp binary, --allow-run/--allow-write)
+deno task test:codegen-e2e
+
 # Real WASM tests (must build WASM first)
 just build-wasm          # or: CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
 deno task test:real

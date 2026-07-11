@@ -30,6 +30,9 @@ test-codegen:
 test-integration:
     deno task test:integration
 
+test-codegen-e2e:
+    deno task test:codegen-e2e
+
 test-real:
     deno task test:real
 
@@ -80,6 +83,7 @@ ci-fast:
 ci-integration:
     just verify
     just test-integration
+    just test-codegen-e2e
 
 ci-real:
     just verify-real
@@ -90,6 +94,7 @@ ci:
 release-check:
     just verify
     just test-codegen
+    just test-codegen-e2e
     just test-integration
     just build-wasm
     just smoke-real

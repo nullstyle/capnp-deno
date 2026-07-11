@@ -88,6 +88,9 @@ jobs:
       - name: Socket integration tests
         run: just test-integration
 
+      - name: Codegen CLI e2e tests
+        run: just test-codegen-e2e
+
   # ── Real WASM: build wasm from capnp-zig, run real-wasm tests ─────
   real-wasm:
     runs-on: ubuntu-latest
