@@ -174,6 +174,20 @@ export interface StreamSender<TParams = Uint8Array, TResult = Uint8Array> {
  * @param callFn - Function that performs the actual RPC call.
  * @param options - Streaming configuration.
  * @returns A new stream sender.
+ *
+ * @example
+ * ```ts
+ * const sender = createStreamSender(
+ *   (params, context) =>
+ *     client.call(capability, methodId, params, { signal: context.signal }),
+ *   { maxInFlight: 4 },
+ * );
+ *
+ * for (const chunk of chunks) {
+ *   await sender.send(chunk);
+ * }
+ * await sender.flush();
+ * ```
  */
 export function createStreamSender(
   callFn: StreamCallFn,
@@ -326,11 +340,11 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
     return previous.then(run, run);
   }
 
-  async function drainOneUnlocked(
-    options: StreamDrainOptions = {},
-  ): Promise<void> {
+  async function takeSettledHead(
+    options: StreamDrainOptions,
+  ): Promise<InFlightCall<TResult> | undefined> {
     const oldest = inFlightCalls[0];
-    if (!oldest) return;
+    if (!oldest) return undefined;
 
     while (!oldest.settled) {
       if (!options.allowClosed) {
@@ -340,47 +354,54 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
       await waitForStateChange(options);
     }
 
-    const settled = oldest.settled;
-    try {
-      totalReceived++;
-      if (settled.ok) {
-        try {
-          if (onResponse) {
-            await onResponse(settled.value, oldest.index);
-          }
-        } catch (error) {
-          rememberError(error);
-          throw error;
-        }
-      } else {
-        if (onError) {
-          try {
-            onError(settled.error, oldest.index);
-          } catch (error) {
-            rememberError(error);
-            throw error;
-          }
-        } else {
-          rememberError(settled.error);
-          throw settled.error;
-        }
+    totalReceived++;
+    oldest.cleanup();
+    if (inFlightCalls[0] === oldest) {
+      inFlightCalls.shift();
+    } else {
+      const index = inFlightCalls.indexOf(oldest);
+      if (index >= 0) {
+        inFlightCalls.splice(index, 1);
       }
-    } finally {
-      oldest.cleanup();
-      if (inFlightCalls[0] === oldest) {
-        inFlightCalls.shift();
-      } else {
-        const index = inFlightCalls.indexOf(oldest);
-        if (index >= 0) {
-          inFlightCalls.splice(index, 1);
-        }
-      }
-      notifyStateChange();
     }
+    notifyStateChange();
+    return oldest;
   }
 
-  async function drainOne(options?: StreamDrainOptions): Promise<void> {
-    await withDrainLock(() => drainOneUnlocked(options));
+  async function deliverSettled(call: InFlightCall<TResult>): Promise<void> {
+    const settled = call.settled;
+    if (!settled) return;
+    if (settled.ok) {
+      if (!onResponse) return;
+      try {
+        await onResponse(settled.value, call.index);
+      } catch (error) {
+        rememberError(error);
+        throw error;
+      }
+      return;
+    }
+    if (onError) {
+      try {
+        onError(settled.error, call.index);
+      } catch (error) {
+        rememberError(error);
+        throw error;
+      }
+      return;
+    }
+    rememberError(settled.error);
+    throw settled.error;
+  }
+
+  async function drainOne(options: StreamDrainOptions = {}): Promise<void> {
+    // The lock only guards waiting for the window head to settle and removing
+    // it. User callbacks run after the lock is released and the call has left
+    // the window, so re-entrant send()/flush()/waitForCapacity()/cancel()
+    // calls from inside a callback cannot deadlock on the drain in progress.
+    const drained = await withDrainLock(() => takeSettledHead(options));
+    if (!drained) return;
+    await deliverSettled(drained);
   }
 
   async function waitForCapacity(
@@ -397,7 +418,18 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
 
   return {
     async send(params: TParams): Promise<void> {
-      await waitForCapacity();
+      checkAborted();
+      checkError();
+      // The final capacity check and the push into the window below must
+      // share one synchronous segment (async bodies run synchronously until
+      // the first await): an intervening microtask would let unawaited
+      // concurrent sends overshoot maxInFlight and let a same-task cancel()
+      // miss this call.
+      while (inFlightCalls.length >= maxInFlight) {
+        await drainOne();
+        checkAborted();
+        checkError();
+      }
 
       const index = nextIndex++;
       const abortController = new AbortController();
