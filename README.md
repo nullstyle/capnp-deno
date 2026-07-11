@@ -95,7 +95,18 @@ Generated outputs include:
 
 - `*_types.ts` typed codecs + RPC helpers
 - `*_meta.ts` reflection metadata
-- `generated/mod.ts` barrel (unless disabled)
+- `generated/mod.ts` namespaced barrel (unless disabled): one
+  `export * as <name>` per module, so schemas that declare the same type or
+  method names never collide
+
+```ts
+// generated/mod.ts re-exports each module under its own namespace:
+//   export * as schemaPerson from "./schema/person_types.ts";
+//   export * as schemaPersonMeta from "./schema/person_meta.ts";
+import { schemaPerson } from "./generated/mod.ts";
+
+const bytes = schemaPerson.PersonCodec.encode(input);
+```
 
 ### 2) RPC Runtime + Typed Client/Server Stubs
 
