@@ -112,6 +112,15 @@ function metadataAttributes(
  *
  * @param observability - The observability hook, or undefined if none is configured.
  * @param event - The event to emit.
+ * @returns void -- observer errors are swallowed, never rethrown.
+ * @example
+ * ```ts
+ * emitObservabilityEvent(observability, {
+ *   name: "rpc.transport.tcp.error",
+ *   attributes: { "rpc.transport": "tcp" },
+ *   error,
+ * });
+ * ```
  */
 export function emitObservabilityEvent(
   observability: RpcObservability | undefined,

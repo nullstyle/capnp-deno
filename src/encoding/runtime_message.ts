@@ -15,10 +15,29 @@ import {
   WORD_BYTES,
 } from "./runtime_model.ts";
 
+/**
+ * Incremental single-segment Cap'n Proto message builder.
+ *
+ * Allocates words on demand, writes primitive data fields and struct, list,
+ * text, and data pointers, and produces a complete framed message (segment
+ * table plus segment payload) via {@link MessageBuilder.toMessageBytes}.
+ * Word 0 is reserved for the root pointer. Generated struct codecs drive
+ * this class through helpers such as `encodeStructMessage`.
+ *
+ * @example
+ * ```ts
+ * const builder = new MessageBuilder();
+ * const structWord = builder.allocWords(1); // one data word, no pointers
+ * builder.setStructPointer(0, structWord, 1, 0);
+ * builder.writeUint32(structWord * 8, 42);
+ * const bytes = builder.toMessageBytes();
+ * ```
+ */
 export class MessageBuilder {
   private bytes: Uint8Array;
   private words: number;
 
+  /** Create an empty message with word 0 reserved for the root pointer. */
   constructor() {
     this.bytes = new Uint8Array(WORD_BYTES);
     this.words = 1;
@@ -242,9 +261,33 @@ export interface ResolvedPointer {
   word: bigint;
 }
 
+/**
+ * Reader for a complete framed Cap'n Proto message.
+ *
+ * Parses the segment table on construction and exposes bounds-checked
+ * accessors for struct, list, text, and data pointers plus primitive data
+ * fields. Far pointers across segments are resolved transparently. Generated
+ * struct codecs drive this class through helpers such as
+ * `decodeStructMessage`.
+ *
+ * @example
+ * ```ts
+ * const reader = new MessageReader(bytes);
+ * const root = reader.readRootStruct();
+ * const name = reader.readTextPointer(
+ *   root.segmentId,
+ *   reader.pointerWordIndex(root, 0),
+ * );
+ * ```
+ */
 export class MessageReader {
   private readonly segments: Uint8Array[];
 
+  /**
+   * Parse the segment table of a framed message.
+   *
+   * @param bytes - The complete framed message (segment table plus segments).
+   */
   constructor(bytes: Uint8Array) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     if (bytes.byteLength < 8) {

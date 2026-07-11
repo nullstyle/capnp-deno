@@ -86,6 +86,13 @@ export interface CreateRpcSessionWithReconnectOptions<
  * @param reconnect - Reconnection policy and options.
  * @returns The connected transport.
  * @throws {TransportError} If all retry attempts are exhausted.
+ * @example
+ * ```ts
+ * const transport = await connectTransportWithReconnect(
+ *   () => TcpTransport.connect("127.0.0.1", 4000),
+ *   { policy: createExponentialBackoffReconnectPolicy({ maxAttempts: 5 }) },
+ * );
+ * ```
  */
 export async function connectTransportWithReconnect<
   TTransport extends RpcTransport,
@@ -105,6 +112,12 @@ export async function connectTransportWithReconnect<
  * @param options - Transport and reconnection options.
  * @returns The connected TCP transport.
  * @throws {TransportError} If all retry attempts are exhausted.
+ * @example
+ * ```ts
+ * const transport = await connectTcpTransportWithReconnect("127.0.0.1", 4000, {
+ *   reconnect: { policy: createExponentialBackoffReconnectPolicy() },
+ * });
+ * ```
  */
 export async function connectTcpTransportWithReconnect(
   hostname: string,
@@ -125,6 +138,13 @@ export async function connectTcpTransportWithReconnect(
  * @param options - Transport, protocol, and reconnection options.
  * @returns The connected WebSocket transport.
  * @throws {TransportError} If all retry attempts are exhausted.
+ * @example
+ * ```ts
+ * const transport = await connectWebSocketTransportWithReconnect(
+ *   "wss://rpc.example.com/capnp",
+ *   { reconnect: { policy: createExponentialBackoffReconnectPolicy() } },
+ * );
+ * ```
  */
 export async function connectWebSocketTransportWithReconnect(
   url: string | URL,
@@ -149,6 +169,13 @@ export async function connectWebSocketTransportWithReconnect(
  * @param options - Transport and reconnection options.
  * @returns The connected WebTransport transport.
  * @throws {TransportError} If all retry attempts are exhausted.
+ * @example
+ * ```ts
+ * const transport = await connectWebTransportTransportWithReconnect(
+ *   "https://rpc.example.com:4443/capnp",
+ *   { reconnect: { policy: createExponentialBackoffReconnectPolicy() } },
+ * );
+ * ```
  */
 export async function connectWebTransportTransportWithReconnect(
   url: string | URL,
@@ -172,6 +199,19 @@ export async function connectWebTransportTransportWithReconnect(
  * @param options - Session, transport, runtime-module, and reconnection options.
  * @returns The created session and connected transport.
  * @throws {SessionError} If session creation fails after transport connection.
+ * @example
+ * ```ts
+ * const { session, transport } = await createRpcSessionWithReconnect({
+ *   connectTransport: () => TcpTransport.connect("127.0.0.1", 4000),
+ *   reconnect: { policy: createExponentialBackoffReconnectPolicy() },
+ * });
+ * try {
+ *   // drive RPC traffic through the started session
+ * } finally {
+ *   await session.close();
+ *   await transport.close();
+ * }
+ * ```
  */
 export async function createRpcSessionWithReconnect<
   TTransport extends RpcTransport,

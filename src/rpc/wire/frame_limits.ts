@@ -510,7 +510,15 @@ function enforceNestingDepth(
  *
  * @param frame - The complete Cap'n Proto frame bytes to validate.
  * @param limits - The limits to enforce. When omitted or empty, secure defaults are used.
+ * @returns void -- returns normally when the frame is within all limits.
  * @throws {ProtocolError} If any limit is exceeded or the frame is malformed.
+ * @example
+ * ```ts
+ * validateCapnpFrame(frame, {
+ *   maxFrameBytes: 1 << 20,
+ *   maxNestingDepth: 16,
+ * });
+ * ```
  */
 export function validateCapnpFrame(
   frame: Uint8Array,

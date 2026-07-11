@@ -38,6 +38,23 @@ import type {
 import { MessageBuilder, MessageReader } from "./runtime_message.ts";
 import type { StructRef } from "./runtime_message.ts";
 
+/**
+ * Encode a struct value as a complete framed Cap'n Proto message with the
+ * struct as the message root.
+ *
+ * Generated `encode*` codec helpers delegate to this function with their
+ * schema's generated {@link StructDescriptor}.
+ *
+ * @typeParam T - The TypeScript shape described by the descriptor.
+ * @param descriptor - Generated struct descriptor describing layout and fields.
+ * @param value - The struct value to encode.
+ * @returns The framed message bytes (segment table plus segment payload).
+ * @example
+ * ```ts
+ * // PersonStruct is the generated StructDescriptor from person_types.ts.
+ * const bytes = encodeStructMessage(PersonStruct, { name: "Ada", age: 36 });
+ * ```
+ */
 export function encodeStructMessage<T extends object>(
   descriptor: StructDescriptor<T>,
   value: T,
@@ -56,6 +73,24 @@ export function encodeStructMessage<T extends object>(
   return builder.toMessageBytes();
 }
 
+/**
+ * Decode the root struct of a framed Cap'n Proto message.
+ *
+ * Returns the descriptor's default value when the root pointer is null.
+ * Generated `decode*` codec helpers delegate to this function with their
+ * schema's generated {@link StructDescriptor}.
+ *
+ * @typeParam T - The TypeScript shape described by the descriptor.
+ * @param descriptor - Generated struct descriptor describing layout and fields.
+ * @param bytes - The complete framed message to decode.
+ * @returns The decoded struct value.
+ * @example
+ * ```ts
+ * // PersonStruct is the generated StructDescriptor from person_types.ts.
+ * const person = decodeStructMessage(PersonStruct, bytes);
+ * console.log(person.name);
+ * ```
+ */
 export function decodeStructMessage<T extends object>(
   descriptor: StructDescriptor<T>,
   bytes: Uint8Array,

@@ -41,6 +41,10 @@
  * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
  *   positive integer. Plain `Error` is used because this validates
  *   programmer-supplied arguments, not runtime wire data.
+ * @example
+ * ```ts
+ * assertPositiveInteger(options.maxConnections ?? 4, "maxConnections");
+ * ```
  */
 export function assertPositiveInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 1) {
@@ -56,6 +60,10 @@ export function assertPositiveInteger(value: number, name: string): void {
  * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
  *   non-negative integer. Plain `Error` is used because this validates
  *   programmer-supplied arguments, not runtime wire data.
+ * @example
+ * ```ts
+ * assertNonNegativeInteger(options.initialDelayMs ?? 100, "initialDelayMs");
+ * ```
  */
 export function assertNonNegativeInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value < 0) {
@@ -73,6 +81,10 @@ export function assertNonNegativeInteger(value: number, name: string): void {
  * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is negative
  *   or non-finite. Plain `Error` is used because this validates
  *   programmer-supplied arguments, not runtime wire data.
+ * @example
+ * ```ts
+ * assertNonNegativeFinite(options.jitterRatio ?? 0.2, "jitterRatio");
+ * ```
  */
 export function assertNonNegativeFinite(value: number, name: string): void {
   if (!Number.isFinite(value) || value < 0) {
@@ -90,6 +102,10 @@ export function assertNonNegativeFinite(value: number, name: string): void {
  * @throws {Error} A plain `Error` (not `CapnpError`) if `value` is not a
  *   positive finite number. Plain `Error` is used because this validates
  *   programmer-supplied arguments, not runtime wire data.
+ * @example
+ * ```ts
+ * assertPositiveFinite(options.factor ?? 2, "factor");
+ * ```
  */
 export function assertPositiveFinite(value: number, name: string): void {
   if (!Number.isFinite(value) || value <= 0) {

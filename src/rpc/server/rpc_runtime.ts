@@ -198,6 +198,28 @@ export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
  *
  * If bootstrap fails, this helper best-effort closes the transport before
  * rethrowing the original error.
+ *
+ * @typeParam TClient - The typed client produced by the bootstrap helper.
+ * @typeParam TTransport - The transport type produced by `connect`.
+ * @param connect - Factory that establishes and returns the transport.
+ * @param bootstrapClient - Generated `bootstrap*Client(...)` helper for the
+ *   target interface.
+ * @param options - Call options forwarded to the bootstrap helper.
+ * @returns The connected transport paired with the typed bootstrap client.
+ * @example
+ * ```ts
+ * // connectAndBootstrap, RpcWireClient, and TcpTransport come from
+ * // `@nullstyle/capnp`; bootstrapPingerClient is a generated helper.
+ * const { transport, client } = await connectAndBootstrap(
+ *   async () => new RpcWireClient(await TcpTransport.connect("127.0.0.1", 4000)),
+ *   bootstrapPingerClient,
+ * );
+ * try {
+ *   await client.ping({});
+ * } finally {
+ *   await transport.close();
+ * }
+ * ```
  */
 export async function connectAndBootstrap<
   TClient,

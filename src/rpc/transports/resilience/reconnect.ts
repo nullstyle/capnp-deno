@@ -242,6 +242,13 @@ export function createExponentialBackoffReconnectPolicy(
  * @param options - Reconnection options including the policy, abort signal, and callbacks.
  * @returns The result of a successful `connect()` call.
  * @throws {TransportError} If all retry attempts are exhausted or the operation is aborted.
+ * @example
+ * ```ts
+ * const transport = await connectWithReconnect(
+ *   () => TcpTransport.connect("127.0.0.1", 4000),
+ *   { policy: createExponentialBackoffReconnectPolicy({ maxAttempts: 5 }) },
+ * );
+ * ```
  */
 export async function connectWithReconnect<T>(
   connect: () => Promise<T>,

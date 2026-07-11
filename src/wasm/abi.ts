@@ -358,6 +358,12 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
  *   Cap'n Proto WASM module.
  * @returns The validated, typed export bindings.
  * @throws {WasmAbiError} If any required export is missing or has the wrong type.
+ * @example
+ * ```ts
+ * const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+ * const exports = getCapnpWasmExports(instance);
+ * const abi = new WasmAbi(exports, { expectedVersion: 1 });
+ * ```
  */
 export function getCapnpWasmExports(
   instance: WebAssembly.Instance,
