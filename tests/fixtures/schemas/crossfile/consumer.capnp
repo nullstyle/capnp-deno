@@ -8,6 +8,12 @@
 #   - group containing an imported field (Envelope.extra.fallback)
 #   - method params/results using imported structs (Feed.publish)
 #   - `-> stream` method whose chunk struct is imported (Feed.stream)
+#
+# And the P2 cross-file interface positions:
+#   - single-field method param typed by an imported interface (Hub.attach)
+#   - single-field method result typed by an imported interface (Hub.acquire)
+#   - struct field typed by an imported interface (Registration.watcher);
+#     struct-field capabilities stay `CapabilityPointer | null` until P4
 @0xe0c8854185d08f6a;
 
 using Base = import "base.capnp";
@@ -27,7 +33,17 @@ struct Envelope {
   }
 }
 
+struct Registration {
+  label @0 :Text;
+  watcher @1 :Base.Watcher;
+}
+
 interface Feed {
   publish @0 (envelope :Envelope, origin :Base.Point) -> (accepted :Bool, echo :Base.Meta);
   stream @1 (chunk :Base.Chunk) -> stream;
+}
+
+interface Hub {
+  attach @0 (watcher :Base.Watcher) -> ();
+  acquire @1 () -> (watcher :Base.Watcher);
 }

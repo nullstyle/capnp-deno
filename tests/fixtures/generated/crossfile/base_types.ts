@@ -574,7 +574,13 @@ export interface Watcher {
   ): Promise<PingResults["chunk"]>;
 }
 
-function createWatcherServiceClient(
+/**
+ * Adapt a low-level `WatcherClient` into the high-level `Watcher` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Watcher>` values for cross-file interface references.
+ */
+export function createWatcherServiceClient(
   client: WatcherClient,
   transport: RpcClientTransport,
 ): Watcher {

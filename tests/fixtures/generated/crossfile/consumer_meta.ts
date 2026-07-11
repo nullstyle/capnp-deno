@@ -69,6 +69,46 @@ export const schemaNodes = [
       "tests/fixtures/schemas/crossfile/consumer.capnp:Feed.stream$Params",
     scopeId: 0x0n,
   },
+  {
+    id: 0xfd58d0b2a70de039n,
+    kind: "interface",
+    displayName: "tests/fixtures/schemas/crossfile/consumer.capnp:Hub",
+    scopeId: 0xe0c8854185d08f6an,
+  },
+  {
+    id: 0xc531ab95c2ed271cn,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.acquire$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xa963743b22e48bffn,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.acquire$Results",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xf6cb7a43c4a4c927n,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.attach$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xc3ec5f3b53a13cfan,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.attach$Results",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xd4a3bf57ce712737n,
+    kind: "struct",
+    displayName: "tests/fixtures/schemas/crossfile/consumer.capnp:Registration",
+    scopeId: 0xe0c8854185d08f6an,
+  },
 ] as const;
 
 export const interfaceMethods = [
@@ -87,5 +127,21 @@ export const interfaceMethods = [
     codeOrder: 1,
     paramStructTypeId: 0xa9b8152bc95b48f2n,
     resultStructTypeId: 0x995f9a3377c0b16en,
+  },
+  {
+    interfaceId: 0xfd58d0b2a70de039n,
+    interfaceName: "Hub",
+    methodName: "attach",
+    codeOrder: 0,
+    paramStructTypeId: 0xf6cb7a43c4a4c927n,
+    resultStructTypeId: 0xc3ec5f3b53a13cfan,
+  },
+  {
+    interfaceId: 0xfd58d0b2a70de039n,
+    interfaceName: "Hub",
+    methodName: "acquire",
+    codeOrder: 1,
+    paramStructTypeId: 0xc531ab95c2ed271cn,
+    resultStructTypeId: 0xa963743b22e48bffn,
   },
 ] as const;

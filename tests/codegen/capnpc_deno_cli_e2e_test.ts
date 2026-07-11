@@ -224,15 +224,16 @@ Deno.test("capnpc-deno CLI e2e emits layout-correct cross-file imports that type
     );
     assert(
       consumer.includes(
-        'import type { Chunk, Level, Meta, Point } from "./base_types.ts";',
+        'import type { Chunk, Level, Meta, Point, Watcher } from "./base_types.ts";',
       ),
       "expected consumer module to import cross-file types from its sibling",
     );
     assert(
       consumer.includes(
-        'import { ChunkStruct, MetaStruct, PointStruct } from "./base_types.ts";',
+        "import { ChunkStruct, createWatcherClient, createWatcherServiceClient, " +
+          'MetaStruct, PointStruct, Watcher as Watcher$Base } from "./base_types.ts";',
       ),
-      "expected consumer module to import cross-file struct descriptors",
+      "expected consumer module to import cross-file struct descriptors, the imported interface token, and its client factories",
     );
     const deep = await Deno.readTextFile(
       `${tempRoot}/generated/nested/deep_types.ts`,

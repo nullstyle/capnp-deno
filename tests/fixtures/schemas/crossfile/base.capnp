@@ -8,8 +8,8 @@
 #   - Meta:    a struct used as a plain imported struct field and a method
 #              result field
 #   - Chunk:   a struct used as the param of a `-> stream` method
-#   - Watcher: an interface (declared now for fixture stability; consumed by
-#              the cross-file interface phase)
+#   - Watcher: an interface used across the file boundary as a single-field
+#              method param/result and as a struct field in consumer.capnp
 @0xc74fdeea2f398053;
 
 enum Level {

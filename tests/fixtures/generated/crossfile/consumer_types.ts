@@ -72,8 +72,15 @@ import {
   TYPE_UINT8,
   TYPE_VOID,
 } from "@nullstyle/capnp/encoding";
-import type { Chunk, Level, Meta, Point } from "./base_types.ts";
-import { ChunkStruct, MetaStruct, PointStruct } from "./base_types.ts";
+import type { Chunk, Level, Meta, Point, Watcher } from "./base_types.ts";
+import {
+  ChunkStruct,
+  createWatcherClient,
+  createWatcherServiceClient,
+  MetaStruct,
+  PointStruct,
+  Watcher as Watcher$Base,
+} from "./base_types.ts";
 
 const RPC_STUB_CAPABILITY = Symbol.for("@nullstyle/capnp/rpcStubCapability");
 
@@ -276,6 +283,25 @@ export interface PublishResults {
 
 export interface StreamParams {
   chunk: Chunk;
+}
+
+export interface AcquireParams {
+}
+
+export interface AcquireResults {
+  watcher: CapabilityPointer | null;
+}
+
+export interface AttachParams {
+  watcher: CapabilityPointer | null;
+}
+
+export interface AttachResults {
+}
+
+export interface Registration {
+  label: string;
+  watcher: CapabilityPointer | null;
 }
 
 export const EnvelopeStruct: StructDescriptor<Envelope> = {
@@ -490,6 +516,115 @@ export const StreamParamsCodec: StructCodec<StreamParams> = {
     encodeStructMessage(StreamParamsStruct, value),
   decode: (bytes: Uint8Array): StreamParams =>
     decodeStructMessage(StreamParamsStruct, bytes),
+};
+
+export const AcquireParamsStruct: StructDescriptor<AcquireParams> = {
+  kind: "struct",
+  name: "AcquireParams",
+  dataWordCount: 0,
+  pointerCount: 0,
+  createDefault: () => ({}),
+  fields: [],
+};
+export const AcquireParamsCodec: StructCodec<AcquireParams> = {
+  encode: (value: AcquireParams): Uint8Array =>
+    encodeStructMessage(AcquireParamsStruct, value),
+  decode: (bytes: Uint8Array): AcquireParams =>
+    decodeStructMessage(AcquireParamsStruct, bytes),
+};
+
+export const AcquireResultsStruct: StructDescriptor<AcquireResults> = {
+  kind: "struct",
+  name: "AcquireResults",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    watcher: null,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "watcher",
+      offset: 0,
+      type: TYPE_INTERFACE,
+    },
+  ],
+};
+export const AcquireResultsCodec: StructCodec<AcquireResults> = {
+  encode: (value: AcquireResults): Uint8Array =>
+    encodeStructMessage(AcquireResultsStruct, value),
+  decode: (bytes: Uint8Array): AcquireResults =>
+    decodeStructMessage(AcquireResultsStruct, bytes),
+};
+
+export const AttachParamsStruct: StructDescriptor<AttachParams> = {
+  kind: "struct",
+  name: "AttachParams",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    watcher: null,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "watcher",
+      offset: 0,
+      type: TYPE_INTERFACE,
+    },
+  ],
+};
+export const AttachParamsCodec: StructCodec<AttachParams> = {
+  encode: (value: AttachParams): Uint8Array =>
+    encodeStructMessage(AttachParamsStruct, value),
+  decode: (bytes: Uint8Array): AttachParams =>
+    decodeStructMessage(AttachParamsStruct, bytes),
+};
+
+export const AttachResultsStruct: StructDescriptor<AttachResults> = {
+  kind: "struct",
+  name: "AttachResults",
+  dataWordCount: 0,
+  pointerCount: 0,
+  createDefault: () => ({}),
+  fields: [],
+};
+export const AttachResultsCodec: StructCodec<AttachResults> = {
+  encode: (value: AttachResults): Uint8Array =>
+    encodeStructMessage(AttachResultsStruct, value),
+  decode: (bytes: Uint8Array): AttachResults =>
+    decodeStructMessage(AttachResultsStruct, bytes),
+};
+
+export const RegistrationStruct: StructDescriptor<Registration> = {
+  kind: "struct",
+  name: "Registration",
+  dataWordCount: 0,
+  pointerCount: 2,
+  createDefault: () => ({
+    label: "",
+    watcher: null,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "label",
+      offset: 0,
+      type: TYPE_TEXT,
+    },
+    {
+      kind: "slot",
+      name: "watcher",
+      offset: 1,
+      type: TYPE_INTERFACE,
+    },
+  ],
+};
+export const RegistrationCodec: StructCodec<Registration> = {
+  encode: (value: Registration): Uint8Array =>
+    encodeStructMessage(RegistrationStruct, value),
+  decode: (bytes: Uint8Array): Registration =>
+    decodeStructMessage(RegistrationStruct, bytes),
 };
 
 export const FeedInterfaceId = 0xf05c521c573f6138n;
@@ -739,6 +874,271 @@ export function registerFeedServer(
   return registry.exportCapability(createFeedServer(server), options);
 }
 
+export const HubInterfaceId = 0xfd58d0b2a70de039n;
+
+export const HubMethodOrdinals = {
+  attach: 0,
+  acquire: 1,
+} as const;
+
+export interface HubClient {
+  attach(
+    params: AttachParams,
+    options?: RpcCallOptions,
+  ): Promise<AttachResults>;
+  acquire(
+    params: AcquireParams,
+    options?: RpcCallOptions,
+  ): Promise<AcquireResults>;
+}
+
+export interface HubServer {
+  attach(
+    params: AttachParams,
+    ctx: RpcCallContext,
+  ): Promise<AttachResults> | AttachResults;
+  acquire(
+    params: AcquireParams,
+    ctx: RpcCallContext,
+  ): Promise<AcquireResults> | AcquireResults;
+}
+
+export function createHubClient(
+  transport: RpcClientTransport,
+  capability: CapabilityPointer,
+): HubClient {
+  return {
+    attach: async (
+      params: AttachParams,
+      options?: RpcCallOptions,
+    ): Promise<AttachResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          AttachParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xfd58d0b2a70de039n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            HubMethodOrdinals["attach"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              AttachResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as AttachResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
+          capability,
+          HubMethodOrdinals["attach"],
+          encoded.content,
+          callOptions,
+        );
+        try {
+          return decodeStructMessageWithCaps(
+            AttachResultsStruct,
+            response,
+            [],
+          ) as AttachResults;
+        } finally {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Hub",
+          interfaceId: 0xfd58d0b2a70de039n,
+          methodName: "attach",
+          methodId: 0,
+        }, "Hub.attach failed");
+      }
+    },
+    acquire: async (
+      params: AcquireParams,
+      options?: RpcCallOptions,
+    ): Promise<AcquireResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          AcquireParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xfd58d0b2a70de039n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            HubMethodOrdinals["acquire"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              AcquireResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as AcquireResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
+          capability,
+          HubMethodOrdinals["acquire"],
+          encoded.content,
+          callOptions,
+        );
+        try {
+          return decodeStructMessageWithCaps(
+            AcquireResultsStruct,
+            response,
+            [],
+          ) as AcquireResults;
+        } finally {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Hub",
+          interfaceId: 0xfd58d0b2a70de039n,
+          methodName: "acquire",
+          methodId: 1,
+        }, "Hub.acquire failed");
+      }
+    },
+  };
+}
+
+export async function bootstrapHubClient(
+  transport: RpcBootstrapClientTransport,
+  options?: RpcCallOptions,
+): Promise<HubClient> {
+  try {
+    const capability = await transport.bootstrap(options);
+    return createHubClient(transport, capability);
+  } catch (error) {
+    throw annotateCapnpError(error, {
+      phase: "bootstrap",
+      interfaceName: "Hub",
+      interfaceId: HubInterfaceId,
+    }, "bootstrap Hub failed");
+  }
+}
+
+export function createHubServer(server: HubServer): RpcServerDispatch {
+  return {
+    interfaceId: HubInterfaceId,
+    dispatch: async (
+      methodId: number,
+      params: Uint8Array,
+      ctx: RpcCallContext,
+    ): Promise<RpcServerDispatchResult> => {
+      switch (methodId) {
+        case 0: {
+          const decoded = decodeStructMessageWithCaps(
+            AttachParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as AttachParams;
+          const result = await server["attach"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(
+            AttachResultsStruct,
+            result,
+          );
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 1: {
+          const decoded = decodeStructMessageWithCaps(
+            AcquireParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as AcquireParams;
+          const result = await server["acquire"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(
+            AcquireResultsStruct,
+            result,
+          );
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        default:
+          throw new ProtocolError("unknown method ordinal: " + methodId, {
+            metadata: {
+              phase: "dispatch",
+              interfaceId: ctx.interfaceId,
+              methodId,
+            },
+          });
+      }
+    },
+  };
+}
+
+export function registerHubServer(
+  registry: RpcServerRegistry,
+  server: HubServer,
+  options: RpcExportCapabilityOptions = {},
+): CapabilityPointer {
+  return registry.exportCapability(createHubServer(server), options);
+}
+
 /**
  * High-level generated RPC client for `Feed`.
  */
@@ -792,7 +1192,13 @@ export interface FeedService {
   ): Promise<void> | void;
 }
 
-function createFeedServiceClient(
+/**
+ * Adapt a low-level `FeedClient` into the high-level `Feed` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Feed>` values for cross-file interface references.
+ */
+export function createFeedServiceClient(
   client: FeedClient,
   transport: RpcClientTransport,
 ): Feed {
@@ -931,3 +1337,175 @@ export function createFeedStreamStreamSender(
     streamOptions,
   );
 }
+
+/**
+ * High-level generated RPC client for `Hub`.
+ */
+export interface Hub {
+  /**
+   * Call `Hub.attach`.
+   *
+   * @param value - Local `Watcher` implementation or remote `RpcStub<Watcher>` callback capability.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
+  attach(
+    value: Watcher | RpcStub<Watcher>,
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  /**
+   * Call `Hub.acquire`.
+   *
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
+  acquire(options?: RpcCallOptions): Promise<RpcStub<Watcher>>;
+}
+
+/**
+ * Adapt a low-level `HubClient` into the high-level `Hub` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Hub>` values for cross-file interface references.
+ */
+export function createHubServiceClient(
+  client: HubClient,
+  transport: RpcClientTransport,
+): Hub {
+  return {
+    attach: async (
+      value: Watcher | RpcStub<Watcher>,
+      options?: RpcCallOptions,
+    ) => {
+      try {
+        const result = await client.attach({
+          watcher: exportCapabilityFromTransport(
+            transport,
+            Watcher$Base,
+            value,
+          ),
+        }, options);
+        return;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "attach",
+          methodId: 0,
+        }, "Hub.attach failed");
+      }
+    },
+    acquire: async (options?: RpcCallOptions) => {
+      try {
+        const result = await client.acquire({} as AcquireParams, options);
+        return capabilityToServiceStub(
+          result.watcher,
+          transport,
+          (nextTransport, nextCapability) =>
+            createWatcherServiceClient(
+              createWatcherClient(nextTransport, nextCapability),
+              nextTransport,
+            ),
+        );
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "acquire",
+          methodId: 1,
+        }, "Hub.acquire failed");
+      }
+    },
+  };
+}
+
+function createHubServiceServer(
+  server: Hub,
+): HubServer {
+  return {
+    attach: async (params: AttachParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.attach(
+          capabilityToServiceStub(
+            params.watcher,
+            requireOutboundClient(_ctx),
+            (nextTransport, nextCapability) =>
+              createWatcherServiceClient(
+                createWatcherClient(nextTransport, nextCapability),
+                nextTransport,
+              ),
+          ),
+        );
+        return {} as AttachResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "attach",
+          methodId: 0,
+          questionId: _ctx.questionId,
+        }, "Hub.attach handler failed");
+      }
+    },
+    acquire: async (params: AcquireParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.acquire();
+        return {
+          watcher: exportCapabilityFromContext(_ctx, Watcher$Base, result),
+        };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "acquire",
+          methodId: 1,
+          questionId: _ctx.questionId,
+        }, "Hub.acquire handler failed");
+      }
+    },
+  };
+}
+
+export const HubDebugMethods = [
+  {
+    interfaceId: HubInterfaceId,
+    interfaceName: "Hub",
+    serviceName: "Hub",
+    methodId: HubMethodOrdinals["attach"],
+    methodName: "attach",
+  },
+  {
+    interfaceId: HubInterfaceId,
+    interfaceName: "Hub",
+    serviceName: "Hub",
+    methodId: HubMethodOrdinals["acquire"],
+    methodName: "acquire",
+  },
+] as const satisfies readonly RpcDebugSchemaMethod[];
+
+export const Hub: RpcServiceToken<Hub> = createRpcServiceToken({
+  interfaceId: HubInterfaceId,
+  interfaceName: "Hub",
+  methods: HubDebugMethods,
+  bootstrapClient: async (
+    transport: RpcBootstrapClientTransport,
+    options?: RpcCallOptions,
+  ) =>
+    createHubServiceClient(
+      await bootstrapHubClient(transport, options),
+      transport,
+    ),
+  registerServer: (
+    registry: RpcServerRegistry,
+    server: Hub,
+    options?: RpcExportCapabilityOptions,
+  ) => registerHubServer(registry, createHubServiceServer(server), options),
+});
