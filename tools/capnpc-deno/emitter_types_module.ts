@@ -9,6 +9,7 @@ import type { FieldModel, NodeModel } from "./model.ts";
 import {
   collectLocalInterfaces,
   collectLocalTypes,
+  formatBigint,
   quoteIfNeeded,
   simpleNodeName,
   toCamelCase,
@@ -572,7 +573,11 @@ function emitClientAdapter(
     out.push('          phase: "client_call",');
     out.push(`          serviceName: ${JSON.stringify(typeName)},`);
     out.push(`          interfaceName: ${JSON.stringify(typeName)},`);
-    out.push(`          interfaceId: ${typeName}InterfaceId,`);
+    out.push(
+      `          interfaceId: ${
+        methodWireInterfaceIdExpression(resolved, method)
+      },`,
+    );
     out.push(`          methodName: ${JSON.stringify(method.methodName)},`);
     out.push(`          methodId: ${method.method.codeOrder},`);
     out.push(
@@ -657,7 +662,11 @@ function emitServerAdapter(
     out.push('          phase: "handler",');
     out.push(`          serviceName: ${JSON.stringify(typeName)},`);
     out.push(`          interfaceName: ${JSON.stringify(typeName)},`);
-    out.push(`          interfaceId: ${typeName}InterfaceId,`);
+    out.push(
+      `          interfaceId: ${
+        methodWireInterfaceIdExpression(resolved, method)
+      },`,
+    );
     out.push(`          methodName: ${JSON.stringify(method.methodName)},`);
     out.push(`          methodId: ${method.method.codeOrder},`);
     out.push("          questionId: _ctx.questionId,");
@@ -672,6 +681,20 @@ function emitServerAdapter(
   out.push("  };");
   out.push("}");
   out.push("");
+}
+
+function methodWireInterfaceIdExpression(
+  resolved: RpcResolvedInterfaceInfo,
+  method: RpcResolvedMethodInfo,
+): string {
+  // Calls go out on the wire tagged with the declaring interface's id
+  // (`sourceInterfaceId`), so debug/error metadata must match it. The
+  // declaring interface of an inherited method may live in another schema
+  // module, so emit a bigint literal for ancestors and keep the symbolic
+  // constant for the type's own methods.
+  return method.sourceInterfaceId === resolved.info.id
+    ? `${resolved.info.typeName}InterfaceId`
+    : formatBigint(method.sourceInterfaceId);
 }
 
 function emitServiceToken(
@@ -689,7 +712,9 @@ function emitServiceToken(
   );
   for (const method of resolved.methods) {
     out.push("  {");
-    out.push(`    interfaceId: ${typeName}InterfaceId,`);
+    out.push(
+      `    interfaceId: ${methodWireInterfaceIdExpression(resolved, method)},`,
+    );
     out.push(`    interfaceName: ${JSON.stringify(typeName)},`);
     out.push(`    serviceName: ${JSON.stringify(typeName)},`);
     out.push(

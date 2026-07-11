@@ -7,6 +7,7 @@ import {
   finalizeGeneratedFiles,
   helpText,
   loadCliFileConfig,
+  mergeBarrelWithExistingModule,
   mergeCliOptionsWithConfig,
   parseCliArgs,
 } from "./cli.ts";
@@ -187,6 +188,14 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Per-schema runs (--schema/--request-bin/stdin) only see a slice of the
+  // project, so merge the barrel with previously generated entries instead of
+  // silently dropping them. --src directory mode regenerates the whole tree
+  // and keeps overwrite semantics.
+  const filesToWrite = options.srcDirs.length === 0
+    ? await mergeBarrelWithExistingModule(outputFiles, options.outDir)
+    : outputFiles;
+
   try {
     await Deno.mkdir(options.outDir, { recursive: true });
   } catch (error) {
@@ -197,7 +206,7 @@ async function main(): Promise<void> {
       { cause: error },
     );
   }
-  for (const file of outputFiles) {
+  for (const file of filesToWrite) {
     const target = joinPath(options.outDir, file.path);
     try {
       await Deno.mkdir(dirnamePath(target), { recursive: true });

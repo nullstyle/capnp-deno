@@ -30,6 +30,14 @@ function fileByPath(
   return file;
 }
 
+function sliceBetween(source: string, start: string, end: string): string {
+  const startIndex = source.indexOf(start);
+  assert(startIndex >= 0, `expected source marker: ${start}`);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  assert(endIndex >= 0, `expected source marker: ${end}`);
+  return source.slice(startIndex, endIndex);
+}
+
 function splitSegments(message: Uint8Array): Uint8Array[] {
   const view = new DataView(
     message.buffer,
@@ -840,6 +848,83 @@ Deno.test("capnpc-deno emitter supports interface inheritance for rpc stubs", ()
   assert(
     types.contents.includes("base(params: ParentBaseParams"),
     "expected child client/server surfaces to include inherited method",
+  );
+});
+
+Deno.test("capnpc-deno emitter uses declaring interface ids for inherited debug methods and adapter metadata", () => {
+  const generated = generateTypescriptFiles(makeInheritedRpcInterfaceRequest());
+  const source = fileByPath(generated, "inheritance_types.ts").contents;
+
+  const clientAdapter = sliceBetween(
+    source,
+    "function createChildServiceClient(",
+    "function createChildServiceServer(",
+  );
+  assert(
+    clientAdapter.includes("interfaceId: ChildInterfaceId,"),
+    "expected client adapter error metadata to keep the child id for own methods",
+  );
+  assert(
+    clientAdapter.includes("interfaceId: 0x121n,"),
+    "expected client adapter error metadata to use the parent id for inherited methods",
+  );
+
+  const serverAdapter = sliceBetween(
+    source,
+    "function createChildServiceServer(",
+    "export const ChildDebugMethods = [",
+  );
+  assert(
+    serverAdapter.includes("interfaceId: ChildInterfaceId,"),
+    "expected server adapter error metadata to keep the child id for own methods",
+  );
+  assert(
+    serverAdapter.includes("interfaceId: 0x121n,"),
+    "expected server adapter error metadata to use the parent id for inherited methods",
+  );
+
+  const debugMethods = sliceBetween(
+    source,
+    "export const ChildDebugMethods = [",
+    "] as const satisfies readonly RpcDebugSchemaMethod[];",
+  );
+  const parsedEntries = debugMethods
+    .split("},")
+    .filter((entry) => entry.includes("interfaceId:"))
+    .map((entry) => {
+      const interfaceId = entry.match(/interfaceId: ([^,\n]+),/)?.[1];
+      const ordinalKey = entry.match(
+        /methodId: ChildMethodOrdinals\["([^"]+)"\],/,
+      )?.[1];
+      const methodName = entry.match(/methodName: "([^"]+)",/)?.[1];
+      assert(
+        interfaceId !== undefined && ordinalKey !== undefined &&
+          methodName !== undefined,
+        `expected parseable debug method entry, got: ${entry}`,
+      );
+      return { interfaceId, ordinalKey, methodName };
+    });
+  assertEquals(parsedEntries.length, 2);
+
+  const byMethodName = new Map(
+    parsedEntries.map((entry) => [entry.methodName, entry] as const),
+  );
+  assertEquals(byMethodName.get("child")?.interfaceId, "ChildInterfaceId");
+  assertEquals(byMethodName.get("base")?.interfaceId, "0x121n");
+
+  // Both methods have ordinal 0 in the model, so the tracer keys
+  // (interfaceId, methodId) collide unless the declaring ids differ.
+  const ordinalByKey: Record<string, number> = { child: 0, base: 0 };
+  const tracerKeys = parsedEntries.map((entry) => {
+    const resolvedId = entry.interfaceId === "ChildInterfaceId"
+      ? 0x122n
+      : BigInt(entry.interfaceId.slice(0, -1));
+    return `${resolvedId}:${ordinalByKey[entry.ordinalKey]}`;
+  });
+  assertEquals(
+    new Set(tracerKeys).size,
+    tracerKeys.length,
+    "expected no duplicate (interfaceId, methodId) debug tracer keys",
   );
 });
 
