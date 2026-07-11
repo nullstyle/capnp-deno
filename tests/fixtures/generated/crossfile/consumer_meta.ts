@@ -104,10 +104,31 @@ export const schemaNodes = [
     scopeId: 0x0n,
   },
   {
+    id: 0x83e02496a5a0877cn,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.register$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xe9956c3f82b293den,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Hub.register$Results",
+    scopeId: 0x0n,
+  },
+  {
     id: 0xd4a3bf57ce712737n,
     kind: "struct",
     displayName: "tests/fixtures/schemas/crossfile/consumer.capnp:Registration",
     scopeId: 0xe0c8854185d08f6an,
+  },
+  {
+    id: 0x984954e1c3e0ea3en,
+    kind: "struct",
+    displayName:
+      "tests/fixtures/schemas/crossfile/consumer.capnp:Registration.route",
+    scopeId: 0xd4a3bf57ce712737n,
   },
 ] as const;
 
@@ -143,5 +164,13 @@ export const interfaceMethods = [
     codeOrder: 1,
     paramStructTypeId: 0xc531ab95c2ed271cn,
     resultStructTypeId: 0xa963743b22e48bffn,
+  },
+  {
+    interfaceId: 0xfd58d0b2a70de039n,
+    interfaceName: "Hub",
+    methodName: "register",
+    codeOrder: 2,
+    paramStructTypeId: 0x83e02496a5a0877cn,
+    resultStructTypeId: 0xe9956c3f82b293den,
   },
 ] as const;

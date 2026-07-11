@@ -298,7 +298,12 @@ export function buildModuleIndex(
     const interfaceInfos = collectLocalInterfaces(node, nodeById);
     byFileId.set(node.id, { enumInfos, structInfos, interfaceInfos });
     for (const info of enumInfos) {
-      byId.set(info.id, { kind: "enum", fileId: node.id, schemaFilename, info });
+      byId.set(info.id, {
+        kind: "enum",
+        fileId: node.id,
+        schemaFilename,
+        info,
+      });
     }
     for (const info of structInfos) {
       byId.set(info.id, {
@@ -553,6 +558,17 @@ function schemaModuleStem(filename: string): string {
 }
 
 /**
+ * Local function names for one struct's capability walkers: `dehydrate`
+ * converts live `RpcStub` proxies in capability fields to raw
+ * `CapabilityPointer`s before encoding, `hydrate` wraps decoded capability
+ * pointers into typed stubs after decoding.
+ */
+export interface CapabilityWalkerNames {
+  readonly hydrate: string;
+  readonly dehydrate: string;
+}
+
+/**
  * Shared context threaded through the type-position and descriptor emission
  * helpers: the request-wide node table, the current module's local tables,
  * and the per-module cross-file import collector.
@@ -562,6 +578,29 @@ export interface TypeEmitContext {
   enumById: Map<bigint, EnumInfo>;
   structById: Map<bigint, StructInfo>;
   imports: ModuleImportCollector;
+  /** Local interface id -> high-level service type name (typed stub fields). */
+  interfaceNameById?: ReadonlyMap<bigint, string>;
+  /** Cap-bearing struct id -> capability walker names (codec dehydration). */
+  capabilityWalkers?: ReadonlyMap<bigint, CapabilityWalkerNames>;
+}
+
+/**
+ * Resolve an interface id to the TypeScript name usable in a typed
+ * `RpcStub<T>` position: the local high-level service interface name, or an
+ * `import type` alias for interfaces owned by another schema file. Returns
+ * `null` for truly-unknown ids (callers keep the `CapabilityPointer` typing).
+ */
+export function capabilityStubTypeName(
+  typeId: bigint,
+  ctx: TypeEmitContext,
+): string | null {
+  const local = ctx.interfaceNameById?.get(typeId);
+  if (local) return local;
+  const entry = ctx.imports.crossFileEntry(typeId);
+  if (entry?.kind === "interface") {
+    return ctx.imports.importTypeName(entry);
+  }
+  return null;
 }
 
 export function typeDescriptorExpression(
@@ -722,13 +761,18 @@ export function typeToTs(
       return "string";
     case "data":
       return "Uint8Array";
-    case "list":
-      return `${typeToTs(type.elementType, ctx)}[]`;
+    case "list": {
+      const element = typeToTs(type.elementType, ctx);
+      return element.includes(" | ") ? `(${element})[]` : `${element}[]`;
+    }
     case "enum":
     case "struct":
       return resolveTypeName(type.typeId, ctx);
-    case "interface":
+    case "interface": {
+      const stubType = capabilityStubTypeName(type.typeId, ctx);
+      if (stubType) return `RpcStub<${stubType}> | null`;
       return "CapabilityPointer | null";
+    }
     case "anyPointer":
       return "AnyPointerValue";
   }

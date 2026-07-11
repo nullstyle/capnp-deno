@@ -12,8 +12,12 @@
 # And the P2 cross-file interface positions:
 #   - single-field method param typed by an imported interface (Hub.attach)
 #   - single-field method result typed by an imported interface (Hub.acquire)
-#   - struct field typed by an imported interface (Registration.watcher);
-#     struct-field capabilities stay `CapabilityPointer | null` until P4
+#
+# And the P4 struct-field capability positions (typed `RpcStub<T> | null`):
+#   - struct field typed by an imported interface (Registration.watcher)
+#   - List(imported interface) struct field (Registration.backups)
+#   - group member typed by an imported interface (Registration.route.primary)
+#   - a struct-carried capability crossing the wire (Hub.register)
 @0xe0c8854185d08f6a;
 
 using Base = import "base.capnp";
@@ -36,6 +40,10 @@ struct Envelope {
 struct Registration {
   label @0 :Text;
   watcher @1 :Base.Watcher;
+  backups @2 :List(Base.Watcher);
+  route :group {
+    primary @3 :Base.Watcher;
+  }
 }
 
 interface Feed {
@@ -46,4 +54,5 @@ interface Feed {
 interface Hub {
   attach @0 (watcher :Base.Watcher) -> ();
   acquire @1 () -> (watcher :Base.Watcher);
+  register @2 () -> (registration :Registration);
 }

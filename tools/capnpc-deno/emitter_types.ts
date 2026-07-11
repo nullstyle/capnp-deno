@@ -157,9 +157,13 @@ export function emitStructDescriptor(
   out.push("  ],");
   out.push("};");
   if (structInfo.exported) {
+    // Cap-bearing structs dehydrate typed RpcStub fields to raw capability
+    // pointers before the encoding runtime serializes them.
+    const walkers = ctx.capabilityWalkers?.get(structInfo.id);
+    const encodeValue = walkers ? `${walkers.dehydrate}(value)` : "value";
     out.push(`export const ${structInfo.codecConst}: StructCodec<${structInfo.typeName}> = {`);
     out.push(`  encode: (value: ${structInfo.typeName}): Uint8Array =>`);
-    out.push(`    encodeStructMessage(${structInfo.descriptorConst}, value),`);
+    out.push(`    encodeStructMessage(${structInfo.descriptorConst}, ${encodeValue}),`);
     out.push(`  decode: (bytes: Uint8Array): ${structInfo.typeName} =>`);
     out.push(`    decodeStructMessage(${structInfo.descriptorConst}, bytes),`);
     out.push("};");

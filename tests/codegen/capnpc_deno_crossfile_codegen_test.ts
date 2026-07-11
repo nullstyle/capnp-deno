@@ -22,14 +22,20 @@
  *   - cross-file interfaces: `import type` for the service type plus value
  *     imports of the owning module's token and client factories, so
  *     `RpcStub<T>` typing and token-based encode/decode work across modules
+ *   - struct fields typed by interfaces: `RpcStub<T> | null` typing plus
+ *     module-private capability walkers that dehydrate live stubs before
+ *     encoding and hydrate decoded pointers into typed stubs (direct fields,
+ *     List elements, group members, nested cap-bearing structs)
  *   - zero TYPE_ANY_POINTER / TYPE_UINT16 fallbacks at typed positions and
  *     zero capability-pointer fallbacks for indexed interfaces
  *   - per-file generation emits identical import lines byte-for-byte
  *   - layout-aware import specifiers (flat, schema, nested directories)
- *   - runtime encode/decode round-trip through the generated codecs
+ *   - runtime encode/decode round-trip through the generated codecs,
+ *     including stub dehydration through a cap-bearing struct codec
  *   - a live in-process RPC flow (WASM session harness) where a
  *     consumer-module service receives a base-module capability as a param,
- *     calls a method on it, and returns it in results
+ *     calls a method on it, returns it in results, and hands a typed stub
+ *     back inside a struct-carried result field
  */
 
 import { finalizeGeneratedFiles } from "../../tools/capnpc-deno/cli.ts";
@@ -291,31 +297,128 @@ Deno.test("crossfile: imported interfaces get typed stubs and token-based encode
 
   // The unknown-interface fallbacks must be unreachable for indexed
   // interfaces: no ProtocolError throw for the result path and no bare
-  // capability-pointer coercions at the param/result positions. (The only
-  // remaining `requireRpcStubCapability` references are the shared helper
-  // declaration and its use inside `capabilityToServiceStub`.)
+  // capability-pointer coercions at the flattened param/result construction
+  // sites. (`requireRpcStubCapability` still appears in the shared helper
+  // declaration, inside `capabilityToServiceStub`, and in the capability
+  // walkers' stub-to-pointer dehydration.)
   assert(
     !consumer.includes("cannot decode non-local capability result"),
     "imported-interface results must not fall back to a ProtocolError throw",
   );
   assert(
-    !consumer.includes(": requireRpcStubCapability("),
+    !consumer.includes("requireRpcStubCapability(value) }") &&
+      !consumer.includes("requireRpcStubCapability(result as unknown)"),
     "imported-interface positions must not fall back to raw capability pointers",
   );
   assert(
     !consumer.includes(" as unknown) as unknown as "),
     "imported-interface server params must not fall back to unsafe casts",
   );
+});
 
-  // Struct fields typed by an imported interface intentionally stay
-  // `CapabilityPointer | null` until P4 (struct-field capability typing).
+// ---------------------------------------------------------------------------
+// Emitter: struct fields typed by interfaces (P4)
+// ---------------------------------------------------------------------------
+
+Deno.test("crossfile: struct fields typed by an imported interface get typed stubs and walkers", async () => {
+  const generated = await generateFromFixture(CROSSFILE_REQUEST);
+  const consumer = fileByPath(generated, "consumer_types.ts").contents;
+
+  // Struct fields typed by an imported interface become typed stubs, in the
+  // direct-field, List-element, and group-member positions.
   assert(
     consumer.includes("export interface Registration {"),
     "expected the Registration fixture struct",
   );
   assert(
-    consumer.includes("  watcher: CapabilityPointer | null;"),
-    "struct fields typed by an imported interface stay CapabilityPointer | null until P4",
+    consumer.includes("  watcher: RpcStub<Watcher> | null;"),
+    "struct fields typed by an imported interface become RpcStub<T> | null",
+  );
+  assert(
+    consumer.includes("  backups: (RpcStub<Watcher> | null)[];"),
+    "List(imported interface) fields become typed stub arrays",
+  );
+  assert(
+    !consumer.includes("CapabilityPointer | null;"),
+    "no struct field may stay a raw capability pointer",
+  );
+
+  // Cap-bearing structs get module-private capability walkers...
+  assert(
+    consumer.includes(
+      "function dehydrateStubs$Registration(value: Registration): Registration {",
+    ),
+    "expected the Registration dehydrate walker",
+  );
+  assert(
+    consumer.includes(
+      "function hydrateStubs$Registration(value: Registration, transport: () => RpcClientTransport): Registration {",
+    ),
+    "expected the Registration hydrate walker",
+  );
+  // ...that recurse into nested cap-bearing structs, List elements, and
+  // inline group members through the imported interface's client factories.
+  assert(
+    consumer.includes(
+      "out.registration = hydrateStubs$Registration(out.registration, transport);",
+    ),
+    "expected nested struct recursion in the RegisterResults walker",
+  );
+  assert(
+    consumer.includes("out.backups = out.backups.map((item0) =>"),
+    "expected List element hydration in the Registration walker",
+  );
+  assert(
+    consumer.includes("out.route = { ...out.route };"),
+    "expected inline group handling in the Registration walker",
+  );
+  assert(
+    consumer.includes(
+      `out.watcher = capabilityToServiceStub(out.watcher, transport(), ${IMPORTED_STUB_FACTORY});`,
+    ),
+    "expected typed stub hydration through the imported client factories",
+  );
+
+  // Codecs dehydrate live stubs before encoding; the RPC layer dehydrates
+  // params/results before encoding and hydrates them after decoding, with the
+  // server side resolving the outbound transport lazily.
+  assert(
+    consumer.includes(
+      "encodeStructMessage(RegistrationStruct, dehydrateStubs$Registration(value)),",
+    ),
+    "expected the Registration codec to dehydrate stubs on encode",
+  );
+  assert(
+    consumer.includes(
+      "encodeStructMessageWithCaps(AttachParamsStruct, dehydrateStubs$AttachParams(params));",
+    ),
+    "expected client params to be dehydrated before encoding",
+  );
+  assert(
+    consumer.includes(
+      "return hydrateStubs$RegisterResults(decodeStructMessageWithCaps(RegisterResultsStruct, raw.contentBytes, raw.capTable) as RegisterResults, () => transport);",
+    ),
+    "expected client results to be hydrated after decoding",
+  );
+  assert(
+    consumer.includes(
+      "const decoded = hydrateStubs$AttachParams(decodeStructMessageWithCaps(AttachParamsStruct, params, ctx.paramsCapTable ?? []) as AttachParams, () => requireOutboundClient(ctx));",
+    ),
+    "expected server params to be hydrated after decoding",
+  );
+  assert(
+    consumer.includes(
+      "const encoded = encodeStructMessageWithCaps(RegisterResultsStruct, dehydrateStubs$RegisterResults(result));",
+    ),
+    "expected server results to be dehydrated before encoding",
+  );
+
+  // The owning module of the interface stays walker-free (its structs carry
+  // no capabilities), so cap-free schemas keep byte-identical output.
+  const base = fileByPath(generated, "base_types.ts").contents;
+  assert(
+    !base.includes("hydrateStubs$") && !base.includes("dehydrateStubs$"),
+    "cap-free modules must not gain capability walkers",
   );
 });
 
@@ -531,6 +634,65 @@ Deno.test("crossfile: runtime round-trip through cross-file composite codecs", a
   assertEquals((defaults.points as unknown[]).length, 0);
 });
 
+Deno.test("crossfile: cap-bearing struct codec dehydrates live stubs on encode", async () => {
+  const generated = await generateFromFixture(CROSSFILE_REQUEST);
+  const baseUrl = toDataUrl(
+    patchRuntimeSpecifiers(fileByPath(generated, "base_types.ts").contents),
+  );
+  const consumerSource = patchRuntimeSpecifiers(
+    fileByPath(generated, "consumer_types.ts").contents,
+  ).replaceAll(`"./base_types.ts"`, `"${baseUrl}"`);
+  const mod = await import(toDataUrl(consumerSource)) as Record<
+    string,
+    unknown
+  >;
+
+  const codec = mod.RegistrationCodec as {
+    encode(value: unknown): Uint8Array;
+    decode(bytes: Uint8Array): unknown;
+  };
+  assert(codec !== undefined, "expected RegistrationCodec export");
+
+  // Live RpcStub proxies expose their capability only through the shared
+  // RPC_STUB_CAPABILITY tag; the walker-backed codec must dehydrate them in
+  // the direct-field, List-element, and group-member positions. Raw
+  // capability pointers keep working alongside.
+  const stubTag = Symbol.for("@nullstyle/capnp/rpcStubCapability");
+  const fakeStub = (capabilityIndex: number): unknown => ({
+    [stubTag]: { capabilityIndex },
+  });
+  const encoded = codec.encode({
+    label: "reg",
+    watcher: fakeStub(7),
+    backups: [{ capabilityIndex: 3 }, fakeStub(9)],
+    route: { primary: fakeStub(5) },
+  });
+
+  const decoded = codec.decode(encoded) as {
+    label: string;
+    watcher: { capabilityIndex: number } | null;
+    backups: ({ capabilityIndex: number } | null)[];
+    route: { primary: { capabilityIndex: number } | null };
+  };
+  assertEquals(decoded.label, "reg");
+  assertEquals(decoded.watcher?.capabilityIndex, 7);
+  assertEquals(
+    decoded.backups.map((item) => item?.capabilityIndex).join(","),
+    "3,9",
+  );
+  assertEquals(decoded.route.primary?.capabilityIndex, 5);
+
+  // Null capabilities stay null through the same walker paths.
+  const nulls = codec.decode(codec.encode({
+    label: "",
+    watcher: null,
+    backups: [],
+    route: { primary: null },
+  })) as { watcher: unknown; route: { primary: unknown } };
+  assertEquals(nulls.watcher, null);
+  assertEquals(nulls.route.primary, null);
+});
+
 // ---------------------------------------------------------------------------
 // Live in-process RPC across generated modules (committed fixture bundle)
 // ---------------------------------------------------------------------------
@@ -568,6 +730,20 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
       return Promise.resolve(
         { capabilityIndex: 0 } as unknown as RpcStub<Watcher>,
       );
+    },
+    register: () => {
+      // P4 struct-carried capability: the Watcher rides inside a Registration
+      // struct field instead of a flattened single-field result. The same
+      // root-export limitation as acquire applies, so hand back the
+      // root-hosted Watcher endpoint as a raw pointer; the generated dispatch
+      // dehydrates the result struct and the client-side walker hydrates the
+      // field into a live typed stub.
+      return Promise.resolve({
+        label: "root-watcher",
+        watcher: { capabilityIndex: 0 } as unknown as RpcStub<Watcher>,
+        backups: [],
+        route: { primary: null },
+      });
     },
   };
 
@@ -660,6 +836,37 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
       "call the reacquired watcher stub",
     );
     assertEquals(pong.seq, 107);
+
+    // P4: a capability carried inside a struct-typed result field round-trips
+    // into a live typed stub. The generated dispatch dehydrates the
+    // Registration inside RegisterResults, the wire relays the capability,
+    // and the client-side hydrate walker rebuilds an RpcStub<Watcher> through
+    // the imported base-module client factories.
+    const registration = await withTimeout(
+      hub.register({ timeoutMs: 2_000 }),
+      2_500,
+      "register: struct-carried capability round-trip",
+    );
+    assertEquals(registration.label, "root-watcher");
+    assertEquals(registration.backups.length, 0);
+    assertEquals(registration.route.primary, null);
+    assert(
+      registration.watcher !== null,
+      "expected a watcher stub in the struct-carried result field",
+    );
+    const structStub = registration.watcher;
+    assert(
+      typeof structStub.close === "function",
+      "expected a live typed stub (with lifecycle), not a raw pointer",
+    );
+    const structPong = await withTimeout(
+      structStub.ping({ seq: 11, payload: new Uint8Array([4]) }, {
+        timeoutMs: 2_000,
+      }),
+      2_500,
+      "call the struct-carried watcher stub",
+    );
+    assertEquals(structPong.seq, 111);
   } finally {
     await runtime.close();
   }

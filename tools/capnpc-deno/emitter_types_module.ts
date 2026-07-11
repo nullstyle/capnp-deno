@@ -5,8 +5,9 @@
  *   - high-level service interface + token adapters.
  */
 
-import type { FieldModel, NodeModel } from "./model.ts";
+import type { FieldModel, NodeModel, TypeModel } from "./model.ts";
 import type {
+  CapabilityWalkerNames,
   CrossSchemaImportRef,
   EnumInfo,
   InterfaceInfo,
@@ -15,6 +16,7 @@ import type {
   TypeEmitContext,
 } from "./emitter_helpers.ts";
 import {
+  capabilityStubTypeName,
   collectLocalInterfaces,
   collectLocalTypes,
   formatBigint,
@@ -311,7 +313,24 @@ export function emitTypesModule(
       resolvedInterfaces,
     ),
   });
-  const ctx: TypeEmitContext = { nodeById, enumById, structById, imports };
+  const interfaceById = new Map(
+    localInterfaces.map((info) => [info.id, info.typeName] as const),
+  );
+  const ctx: TypeEmitContext = {
+    nodeById,
+    enumById,
+    structById,
+    imports,
+    interfaceNameById: interfaceById,
+  };
+  const ifaceCtx: InterfaceEmitContext = { interfaceById, nodeById, imports };
+
+  // Plan capability walkers before any emission so struct codecs and RPC
+  // method bodies can reference the per-struct dehydrate/hydrate functions,
+  // and so imported type names for foreign cap-bearing structs are claimed
+  // deterministically.
+  const walkerPlan = planCapabilityWalkers(structInfos, ctx);
+  ctx.capabilityWalkers = walkerPlan.byId;
 
   // Body is buffered separately so cross-module import lines (discovered
   // while emitting it) can be rendered into the module header, and imported
@@ -333,12 +352,9 @@ export function emitTypesModule(
     emitStructDescriptor(body, structInfo, ctx);
   }
 
-  emitRpcInterfaceDefinitions(body, resolvedInterfaces);
+  emitCapabilityWalkers(body, walkerPlan, ctx, ifaceCtx);
 
-  const interfaceById = new Map(
-    localInterfaces.map((info) => [info.id, info.typeName] as const),
-  );
-  const ifaceCtx: InterfaceEmitContext = { interfaceById, nodeById, imports };
+  emitRpcInterfaceDefinitions(body, resolvedInterfaces, walkerPlan.byId);
 
   for (const resolved of resolvedInterfaces) {
     const separateServerTypeName = highLevelServerTypeName(resolved);
@@ -518,6 +534,457 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("  );");
   out.push("}");
   out.push("");
+}
+
+// ---------------------------------------------------------------------------
+// Capability walkers: struct-field typed stubs
+// ---------------------------------------------------------------------------
+//
+// Struct fields typed by a known interface are emitted as `RpcStub<T> | null`
+// (see typeToTs). The encoding runtime only understands raw
+// `CapabilityPointer` records, so every cap-bearing struct gets a pair of
+// module-private walkers built entirely from the shared capability bridge
+// helpers above:
+//   - `dehydrateStubs$T(value)` replaces live stubs (tagged with
+//     RPC_STUB_CAPABILITY) by their raw capability pointers before encoding;
+//   - `hydrateStubs$T(value, transport)` wraps decoded capability pointers
+//     into typed stubs through the interface's client factories after
+//     decoding. The transport is passed as a thunk so server dispatch only
+//     resolves `ctx.outboundClient` when a capability is actually present.
+// Walkers recurse into nested cap-bearing structs (local or imported), List
+// elements at any nesting depth, and inline group fields. Interfaces or
+// struct types that cannot be resolved keep their raw-pointer behavior.
+
+/** One cap-bearing struct the module emits walker functions for. */
+interface CapabilityWalkerTarget {
+  readonly id: bigint;
+  readonly node: NodeModel;
+  /** Local type name or `import type` alias for foreign structs. */
+  readonly typeName: string;
+  readonly names: CapabilityWalkerNames;
+}
+
+interface CapabilityWalkerPlan {
+  readonly byId: ReadonlyMap<bigint, CapabilityWalkerNames>;
+  readonly targets: readonly CapabilityWalkerTarget[];
+}
+
+function sortedWalkableFields(node: NodeModel): FieldModel[] {
+  const structNode = node.structNode;
+  if (!structNode) return [];
+  return structNode.fields
+    .slice()
+    .sort((a, b) => a.codeOrder - b.codeOrder)
+    .filter((field) => field.slot !== undefined || field.group !== undefined);
+}
+
+/** Whether the interface id resolves to a typed stub in this module. */
+function walkerInterfaceResolves(id: bigint, ctx: TypeEmitContext): boolean {
+  if (ctx.interfaceNameById?.has(id)) return true;
+  return ctx.imports.crossFileEntry(id)?.kind === "interface";
+}
+
+/** Struct ids a walker can recurse into (local, or importable foreign). */
+function walkerStructResolves(id: bigint, ctx: TypeEmitContext): boolean {
+  if (ctx.structById.has(id)) return true;
+  return ctx.imports.crossFileEntry(id)?.kind === "struct";
+}
+
+function collectTypeRefs(
+  type: TypeModel,
+  ctx: TypeEmitContext,
+  structRefs: bigint[],
+  hasCapability: { value: boolean },
+): void {
+  switch (type.kind) {
+    case "interface":
+      if (walkerInterfaceResolves(type.typeId, ctx)) {
+        hasCapability.value = true;
+      }
+      return;
+    case "struct":
+      if (walkerStructResolves(type.typeId, ctx)) {
+        structRefs.push(type.typeId);
+      }
+      return;
+    case "list":
+      collectTypeRefs(type.elementType, ctx, structRefs, hasCapability);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Direct struct references and direct capability presence for one struct
+ * node, with group fields inlined (groups are walked inside their parent's
+ * walker and never get standalone walkers).
+ */
+function walkerNodeRefs(
+  node: NodeModel,
+  ctx: TypeEmitContext,
+): { structRefs: bigint[]; hasCapability: boolean } {
+  const structRefs: bigint[] = [];
+  const hasCapability = { value: false };
+  const visitNode = (current: NodeModel): void => {
+    for (const field of sortedWalkableFields(current)) {
+      if (field.slot) {
+        collectTypeRefs(field.slot.type, ctx, structRefs, hasCapability);
+        continue;
+      }
+      if (field.group) {
+        const groupNode = ctx.nodeById.get(field.group.typeId);
+        if (groupNode?.structNode) visitNode(groupNode);
+      }
+    }
+  };
+  visitNode(node);
+  return { structRefs, hasCapability: hasCapability.value };
+}
+
+function compareBigint(left: bigint, right: bigint): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Determine every cap-bearing struct reachable from this module's structs
+ * and assign deterministic walker names. Foreign struct targets claim their
+ * `import type` alias here so the names match the walker signatures.
+ */
+function planCapabilityWalkers(
+  structInfos: StructInfo[],
+  ctx: TypeEmitContext,
+): CapabilityWalkerPlan {
+  // Reachable non-group struct nodes, starting from all local structs.
+  const visited = new Set<bigint>();
+  const queue: bigint[] = [];
+  const enqueue = (id: bigint): void => {
+    if (visited.has(id)) return;
+    const node = ctx.nodeById.get(id);
+    if (!node?.structNode || node.structNode.isGroup) return;
+    visited.add(id);
+    queue.push(id);
+  };
+  for (const info of structInfos) {
+    enqueue(info.id);
+  }
+  const directCapability = new Map<bigint, boolean>();
+  const structRefsById = new Map<bigint, bigint[]>();
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const node = ctx.nodeById.get(id)!;
+    const { structRefs, hasCapability } = walkerNodeRefs(node, ctx);
+    directCapability.set(id, hasCapability);
+    structRefsById.set(id, structRefs);
+    for (const ref of structRefs) {
+      enqueue(ref);
+    }
+  }
+
+  // Fixpoint: a struct is cap-bearing when it (or any struct it references,
+  // transitively, cycles included) has a resolvable capability field.
+  const capBearing = new Set<bigint>(
+    [...visited].filter((id) => directCapability.get(id) === true),
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of visited) {
+      if (capBearing.has(id)) continue;
+      const refs = structRefsById.get(id) ?? [];
+      if (refs.some((ref) => capBearing.has(ref))) {
+        capBearing.add(id);
+        changed = true;
+      }
+    }
+  }
+
+  const byId = new Map<bigint, CapabilityWalkerNames>();
+  const targets: CapabilityWalkerTarget[] = [];
+  for (const id of [...capBearing].sort(compareBigint)) {
+    const node = ctx.nodeById.get(id)!;
+    const local = ctx.structById.get(id);
+    let typeName: string;
+    if (local) {
+      typeName = local.typeName;
+    } else {
+      const entry = ctx.imports.crossFileEntry(id);
+      if (entry?.kind !== "struct") continue;
+      typeName = ctx.imports.importTypeName(entry);
+    }
+    const names: CapabilityWalkerNames = {
+      hydrate: `hydrateStubs$${typeName}`,
+      dehydrate: `dehydrateStubs$${typeName}`,
+    };
+    byId.set(id, names);
+    targets.push({ id, node, typeName, names });
+  }
+  targets.sort((a, b) => a.typeName.localeCompare(b.typeName));
+  return { byId, targets };
+}
+
+type CapabilityWalkerMode = "hydrate" | "dehydrate";
+
+function emitCapabilityWalkers(
+  out: string[],
+  plan: CapabilityWalkerPlan,
+  ctx: TypeEmitContext,
+  ifaceCtx: InterfaceEmitContext,
+): void {
+  for (const target of plan.targets) {
+    emitJSDoc(out, "", [
+      `Wrap decoded capability pointers in \`${target.typeName}\` into typed`,
+      "`RpcStub`s via the owning interfaces' client factories.",
+    ]);
+    out.push(
+      `function ${target.names.hydrate}(value: ${target.typeName}, transport: () => RpcClientTransport): ${target.typeName} {`,
+    );
+    out.push("  const out = { ...value };");
+    emitWalkerStatements(out, "  ", "out", target.node, "hydrate", {
+      plan,
+      ctx,
+      ifaceCtx,
+    });
+    out.push("  return out;");
+    out.push("}");
+    out.push("");
+    emitJSDoc(out, "", [
+      `Replace live \`RpcStub\` values in \`${target.typeName}\` by their raw`,
+      "capability pointers so the encoding runtime can serialize them.",
+    ]);
+    out.push(
+      `function ${target.names.dehydrate}(value: ${target.typeName}): ${target.typeName} {`,
+    );
+    out.push("  const out = { ...value };");
+    emitWalkerStatements(out, "  ", "out", target.node, "dehydrate", {
+      plan,
+      ctx,
+      ifaceCtx,
+    });
+    out.push("  return out;");
+    out.push("}");
+    out.push("");
+  }
+}
+
+interface WalkerEmitOptions {
+  readonly plan: CapabilityWalkerPlan;
+  readonly ctx: TypeEmitContext;
+  readonly ifaceCtx: InterfaceEmitContext;
+}
+
+function emitWalkerStatements(
+  out: string[],
+  indent: string,
+  path: string,
+  node: NodeModel,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): void {
+  for (const field of sortedWalkableFields(node)) {
+    const accessor = accessProperty(path, toCamelCase(field.name));
+    if (field.slot) {
+      emitWalkerSlotStatement(
+        out,
+        indent,
+        accessor,
+        field.slot.type,
+        mode,
+        options,
+      );
+      continue;
+    }
+    if (field.group) {
+      const groupNode = options.ctx.nodeById.get(field.group.typeId);
+      if (!groupNode?.structNode) continue;
+      if (!groupSubtreeIsRelevant(groupNode, options)) continue;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(`${indent}  ${accessor} = { ...${accessor} };`);
+      emitWalkerStatements(
+        out,
+        `${indent}  `,
+        accessor,
+        groupNode,
+        mode,
+        options,
+      );
+      out.push(`${indent}}`);
+    }
+  }
+}
+
+/** Whether a group subtree contains anything the walkers transform. */
+function groupSubtreeIsRelevant(
+  node: NodeModel,
+  options: WalkerEmitOptions,
+): boolean {
+  for (const field of sortedWalkableFields(node)) {
+    if (field.slot) {
+      if (walkerTypeIsRelevant(field.slot.type, options)) return true;
+      continue;
+    }
+    if (field.group) {
+      const groupNode = options.ctx.nodeById.get(field.group.typeId);
+      if (groupNode?.structNode && groupSubtreeIsRelevant(groupNode, options)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function walkerTypeIsRelevant(
+  type: TypeModel,
+  options: WalkerEmitOptions,
+): boolean {
+  switch (type.kind) {
+    case "interface":
+      return resolveInterfaceTokenBinding(type.typeId, options.ifaceCtx) !==
+        null;
+    case "struct":
+      return options.plan.byId.has(type.typeId);
+    case "list":
+      return walkerTypeIsRelevant(type.elementType, options);
+    default:
+      return false;
+  }
+}
+
+function emitWalkerSlotStatement(
+  out: string[],
+  indent: string,
+  accessor: string,
+  type: TypeModel,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): void {
+  switch (type.kind) {
+    case "interface": {
+      const binding = resolveInterfaceTokenBinding(
+        type.typeId,
+        options.ifaceCtx,
+      );
+      if (!binding) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${
+          walkerCapabilityExpression(
+            accessor,
+            type.typeId,
+            binding,
+            mode,
+            options,
+          )
+        };`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    case "struct": {
+      const walkers = options.plan.byId.get(type.typeId);
+      if (!walkers) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${
+          walkerStructExpression(accessor, walkers, mode)
+        };`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    case "list": {
+      if (!walkerTypeIsRelevant(type.elementType, options)) return;
+      const expression = walkerListElementExpression(
+        type.elementType,
+        "item0",
+        1,
+        mode,
+        options,
+      );
+      if (!expression) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${accessor}.map((item0) => ${expression});`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function walkerCapabilityExpression(
+  valueExpression: string,
+  interfaceId: bigint,
+  binding: InterfaceTokenBinding,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): string {
+  if (mode === "hydrate") {
+    return `capabilityToServiceStub(${valueExpression}, transport(), ${
+      serviceStubFactoryExpression(binding)
+    })`;
+  }
+  const stubType = capabilityStubTypeName(interfaceId, options.ctx) ?? "object";
+  return `requireRpcStubCapability(${valueExpression}) as unknown as RpcStub<${stubType}>`;
+}
+
+function walkerStructExpression(
+  valueExpression: string,
+  walkers: CapabilityWalkerNames,
+  mode: CapabilityWalkerMode,
+): string {
+  return mode === "hydrate"
+    ? `${walkers.hydrate}(${valueExpression}, transport)`
+    : `${walkers.dehydrate}(${valueExpression})`;
+}
+
+function walkerListElementExpression(
+  elementType: TypeModel,
+  itemName: string,
+  depth: number,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): string | null {
+  switch (elementType.kind) {
+    case "interface": {
+      const binding = resolveInterfaceTokenBinding(
+        elementType.typeId,
+        options.ifaceCtx,
+      );
+      if (!binding) return null;
+      return `${itemName} == null ? ${itemName} : ${
+        walkerCapabilityExpression(
+          itemName,
+          elementType.typeId,
+          binding,
+          mode,
+          options,
+        )
+      }`;
+    }
+    case "struct": {
+      const walkers = options.plan.byId.get(elementType.typeId);
+      if (!walkers) return null;
+      return `${itemName} == null ? ${itemName} : ${
+        walkerStructExpression(itemName, walkers, mode)
+      }`;
+    }
+    case "list": {
+      const inner = walkerListElementExpression(
+        elementType.elementType,
+        `item${depth}`,
+        depth + 1,
+        mode,
+        options,
+      );
+      if (!inner) return null;
+      return `${itemName} == null ? ${itemName} : ${itemName}.map((item${depth}) => ${inner})`;
+    }
+    default:
+      return null;
+  }
 }
 
 function emitHighLevelInterface(
@@ -1244,9 +1711,13 @@ function emitClientParamConstruction(
           ctx,
         );
         if (binding) {
+          // The raw pointer is cast to the struct's typed-stub field: the
+          // low-level client dehydrates it back to a pointer before encoding.
           return `{ ${
             quoteIfNeeded(shape.paramFieldName!)
-          }: exportCapabilityFromTransport(transport, ${binding.token}, value) }`;
+          }: exportCapabilityFromTransport(transport, ${binding.token}, value) as unknown as ${method.params.typeName}[${
+            JSON.stringify(shape.paramFieldName!)
+          }] }`;
         }
         return `{ ${
           quoteIfNeeded(shape.paramFieldName!)
@@ -1364,9 +1835,13 @@ function emitServerResultConstruction(
           ctx,
         );
         if (binding) {
+          // The raw pointer is cast to the struct's typed-stub field: the
+          // dispatch layer dehydrates it back to a pointer before encoding.
           return `return { ${
             quoteIfNeeded(shape.resultFieldName!)
-          }: exportCapabilityFromContext(_ctx, ${binding.token}, result) };`;
+          }: exportCapabilityFromContext(_ctx, ${binding.token}, result) as unknown as ${
+            method.results!.typeName
+          }[${JSON.stringify(shape.resultFieldName!)}] };`;
         }
         return `return { ${
           quoteIfNeeded(shape.resultFieldName!)

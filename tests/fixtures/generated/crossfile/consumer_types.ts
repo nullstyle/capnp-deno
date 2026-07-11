@@ -289,19 +289,32 @@ export interface AcquireParams {
 }
 
 export interface AcquireResults {
-  watcher: CapabilityPointer | null;
+  watcher: RpcStub<Watcher> | null;
 }
 
 export interface AttachParams {
-  watcher: CapabilityPointer | null;
+  watcher: RpcStub<Watcher> | null;
 }
 
 export interface AttachResults {
 }
 
+export interface RegisterParams {
+}
+
+export interface RegisterResults {
+  registration: Registration;
+}
+
 export interface Registration {
   label: string;
-  watcher: CapabilityPointer | null;
+  watcher: RpcStub<Watcher> | null;
+  backups: (RpcStub<Watcher> | null)[];
+  route: Route;
+}
+
+interface Route {
+  primary: RpcStub<Watcher> | null;
 }
 
 export const EnvelopeStruct: StructDescriptor<Envelope> = {
@@ -552,7 +565,10 @@ export const AcquireResultsStruct: StructDescriptor<AcquireResults> = {
 };
 export const AcquireResultsCodec: StructCodec<AcquireResults> = {
   encode: (value: AcquireResults): Uint8Array =>
-    encodeStructMessage(AcquireResultsStruct, value),
+    encodeStructMessage(
+      AcquireResultsStruct,
+      dehydrateStubs$AcquireResults(value),
+    ),
   decode: (bytes: Uint8Array): AcquireResults =>
     decodeStructMessage(AcquireResultsStruct, bytes),
 };
@@ -576,7 +592,7 @@ export const AttachParamsStruct: StructDescriptor<AttachParams> = {
 };
 export const AttachParamsCodec: StructCodec<AttachParams> = {
   encode: (value: AttachParams): Uint8Array =>
-    encodeStructMessage(AttachParamsStruct, value),
+    encodeStructMessage(AttachParamsStruct, dehydrateStubs$AttachParams(value)),
   decode: (bytes: Uint8Array): AttachParams =>
     decodeStructMessage(AttachParamsStruct, bytes),
 };
@@ -596,14 +612,58 @@ export const AttachResultsCodec: StructCodec<AttachResults> = {
     decodeStructMessage(AttachResultsStruct, bytes),
 };
 
+export const RegisterParamsStruct: StructDescriptor<RegisterParams> = {
+  kind: "struct",
+  name: "RegisterParams",
+  dataWordCount: 0,
+  pointerCount: 0,
+  createDefault: () => ({}),
+  fields: [],
+};
+export const RegisterParamsCodec: StructCodec<RegisterParams> = {
+  encode: (value: RegisterParams): Uint8Array =>
+    encodeStructMessage(RegisterParamsStruct, value),
+  decode: (bytes: Uint8Array): RegisterParams =>
+    decodeStructMessage(RegisterParamsStruct, bytes),
+};
+
+export const RegisterResultsStruct: StructDescriptor<RegisterResults> = {
+  kind: "struct",
+  name: "RegisterResults",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    registration: RegistrationStruct.createDefault(),
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "registration",
+      offset: 0,
+      type: { kind: "struct", get: () => RegistrationStruct },
+    },
+  ],
+};
+export const RegisterResultsCodec: StructCodec<RegisterResults> = {
+  encode: (value: RegisterResults): Uint8Array =>
+    encodeStructMessage(
+      RegisterResultsStruct,
+      dehydrateStubs$RegisterResults(value),
+    ),
+  decode: (bytes: Uint8Array): RegisterResults =>
+    decodeStructMessage(RegisterResultsStruct, bytes),
+};
+
 export const RegistrationStruct: StructDescriptor<Registration> = {
   kind: "struct",
   name: "Registration",
   dataWordCount: 0,
-  pointerCount: 2,
+  pointerCount: 4,
   createDefault: () => ({
     label: "",
     watcher: null,
+    backups: [],
+    route: RouteStruct.createDefault(),
   }),
   fields: [
     {
@@ -618,14 +678,225 @@ export const RegistrationStruct: StructDescriptor<Registration> = {
       offset: 1,
       type: TYPE_INTERFACE,
     },
+    {
+      kind: "slot",
+      name: "backups",
+      offset: 2,
+      type: { kind: "list", element: TYPE_INTERFACE },
+    },
+    {
+      kind: "group",
+      name: "route",
+      type: { kind: "struct", get: () => RouteStruct },
+    },
   ],
 };
 export const RegistrationCodec: StructCodec<Registration> = {
   encode: (value: Registration): Uint8Array =>
-    encodeStructMessage(RegistrationStruct, value),
+    encodeStructMessage(RegistrationStruct, dehydrateStubs$Registration(value)),
   decode: (bytes: Uint8Array): Registration =>
     decodeStructMessage(RegistrationStruct, bytes),
 };
+
+const RouteStruct: StructDescriptor<Route> = {
+  kind: "struct",
+  name: "Route",
+  dataWordCount: 0,
+  pointerCount: 4,
+  createDefault: () => ({
+    primary: null,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "primary",
+      offset: 3,
+      type: TYPE_INTERFACE,
+    },
+  ],
+};
+
+/**
+ * Wrap decoded capability pointers in `AcquireResults` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$AcquireResults(
+  value: AcquireResults,
+  transport: () => RpcClientTransport,
+): AcquireResults {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = capabilityToServiceStub(
+      out.watcher,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createWatcherServiceClient(
+          createWatcherClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `AcquireResults` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$AcquireResults(value: AcquireResults): AcquireResults {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = requireRpcStubCapability(out.watcher) as unknown as RpcStub<
+      Watcher
+    >;
+  }
+  return out;
+}
+
+/**
+ * Wrap decoded capability pointers in `AttachParams` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$AttachParams(
+  value: AttachParams,
+  transport: () => RpcClientTransport,
+): AttachParams {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = capabilityToServiceStub(
+      out.watcher,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createWatcherServiceClient(
+          createWatcherClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `AttachParams` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$AttachParams(value: AttachParams): AttachParams {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = requireRpcStubCapability(out.watcher) as unknown as RpcStub<
+      Watcher
+    >;
+  }
+  return out;
+}
+
+/**
+ * Wrap decoded capability pointers in `RegisterResults` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$RegisterResults(
+  value: RegisterResults,
+  transport: () => RpcClientTransport,
+): RegisterResults {
+  const out = { ...value };
+  if (out.registration != null) {
+    out.registration = hydrateStubs$Registration(out.registration, transport);
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `RegisterResults` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$RegisterResults(
+  value: RegisterResults,
+): RegisterResults {
+  const out = { ...value };
+  if (out.registration != null) {
+    out.registration = dehydrateStubs$Registration(out.registration);
+  }
+  return out;
+}
+
+/**
+ * Wrap decoded capability pointers in `Registration` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$Registration(
+  value: Registration,
+  transport: () => RpcClientTransport,
+): Registration {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = capabilityToServiceStub(
+      out.watcher,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createWatcherServiceClient(
+          createWatcherClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  if (out.backups != null) {
+    out.backups = out.backups.map((item0) =>
+      item0 == null ? item0 : capabilityToServiceStub(
+        item0,
+        transport(),
+        (nextTransport, nextCapability) =>
+          createWatcherServiceClient(
+            createWatcherClient(nextTransport, nextCapability),
+            nextTransport,
+          ),
+      )
+    );
+  }
+  if (out.route != null) {
+    out.route = { ...out.route };
+    if (out.route.primary != null) {
+      out.route.primary = capabilityToServiceStub(
+        out.route.primary,
+        transport(),
+        (nextTransport, nextCapability) =>
+          createWatcherServiceClient(
+            createWatcherClient(nextTransport, nextCapability),
+            nextTransport,
+          ),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `Registration` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$Registration(value: Registration): Registration {
+  const out = { ...value };
+  if (out.watcher != null) {
+    out.watcher = requireRpcStubCapability(out.watcher) as unknown as RpcStub<
+      Watcher
+    >;
+  }
+  if (out.backups != null) {
+    out.backups = out.backups.map((item0) =>
+      item0 == null
+        ? item0
+        : requireRpcStubCapability(item0) as unknown as RpcStub<Watcher>
+    );
+  }
+  if (out.route != null) {
+    out.route = { ...out.route };
+    if (out.route.primary != null) {
+      out.route.primary = requireRpcStubCapability(
+        out.route.primary,
+      ) as unknown as RpcStub<Watcher>;
+    }
+  }
+  return out;
+}
 
 export const FeedInterfaceId = 0xf05c521c573f6138n;
 
@@ -879,6 +1150,7 @@ export const HubInterfaceId = 0xfd58d0b2a70de039n;
 export const HubMethodOrdinals = {
   attach: 0,
   acquire: 1,
+  register: 2,
 } as const;
 
 export interface HubClient {
@@ -890,6 +1162,10 @@ export interface HubClient {
     params: AcquireParams,
     options?: RpcCallOptions,
   ): Promise<AcquireResults>;
+  register(
+    params: RegisterParams,
+    options?: RpcCallOptions,
+  ): Promise<RegisterResults>;
 }
 
 export interface HubServer {
@@ -901,6 +1177,10 @@ export interface HubServer {
     params: AcquireParams,
     ctx: RpcCallContext,
   ): Promise<AcquireResults> | AcquireResults;
+  register(
+    params: RegisterParams,
+    ctx: RpcCallContext,
+  ): Promise<RegisterResults> | RegisterResults;
 }
 
 export function createHubClient(
@@ -915,7 +1195,7 @@ export function createHubClient(
       try {
         const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
           AttachParamsStruct,
-          params,
+          dehydrateStubs$AttachParams(params),
         );
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
@@ -1014,11 +1294,14 @@ export function createHubClient(
             callOptions,
           );
           try {
-            return decodeStructMessageWithCaps(
-              AcquireResultsStruct,
-              raw.contentBytes,
-              raw.capTable,
-            ) as AcquireResults;
+            return hydrateStubs$AcquireResults(
+              decodeStructMessageWithCaps(
+                AcquireResultsStruct,
+                raw.contentBytes,
+                raw.capTable,
+              ) as AcquireResults,
+              () => transport,
+            );
           } finally {
             if (
               (options?.autoFinish ?? true) && questionId !== undefined &&
@@ -1035,11 +1318,14 @@ export function createHubClient(
           callOptions,
         );
         try {
-          return decodeStructMessageWithCaps(
-            AcquireResultsStruct,
-            response,
-            [],
-          ) as AcquireResults;
+          return hydrateStubs$AcquireResults(
+            decodeStructMessageWithCaps(
+              AcquireResultsStruct,
+              response,
+              [],
+            ) as AcquireResults,
+            () => transport,
+          );
         } finally {
           if (
             (options?.autoFinish ?? true) && questionId !== undefined &&
@@ -1056,6 +1342,87 @@ export function createHubClient(
           methodName: "acquire",
           methodId: 1,
         }, "Hub.acquire failed");
+      }
+    },
+    register: async (
+      params: RegisterParams,
+      options?: RpcCallOptions,
+    ): Promise<RegisterResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          RegisterParamsStruct,
+          params,
+        );
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0xfd58d0b2a70de039n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            HubMethodOrdinals["register"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return hydrateStubs$RegisterResults(
+              decodeStructMessageWithCaps(
+                RegisterResultsStruct,
+                raw.contentBytes,
+                raw.capTable,
+              ) as RegisterResults,
+              () => transport,
+            );
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
+          capability,
+          HubMethodOrdinals["register"],
+          encoded.content,
+          callOptions,
+        );
+        try {
+          return hydrateStubs$RegisterResults(
+            decodeStructMessageWithCaps(
+              RegisterResultsStruct,
+              response,
+              [],
+            ) as RegisterResults,
+            () => transport,
+          );
+        } finally {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Hub",
+          interfaceId: 0xfd58d0b2a70de039n,
+          methodName: "register",
+          methodId: 2,
+        }, "Hub.register failed");
       }
     },
   };
@@ -1087,11 +1454,14 @@ export function createHubServer(server: HubServer): RpcServerDispatch {
     ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(
-            AttachParamsStruct,
-            params,
-            ctx.paramsCapTable ?? [],
-          ) as AttachParams;
+          const decoded = hydrateStubs$AttachParams(
+            decodeStructMessageWithCaps(
+              AttachParamsStruct,
+              params,
+              ctx.paramsCapTable ?? [],
+            ) as AttachParams,
+            () => requireOutboundClient(ctx),
+          );
           const result = await server["attach"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             AttachResultsStruct,
@@ -1111,7 +1481,23 @@ export function createHubServer(server: HubServer): RpcServerDispatch {
           const result = await server["acquire"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             AcquireResultsStruct,
-            result,
+            dehydrateStubs$AcquireResults(result),
+          );
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 2: {
+          const decoded = decodeStructMessageWithCaps(
+            RegisterParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as RegisterParams;
+          const result = await server["register"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(
+            RegisterResultsStruct,
+            dehydrateStubs$RegisterResults(result),
           );
           if (encoded.capTable.length > 0) {
             return { content: encoded.content, capTable: encoded.capTable };
@@ -1360,6 +1746,13 @@ export interface Hub {
    * @returns Resolves with the decoded call result.
    */
   acquire(options?: RpcCallOptions): Promise<RpcStub<Watcher>>;
+  /**
+   * Call `Hub.register`.
+   *
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
+  register(options?: RpcCallOptions): Promise<RegisterResults["registration"]>;
 }
 
 /**
@@ -1383,7 +1776,7 @@ export function createHubServiceClient(
             transport,
             Watcher$Base,
             value,
-          ),
+          ) as unknown as AttachParams["watcher"],
         }, options);
         return;
       } catch (error) {
@@ -1418,6 +1811,21 @@ export function createHubServiceClient(
           methodName: "acquire",
           methodId: 1,
         }, "Hub.acquire failed");
+      }
+    },
+    register: async (options?: RpcCallOptions) => {
+      try {
+        const result = await client.register({} as RegisterParams, options);
+        return result.registration;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "register",
+          methodId: 2,
+        }, "Hub.register failed");
       }
     },
   };
@@ -1457,7 +1865,11 @@ function createHubServiceServer(
       try {
         const result = await server.acquire();
         return {
-          watcher: exportCapabilityFromContext(_ctx, Watcher$Base, result),
+          watcher: exportCapabilityFromContext(
+            _ctx,
+            Watcher$Base,
+            result,
+          ) as unknown as AcquireResults["watcher"],
         };
       } catch (error) {
         throw annotateCapnpError(error, {
@@ -1469,6 +1881,22 @@ function createHubServiceServer(
           methodId: 1,
           questionId: _ctx.questionId,
         }, "Hub.acquire handler failed");
+      }
+    },
+    register: async (params: RegisterParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.register();
+        return { registration: result };
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Hub",
+          interfaceName: "Hub",
+          interfaceId: HubInterfaceId,
+          methodName: "register",
+          methodId: 2,
+          questionId: _ctx.questionId,
+        }, "Hub.register handler failed");
       }
     },
   };
@@ -1488,6 +1916,13 @@ export const HubDebugMethods = [
     serviceName: "Hub",
     methodId: HubMethodOrdinals["acquire"],
     methodName: "acquire",
+  },
+  {
+    interfaceId: HubInterfaceId,
+    interfaceName: "Hub",
+    serviceName: "Hub",
+    methodId: HubMethodOrdinals["register"],
+    methodName: "register",
   },
 ] as const satisfies readonly RpcDebugSchemaMethod[];
 
