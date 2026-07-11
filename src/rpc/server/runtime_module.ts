@@ -24,6 +24,20 @@ const STATIC_RUNTIME_WASM_EXPORTS = runtimeWasmExports as unknown as
 
 /**
  * Create a fresh WASM peer using the runtime module defaults.
+ *
+ * @param options - Runtime module options; `expectedVersion` defaults to `1`.
+ * @returns A new {@link WasmPeer} backed by the bundled runtime WASM module.
+ *
+ * @example
+ * ```ts
+ * // createRuntimePeer comes from `@nullstyle/capnp/advanced`.
+ * const peer = createRuntimePeer();
+ * try {
+ *   // Hand the peer to an RpcSession or drive it directly.
+ * } finally {
+ *   peer.close();
+ * }
+ * ```
  */
 export function createRuntimePeer(
   options: RpcRuntimeModuleOptions = {},
@@ -31,4 +45,26 @@ export function createRuntimePeer(
   return WasmPeerClass.fromExports(STATIC_RUNTIME_WASM_EXPORTS, {
     expectedVersion: options.expectedVersion ?? 1,
   });
+}
+
+/**
+ * Returns the export object of the bundled Cap'n Proto runtime WASM module.
+ *
+ * Use this to feed low-level helpers such as `WasmSerde.fromExports(...)` or
+ * `WasmPeer.fromExports(...)` without building or instantiating a WASM module
+ * yourself.
+ *
+ * @returns The statically imported runtime WASM exports shipped with the
+ *   package.
+ *
+ * @example
+ * ```ts
+ * // getRuntimeWasmExports and WasmSerde come from `@nullstyle/capnp/advanced`.
+ * const serde = WasmSerde.fromExports(getRuntimeWasmExports());
+ * ```
+ */
+export function getRuntimeWasmExports():
+  & CapnpWasmExports
+  & Record<string, unknown> {
+  return STATIC_RUNTIME_WASM_EXPORTS;
 }

@@ -18,6 +18,11 @@ export { WasmPeer } from "./wasm/peer.ts";
 export { instantiatePeer } from "./wasm/load.ts";
 
 export {
+  createRuntimePeer,
+  getRuntimeWasmExports,
+} from "./rpc/server/runtime_module.ts";
+
+export {
   type JsonSerdeCodec,
   type JsonSerdeCodecLookupOptions,
   type JsonSerdeCodecOptions,
