@@ -5,11 +5,22 @@
  *   - high-level service interface + token adapters.
  */
 
-import type { FieldModel, NodeModel } from "./model.ts";
+import type { FieldModel, NodeModel, TypeModel } from "./model.ts";
+import type {
+  CapabilityWalkerNames,
+  CrossSchemaImportRef,
+  EnumInfo,
+  InterfaceInfo,
+  ModuleIndex,
+  StructInfo,
+  TypeEmitContext,
+} from "./emitter_helpers.ts";
 import {
+  capabilityStubTypeName,
   collectLocalInterfaces,
   collectLocalTypes,
   formatBigint,
+  ModuleImportCollector,
   quoteIfNeeded,
   simpleNodeName,
   toCamelCase,
@@ -31,6 +42,31 @@ import {
 
 type MethodShapeKind = "none" | "single" | "multi";
 
+/**
+ * Context threaded through interface/method emission: the current module's
+ * local interface name table, the request-wide node table, and the per-module
+ * cross-file import collector (for interfaces owned by other schema files).
+ */
+interface InterfaceEmitContext {
+  readonly interfaceById: Map<bigint, string>;
+  readonly nodeById: Map<bigint, NodeModel>;
+  readonly imports: ModuleImportCollector;
+}
+
+/**
+ * Local expressions for everything an emitted module needs to encode/decode a
+ * capability of a known interface: the exported service token plus the
+ * exported client factories used to build typed `RpcStub`s.
+ */
+interface InterfaceTokenBinding {
+  /** The interface's service token const (local name or import alias). */
+  readonly token: string;
+  /** The `create<T>Client` low-level client factory. */
+  readonly createClient: string;
+  /** The `create<T>ServiceClient` high-level adapter. */
+  readonly createServiceClient: string;
+}
+
 interface MethodShape {
   paramKind: MethodShapeKind;
   resultKind: MethodShapeKind;
@@ -42,10 +78,132 @@ interface MethodShape {
   resultFieldInterfaceId?: bigint;
 }
 
+/** Result of emitting one `*_types.ts` module. */
+export interface EmittedTypesModule {
+  contents: string;
+  /** Sibling generated modules the contents import from (may be empty). */
+  crossSchemaImports: CrossSchemaImportRef[];
+}
+
+/**
+ * Module-scope identifiers every generated `*_types.ts` module declares or
+ * imports from the runtime, independent of the schema. Cross-file import
+ * aliases must never collide with these.
+ */
+const RESERVED_RUNTIME_MODULE_NAMES = [
+  // import type { ... } from "@nullstyle/capnp/encoding"
+  "AnyPointerValue",
+  "CapabilityPointer",
+  "EncodeWithCapsResult",
+  "EnumTypeDescriptor",
+  "PreambleCapDescriptor",
+  "StructCodec",
+  "StructDescriptor",
+  // import type { ... } from "@nullstyle/capnp/rpc"
+  "RpcBootstrapClientTransport",
+  "RpcCallContext",
+  "RpcCallOptions",
+  "RpcClientTransport",
+  "RpcExportCapabilityOptions",
+  "RpcServerDispatch",
+  "RpcDebugSchemaMethod",
+  "RpcServerDispatchResult",
+  "RpcServerRegistry",
+  "RpcServiceToken",
+  "RpcStub",
+  "StreamSender",
+  "StreamSenderOptions",
+  // import { ... } from "@nullstyle/capnp/rpc"
+  "ProtocolError",
+  "SessionError",
+  "annotateCapnpError",
+  "createRpcServiceToken",
+  "EMPTY_STRUCT_MESSAGE",
+  "createStreamSender",
+  // import { ... } from "@nullstyle/capnp/encoding"
+  "decodeStructMessage",
+  "decodeStructMessageWithCaps",
+  "encodeStructMessage",
+  "encodeStructMessageWithCaps",
+  "TYPE_ANY_POINTER",
+  "TYPE_BOOL",
+  "TYPE_DATA",
+  "TYPE_FLOAT32",
+  "TYPE_FLOAT64",
+  "TYPE_INT16",
+  "TYPE_INT32",
+  "TYPE_INT64",
+  "TYPE_INT8",
+  "TYPE_INTERFACE",
+  "TYPE_TEXT",
+  "TYPE_UINT16",
+  "TYPE_UINT32",
+  "TYPE_UINT64",
+  "TYPE_UINT8",
+  "TYPE_VOID",
+  // emitCapabilityBridgeHelpers declarations
+  "RPC_STUB_CAPABILITY",
+  "RpcClientTransportWithCapabilityExport",
+  "parseCapabilityPointer",
+  "requireRpcStubCapability",
+  "withCapabilityStubLifecycle",
+  "capabilityToServiceStub",
+  "requireOutboundClient",
+  "exportCapabilityFromTransport",
+  "exportCapabilityFromContext",
+] as const;
+
+function collectReservedModuleNames(
+  enumInfos: EnumInfo[],
+  structInfos: StructInfo[],
+  localInterfaces: InterfaceInfo[],
+  resolvedInterfaces: RpcResolvedInterfaceInfo[],
+): Set<string> {
+  const reserved = new Set<string>(RESERVED_RUNTIME_MODULE_NAMES);
+  for (const info of enumInfos) {
+    reserved.add(info.typeName);
+    reserved.add(info.valuesConst);
+    reserved.add(info.descriptorConst);
+  }
+  for (const info of structInfos) {
+    reserved.add(info.typeName);
+    reserved.add(info.descriptorConst);
+    reserved.add(info.codecConst);
+  }
+  for (const info of localInterfaces) {
+    const typeName = info.typeName;
+    reserved.add(typeName);
+    reserved.add(`${typeName}Client`);
+    reserved.add(`${typeName}Server`);
+    reserved.add(`${typeName}Service`);
+    reserved.add(`${typeName}InterfaceId`);
+    reserved.add(`${typeName}MethodOrdinals`);
+    reserved.add(`${typeName}DebugMethods`);
+    reserved.add(`create${typeName}Client`);
+    reserved.add(`create${typeName}Server`);
+    reserved.add(`create${typeName}ServiceClient`);
+    reserved.add(`create${typeName}ServiceServer`);
+    reserved.add(`bootstrap${typeName}Client`);
+    reserved.add(`register${typeName}Server`);
+  }
+  for (const resolved of resolvedInterfaces) {
+    for (const method of resolved.methods) {
+      if (!method.isStreaming) continue;
+      reserved.add(
+        `create${resolved.info.typeName}${
+          toPascalCase(method.methodName)
+        }StreamSender`,
+      );
+    }
+  }
+  return reserved;
+}
+
 export function emitTypesModule(
   fileNode: NodeModel,
   nodeById: Map<bigint, NodeModel>,
-): string {
+  moduleIndex: ModuleIndex,
+): EmittedTypesModule {
   const out: string[] = [];
   const resolvedInterfaces = resolveRpcInterfaces(fileNode, nodeById);
   const hasStreamingMethods = resolvedInterfaces.some((resolved) =>
@@ -133,61 +291,103 @@ export function emitTypesModule(
   out.push("  TYPE_UINT8,");
   out.push("  TYPE_VOID,");
   out.push('} from "@nullstyle/capnp/encoding";');
-  out.push("");
-  emitCapabilityBridgeHelpers(out);
 
-  const localTypes = collectLocalTypes(fileNode, nodeById);
-  const enumInfos = localTypes.enumInfos;
-  const structInfos = localTypes.structInfos;
+  const fileTypes = moduleIndex.byFileId.get(fileNode.id);
+  const enumInfos = fileTypes?.enumInfos ??
+    collectLocalTypes(fileNode, nodeById).enumInfos;
+  const structInfos = fileTypes?.structInfos ??
+    collectLocalTypes(fileNode, nodeById).structInfos;
+  const localInterfaces = fileTypes?.interfaceInfos ??
+    collectLocalInterfaces(fileNode, nodeById);
   const enumById = new Map(enumInfos.map((item) => [item.id, item] as const));
   const structById = new Map(
     structInfos.map((item) => [item.id, item] as const),
   );
-
-  for (const enumInfo of enumInfos) {
-    emitEnum(out, enumInfo);
-  }
-
-  for (const structInfo of structInfos) {
-    emitStructInterface(out, structInfo, nodeById, enumById, structById);
-  }
-
-  for (const structInfo of structInfos) {
-    emitStructDescriptor(out, structInfo, nodeById, enumById, structById);
-  }
-
-  emitRpcInterfaceDefinitions(out, resolvedInterfaces);
-
-  const localInterfaces = collectLocalInterfaces(fileNode, nodeById);
+  const imports = new ModuleImportCollector({
+    fileId: fileNode.id,
+    moduleIndex,
+    reservedNames: collectReservedModuleNames(
+      enumInfos,
+      structInfos,
+      localInterfaces,
+      resolvedInterfaces,
+    ),
+  });
   const interfaceById = new Map(
     localInterfaces.map((info) => [info.id, info.typeName] as const),
   );
+  const ctx: TypeEmitContext = {
+    nodeById,
+    enumById,
+    structById,
+    imports,
+    interfaceNameById: interfaceById,
+  };
+  const ifaceCtx: InterfaceEmitContext = { interfaceById, nodeById, imports };
+
+  // Plan capability walkers before any emission so struct codecs and RPC
+  // method bodies can reference the per-struct dehydrate/hydrate functions,
+  // and so imported type names for foreign cap-bearing structs are claimed
+  // deterministically.
+  const walkerPlan = planCapabilityWalkers(structInfos, ctx);
+  ctx.capabilityWalkers = walkerPlan.byId;
+
+  // Body is buffered separately so cross-module import lines (discovered
+  // while emitting it) can be rendered into the module header, and imported
+  // enum descriptor mirrors can be spliced in right after the local enums
+  // (before any struct descriptor references them at module init).
+  const body: string[] = [];
+  emitCapabilityBridgeHelpers(body);
+
+  for (const enumInfo of enumInfos) {
+    emitEnum(body, enumInfo);
+  }
+  const enumMirrorSpliceIndex = body.length;
+
+  for (const structInfo of structInfos) {
+    emitStructInterface(body, structInfo, ctx);
+  }
+
+  for (const structInfo of structInfos) {
+    emitStructDescriptor(body, structInfo, ctx);
+  }
+
+  emitCapabilityWalkers(body, walkerPlan, ctx, ifaceCtx);
+
+  emitRpcInterfaceDefinitions(body, resolvedInterfaces, walkerPlan.byId);
 
   for (const resolved of resolvedInterfaces) {
     const separateServerTypeName = highLevelServerTypeName(resolved);
-    emitHighLevelInterface(out, resolved, interfaceById, nodeById);
+    emitHighLevelInterface(body, resolved, ifaceCtx);
     if (separateServerTypeName) {
       emitHighLevelServerInterface(
-        out,
+        body,
         resolved,
         separateServerTypeName,
-        interfaceById,
-        nodeById,
+        ifaceCtx,
       );
     }
-    emitClientAdapter(out, resolved, interfaceById, nodeById);
+    emitClientAdapter(body, resolved, ifaceCtx);
     emitServerAdapter(
-      out,
+      body,
       resolved,
-      interfaceById,
-      nodeById,
+      ifaceCtx,
       separateServerTypeName,
     );
-    emitServiceToken(out, resolved, separateServerTypeName);
-    emitStreamSenderHelpers(out, resolved, interfaceById, nodeById);
+    emitServiceToken(body, resolved, separateServerTypeName);
+    emitStreamSenderHelpers(body, resolved, ifaceCtx);
   }
 
-  return `${out.join("\n")}\n`;
+  body.splice(enumMirrorSpliceIndex, 0, ...imports.renderEnumMirrorLines());
+
+  out.push(...imports.renderImportLines());
+  out.push("");
+  out.push(...body);
+
+  return {
+    contents: `${out.join("\n")}\n`,
+    crossSchemaImports: imports.crossSchemaImports(),
+  };
 }
 
 function emitCapabilityBridgeHelpers(out: string[]): void {
@@ -336,11 +536,461 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("");
 }
 
+// ---------------------------------------------------------------------------
+// Capability walkers: struct-field typed stubs
+// ---------------------------------------------------------------------------
+//
+// Struct fields typed by a known interface are emitted as `RpcStub<T> | null`
+// (see typeToTs). The encoding runtime only understands raw
+// `CapabilityPointer` records, so every cap-bearing struct gets a pair of
+// module-private walkers built entirely from the shared capability bridge
+// helpers above:
+//   - `dehydrateStubs$T(value)` replaces live stubs (tagged with
+//     RPC_STUB_CAPABILITY) by their raw capability pointers before encoding;
+//   - `hydrateStubs$T(value, transport)` wraps decoded capability pointers
+//     into typed stubs through the interface's client factories after
+//     decoding. The transport is passed as a thunk so server dispatch only
+//     resolves `ctx.outboundClient` when a capability is actually present.
+// Walkers recurse into nested cap-bearing structs (local or imported), List
+// elements at any nesting depth, and inline group fields. Interfaces or
+// struct types that cannot be resolved keep their raw-pointer behavior.
+
+/** One cap-bearing struct the module emits walker functions for. */
+interface CapabilityWalkerTarget {
+  readonly id: bigint;
+  readonly node: NodeModel;
+  /** Local type name or `import type` alias for foreign structs. */
+  readonly typeName: string;
+  readonly names: CapabilityWalkerNames;
+}
+
+interface CapabilityWalkerPlan {
+  readonly byId: ReadonlyMap<bigint, CapabilityWalkerNames>;
+  readonly targets: readonly CapabilityWalkerTarget[];
+}
+
+function sortedWalkableFields(node: NodeModel): FieldModel[] {
+  const structNode = node.structNode;
+  if (!structNode) return [];
+  return structNode.fields
+    .slice()
+    .sort((a, b) => a.codeOrder - b.codeOrder)
+    .filter((field) => field.slot !== undefined || field.group !== undefined);
+}
+
+/** Whether the interface id resolves to a typed stub in this module. */
+function walkerInterfaceResolves(id: bigint, ctx: TypeEmitContext): boolean {
+  if (ctx.interfaceNameById?.has(id)) return true;
+  return ctx.imports.crossFileEntry(id)?.kind === "interface";
+}
+
+/** Struct ids a walker can recurse into (local, or importable foreign). */
+function walkerStructResolves(id: bigint, ctx: TypeEmitContext): boolean {
+  if (ctx.structById.has(id)) return true;
+  return ctx.imports.crossFileEntry(id)?.kind === "struct";
+}
+
+function collectTypeRefs(
+  type: TypeModel,
+  ctx: TypeEmitContext,
+  structRefs: bigint[],
+  hasCapability: { value: boolean },
+): void {
+  switch (type.kind) {
+    case "interface":
+      if (walkerInterfaceResolves(type.typeId, ctx)) {
+        hasCapability.value = true;
+      }
+      return;
+    case "struct":
+      if (walkerStructResolves(type.typeId, ctx)) {
+        structRefs.push(type.typeId);
+      }
+      return;
+    case "list":
+      collectTypeRefs(type.elementType, ctx, structRefs, hasCapability);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Direct struct references and direct capability presence for one struct
+ * node, with group fields inlined (groups are walked inside their parent's
+ * walker and never get standalone walkers).
+ */
+function walkerNodeRefs(
+  node: NodeModel,
+  ctx: TypeEmitContext,
+): { structRefs: bigint[]; hasCapability: boolean } {
+  const structRefs: bigint[] = [];
+  const hasCapability = { value: false };
+  const visitNode = (current: NodeModel): void => {
+    for (const field of sortedWalkableFields(current)) {
+      if (field.slot) {
+        collectTypeRefs(field.slot.type, ctx, structRefs, hasCapability);
+        continue;
+      }
+      if (field.group) {
+        const groupNode = ctx.nodeById.get(field.group.typeId);
+        if (groupNode?.structNode) visitNode(groupNode);
+      }
+    }
+  };
+  visitNode(node);
+  return { structRefs, hasCapability: hasCapability.value };
+}
+
+function compareBigint(left: bigint, right: bigint): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Determine every cap-bearing struct reachable from this module's structs
+ * and assign deterministic walker names. Foreign struct targets claim their
+ * `import type` alias here so the names match the walker signatures.
+ */
+function planCapabilityWalkers(
+  structInfos: StructInfo[],
+  ctx: TypeEmitContext,
+): CapabilityWalkerPlan {
+  // Reachable non-group struct nodes, starting from all local structs.
+  const visited = new Set<bigint>();
+  const queue: bigint[] = [];
+  const enqueue = (id: bigint): void => {
+    if (visited.has(id)) return;
+    const node = ctx.nodeById.get(id);
+    if (!node?.structNode || node.structNode.isGroup) return;
+    visited.add(id);
+    queue.push(id);
+  };
+  for (const info of structInfos) {
+    enqueue(info.id);
+  }
+  const directCapability = new Map<bigint, boolean>();
+  const structRefsById = new Map<bigint, bigint[]>();
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    const node = ctx.nodeById.get(id)!;
+    const { structRefs, hasCapability } = walkerNodeRefs(node, ctx);
+    directCapability.set(id, hasCapability);
+    structRefsById.set(id, structRefs);
+    for (const ref of structRefs) {
+      enqueue(ref);
+    }
+  }
+
+  // Fixpoint: a struct is cap-bearing when it (or any struct it references,
+  // transitively, cycles included) has a resolvable capability field.
+  const capBearing = new Set<bigint>(
+    [...visited].filter((id) => directCapability.get(id) === true),
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of visited) {
+      if (capBearing.has(id)) continue;
+      const refs = structRefsById.get(id) ?? [];
+      if (refs.some((ref) => capBearing.has(ref))) {
+        capBearing.add(id);
+        changed = true;
+      }
+    }
+  }
+
+  const byId = new Map<bigint, CapabilityWalkerNames>();
+  const targets: CapabilityWalkerTarget[] = [];
+  for (const id of [...capBearing].sort(compareBigint)) {
+    const node = ctx.nodeById.get(id)!;
+    const local = ctx.structById.get(id);
+    let typeName: string;
+    if (local) {
+      typeName = local.typeName;
+    } else {
+      const entry = ctx.imports.crossFileEntry(id);
+      if (entry?.kind !== "struct") continue;
+      typeName = ctx.imports.importTypeName(entry);
+    }
+    const names: CapabilityWalkerNames = {
+      hydrate: `hydrateStubs$${typeName}`,
+      dehydrate: `dehydrateStubs$${typeName}`,
+    };
+    byId.set(id, names);
+    targets.push({ id, node, typeName, names });
+  }
+  targets.sort((a, b) => a.typeName.localeCompare(b.typeName));
+  return { byId, targets };
+}
+
+type CapabilityWalkerMode = "hydrate" | "dehydrate";
+
+function emitCapabilityWalkers(
+  out: string[],
+  plan: CapabilityWalkerPlan,
+  ctx: TypeEmitContext,
+  ifaceCtx: InterfaceEmitContext,
+): void {
+  for (const target of plan.targets) {
+    emitJSDoc(out, "", [
+      `Wrap decoded capability pointers in \`${target.typeName}\` into typed`,
+      "`RpcStub`s via the owning interfaces' client factories.",
+    ]);
+    out.push(
+      `function ${target.names.hydrate}(value: ${target.typeName}, transport: () => RpcClientTransport): ${target.typeName} {`,
+    );
+    out.push("  const out = { ...value };");
+    emitWalkerStatements(out, "  ", "out", target.node, "hydrate", {
+      plan,
+      ctx,
+      ifaceCtx,
+    });
+    out.push("  return out;");
+    out.push("}");
+    out.push("");
+    emitJSDoc(out, "", [
+      `Replace live \`RpcStub\` values in \`${target.typeName}\` by their raw`,
+      "capability pointers so the encoding runtime can serialize them.",
+    ]);
+    out.push(
+      `function ${target.names.dehydrate}(value: ${target.typeName}): ${target.typeName} {`,
+    );
+    out.push("  const out = { ...value };");
+    emitWalkerStatements(out, "  ", "out", target.node, "dehydrate", {
+      plan,
+      ctx,
+      ifaceCtx,
+    });
+    out.push("  return out;");
+    out.push("}");
+    out.push("");
+  }
+}
+
+interface WalkerEmitOptions {
+  readonly plan: CapabilityWalkerPlan;
+  readonly ctx: TypeEmitContext;
+  readonly ifaceCtx: InterfaceEmitContext;
+}
+
+function emitWalkerStatements(
+  out: string[],
+  indent: string,
+  path: string,
+  node: NodeModel,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): void {
+  for (const field of sortedWalkableFields(node)) {
+    const accessor = accessProperty(path, toCamelCase(field.name));
+    if (field.slot) {
+      emitWalkerSlotStatement(
+        out,
+        indent,
+        accessor,
+        field.slot.type,
+        mode,
+        options,
+      );
+      continue;
+    }
+    if (field.group) {
+      const groupNode = options.ctx.nodeById.get(field.group.typeId);
+      if (!groupNode?.structNode) continue;
+      if (!groupSubtreeIsRelevant(groupNode, options)) continue;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(`${indent}  ${accessor} = { ...${accessor} };`);
+      emitWalkerStatements(
+        out,
+        `${indent}  `,
+        accessor,
+        groupNode,
+        mode,
+        options,
+      );
+      out.push(`${indent}}`);
+    }
+  }
+}
+
+/** Whether a group subtree contains anything the walkers transform. */
+function groupSubtreeIsRelevant(
+  node: NodeModel,
+  options: WalkerEmitOptions,
+): boolean {
+  for (const field of sortedWalkableFields(node)) {
+    if (field.slot) {
+      if (walkerTypeIsRelevant(field.slot.type, options)) return true;
+      continue;
+    }
+    if (field.group) {
+      const groupNode = options.ctx.nodeById.get(field.group.typeId);
+      if (groupNode?.structNode && groupSubtreeIsRelevant(groupNode, options)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function walkerTypeIsRelevant(
+  type: TypeModel,
+  options: WalkerEmitOptions,
+): boolean {
+  switch (type.kind) {
+    case "interface":
+      return resolveInterfaceTokenBinding(type.typeId, options.ifaceCtx) !==
+        null;
+    case "struct":
+      return options.plan.byId.has(type.typeId);
+    case "list":
+      return walkerTypeIsRelevant(type.elementType, options);
+    default:
+      return false;
+  }
+}
+
+function emitWalkerSlotStatement(
+  out: string[],
+  indent: string,
+  accessor: string,
+  type: TypeModel,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): void {
+  switch (type.kind) {
+    case "interface": {
+      const binding = resolveInterfaceTokenBinding(
+        type.typeId,
+        options.ifaceCtx,
+      );
+      if (!binding) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${
+          walkerCapabilityExpression(
+            accessor,
+            type.typeId,
+            binding,
+            mode,
+            options,
+          )
+        };`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    case "struct": {
+      const walkers = options.plan.byId.get(type.typeId);
+      if (!walkers) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${
+          walkerStructExpression(accessor, walkers, mode)
+        };`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    case "list": {
+      if (!walkerTypeIsRelevant(type.elementType, options)) return;
+      const expression = walkerListElementExpression(
+        type.elementType,
+        "item0",
+        1,
+        mode,
+        options,
+      );
+      if (!expression) return;
+      out.push(`${indent}if (${accessor} != null) {`);
+      out.push(
+        `${indent}  ${accessor} = ${accessor}.map((item0) => ${expression});`,
+      );
+      out.push(`${indent}}`);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+function walkerCapabilityExpression(
+  valueExpression: string,
+  interfaceId: bigint,
+  binding: InterfaceTokenBinding,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): string {
+  if (mode === "hydrate") {
+    return `capabilityToServiceStub(${valueExpression}, transport(), ${
+      serviceStubFactoryExpression(binding)
+    })`;
+  }
+  const stubType = capabilityStubTypeName(interfaceId, options.ctx) ?? "object";
+  return `requireRpcStubCapability(${valueExpression}) as unknown as RpcStub<${stubType}>`;
+}
+
+function walkerStructExpression(
+  valueExpression: string,
+  walkers: CapabilityWalkerNames,
+  mode: CapabilityWalkerMode,
+): string {
+  return mode === "hydrate"
+    ? `${walkers.hydrate}(${valueExpression}, transport)`
+    : `${walkers.dehydrate}(${valueExpression})`;
+}
+
+function walkerListElementExpression(
+  elementType: TypeModel,
+  itemName: string,
+  depth: number,
+  mode: CapabilityWalkerMode,
+  options: WalkerEmitOptions,
+): string | null {
+  switch (elementType.kind) {
+    case "interface": {
+      const binding = resolveInterfaceTokenBinding(
+        elementType.typeId,
+        options.ifaceCtx,
+      );
+      if (!binding) return null;
+      return `${itemName} == null ? ${itemName} : ${
+        walkerCapabilityExpression(
+          itemName,
+          elementType.typeId,
+          binding,
+          mode,
+          options,
+        )
+      }`;
+    }
+    case "struct": {
+      const walkers = options.plan.byId.get(elementType.typeId);
+      if (!walkers) return null;
+      return `${itemName} == null ? ${itemName} : ${
+        walkerStructExpression(itemName, walkers, mode)
+      }`;
+    }
+    case "list": {
+      const inner = walkerListElementExpression(
+        elementType.elementType,
+        `item${depth}`,
+        depth + 1,
+        mode,
+        options,
+      );
+      if (!inner) return null;
+      return `${itemName} == null ? ${itemName} : ${itemName}.map((item${depth}) => ${inner})`;
+    }
+    default:
+      return null;
+  }
+}
+
 function emitHighLevelInterface(
   out: string[],
   resolved: RpcResolvedInterfaceInfo,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): void {
   const typeName = resolved.info.typeName;
   emitJSDoc(out, "", [
@@ -349,16 +999,10 @@ function emitHighLevelInterface(
   out.push(`export interface ${typeName} {`);
   for (const method of resolved.methods) {
     const shape = methodShape(method);
-    const signature = emitMethodSignature(
-      method,
-      shape,
-      interfaceById,
-      nodeById,
-    );
+    const signature = emitMethodSignature(method, shape, ctx);
     emitHighLevelMethodJSDoc(out, "  ", typeName, method, shape, {
       role: "client",
-      interfaceById,
-      nodeById,
+      ctx,
     });
     out.push(`  ${signature}`);
   }
@@ -378,8 +1022,7 @@ function emitHighLevelServerInterface(
   out: string[],
   resolved: RpcResolvedInterfaceInfo,
   typeName: string,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): void {
   emitJSDoc(out, "", [
     `High-level generated RPC server implementation for \`${resolved.info.typeName}\`.`,
@@ -389,11 +1032,10 @@ function emitHighLevelServerInterface(
     const shape = methodShape(method);
     emitHighLevelMethodJSDoc(out, "  ", resolved.info.typeName, method, shape, {
       role: "server",
-      interfaceById,
-      nodeById,
+      ctx,
     });
     out.push(
-      `  ${emitServerMethodSignature(method, shape, interfaceById, nodeById)}`,
+      `  ${emitServerMethodSignature(method, shape, ctx)}`,
     );
   }
   out.push("}");
@@ -403,8 +1045,7 @@ function emitHighLevelServerInterface(
 function emitMethodSignature(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
   const methodName = quoteIfNeeded(method.methodName);
   const optionsArg = "options?: RpcCallOptions";
@@ -419,8 +1060,7 @@ function emitMethodSignature(
           method.params.typeName,
           "param",
           method,
-          interfaceById,
-          nodeById,
+          ctx,
         );
         return `value: ${fieldType}, ${optionsArg}`;
       }
@@ -440,8 +1080,7 @@ function emitMethodSignature(
           method.results!.typeName,
           "result",
           method,
-          interfaceById,
-          nodeById,
+          ctx,
         );
         return `Promise<${fieldType}>`;
       }
@@ -456,8 +1095,7 @@ function emitMethodSignature(
 function emitServerMethodSignature(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
   const methodName = quoteIfNeeded(method.methodName);
   const paramArgs: string[] = [];
@@ -473,8 +1111,7 @@ function emitServerMethodSignature(
             method.params.typeName,
             "param",
             method,
-            interfaceById,
-            nodeById,
+            ctx,
           )
         }`,
       );
@@ -497,8 +1134,7 @@ function emitServerMethodSignature(
           method.results!.typeName,
           "result",
           method,
-          interfaceById,
-          nodeById,
+          ctx,
         );
         return `Promise<${fieldType}> | ${fieldType}`;
       }
@@ -515,11 +1151,16 @@ function emitServerMethodSignature(
 function emitClientAdapter(
   out: string[],
   resolved: RpcResolvedInterfaceInfo,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): void {
   const typeName = resolved.info.typeName;
-  out.push(`function create${typeName}ServiceClient(`);
+  emitJSDoc(out, "", [
+    `Adapt a low-level \`${typeName}Client\` into the high-level \`${typeName}\` API.`,
+    "",
+    "Exported so generated modules in other schema files can build typed",
+    `\`RpcStub<${typeName}>\` values for cross-file interface references.`,
+  ]);
+  out.push(`export function create${typeName}ServiceClient(`);
   out.push(`  client: ${typeName}Client,`);
   out.push("  transport: RpcClientTransport,");
   out.push(`): ${typeName} {`);
@@ -535,8 +1176,7 @@ function emitClientAdapter(
         method.params.typeName,
         "param",
         method,
-        interfaceById,
-        nodeById,
+        ctx,
       )
       : null;
     const argList = (() => {
@@ -556,14 +1196,14 @@ function emitClientAdapter(
         emitClientParamConstruction(
           method,
           shape,
-          interfaceById,
+          ctx,
         )
       }, options);`,
     );
     const resultEmit = emitClientResultExtraction(
       method,
       shape,
-      interfaceById,
+      ctx,
     );
     if (resultEmit.length > 0) {
       out.push(`        ${resultEmit}`);
@@ -596,8 +1236,7 @@ function emitClientAdapter(
 function emitServerAdapter(
   out: string[],
   resolved: RpcResolvedInterfaceInfo,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
   separateServerTypeName: string | null,
 ): void {
   const typeName = resolved.info.typeName;
@@ -626,8 +1265,7 @@ function emitServerAdapter(
       emitServerInvocationArguments(
         method,
         shape,
-        interfaceById,
-        nodeById,
+        ctx,
         includeContext,
       )
     })`;
@@ -652,7 +1290,7 @@ function emitServerAdapter(
           emitServerResultConstruction(
             method,
             shape,
-            interfaceById,
+            ctx,
           )
         }`,
       );
@@ -752,8 +1390,7 @@ function emitServiceToken(
 function emitStreamSenderHelpers(
   out: string[],
   resolved: RpcResolvedInterfaceInfo,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): void {
   const typeName = resolved.info.typeName;
   for (const method of resolved.methods) {
@@ -765,8 +1402,7 @@ function emitStreamSenderHelpers(
     const paramType = streamSenderParamType(
       method,
       shape,
-      interfaceById,
-      nodeById,
+      ctx,
     );
     const valueName = shape.paramKind === "multi"
       ? "params"
@@ -837,8 +1473,7 @@ function emitHighLevelMethodJSDoc(
   shape: MethodShape,
   options: {
     role: "client" | "server";
-    interfaceById: Map<bigint, string>;
-    nodeById: Map<bigint, NodeModel>;
+    ctx: InterfaceEmitContext;
   },
 ): void {
   const lines = [
@@ -851,8 +1486,7 @@ function emitHighLevelMethodJSDoc(
   const valueDescription = highLevelMethodValueDescription(
     method,
     shape,
-    options.interfaceById,
-    options.nodeById,
+    options.ctx,
   );
   if (valueDescription) {
     lines.push(valueDescription);
@@ -886,15 +1520,14 @@ function emitHighLevelMethodJSDoc(
 function highLevelMethodValueDescription(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string | null {
   if (shape.paramKind !== "single") return null;
   if (shape.paramFieldKind === "interface") {
     const fieldTypeId = interfaceTypeIdFromSingleField(method.params.node);
     const interfaceName = fieldTypeId === null
       ? "interface"
-      : resolveInterfaceTypeName(fieldTypeId, interfaceById, nodeById);
+      : resolveInterfaceTypeName(fieldTypeId, ctx);
     return `@param value - Local \`${interfaceName}\` implementation or remote \`RpcStub<${interfaceName}>\` callback capability.`;
   }
   return `@param value - Flattened \`${method.params.typeName}.${shape
@@ -904,8 +1537,7 @@ function highLevelMethodValueDescription(
 function streamSenderParamType(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
   switch (shape.paramKind) {
     case "none":
@@ -917,8 +1549,7 @@ function streamSenderParamType(
         method.params.typeName,
         "param",
         method,
-        interfaceById,
-        nodeById,
+        ctx,
       );
     case "multi":
       return method.params.typeName;
@@ -976,19 +1607,14 @@ function singleFieldTypeExpression(
   structTypeName: string,
   position: "param" | "result",
   method: RpcResolvedMethodInfo,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
   if (fieldKind === "interface") {
     const fieldTypeId = interfaceTypeIdFromSingleField(
       position === "param" ? method.params.node : method.results?.node,
     );
     if (fieldTypeId === null) return "unknown";
-    const interfaceName = resolveInterfaceTypeName(
-      fieldTypeId,
-      interfaceById,
-      nodeById,
-    );
+    const interfaceName = resolveInterfaceTypeName(fieldTypeId, ctx);
     if (position === "param") {
       return `${interfaceName} | RpcStub<${interfaceName}>`;
     }
@@ -1010,42 +1636,88 @@ function interfaceTypeIdFromSingleField(
 
 function resolveInterfaceTypeName(
   typeId: bigint,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
-  const local = interfaceById.get(typeId);
+  const local = ctx.interfaceById.get(typeId);
   if (local) return local;
-  const node = nodeById.get(typeId);
+  const entry = ctx.imports.crossFileEntry(typeId);
+  if (entry?.kind === "interface") {
+    return ctx.imports.importTypeName(entry);
+  }
+  // Truly-unknown id: keep the historical bare-name fallback.
+  const node = ctx.nodeById.get(typeId);
   if (!node) return "unknown";
   return toPascalCase(simpleNodeName(node));
 }
 
-function resolveLocalInterfaceTokenName(
+/**
+ * Resolve an interface id to the token/factory expressions the current
+ * module can use to encode or decode capabilities of that interface.
+ *
+ * Local interfaces bind to the module's own declarations. Interfaces owned
+ * by another schema file in the request bind through value imports of the
+ * owning module's exported token and client factories; those bindings are
+ * only dereferenced inside generated method bodies (call time, never module
+ * init), which provides the deferral the locked cross-file design requires,
+ * so mutually-importing schema files cannot hit TDZ. Returns `null` only for
+ * truly-unknown ids (callers keep their capability-pointer fallbacks).
+ */
+function resolveInterfaceTokenBinding(
   typeId: bigint | undefined,
-  interfaceById: Map<bigint, string>,
-): string | null {
+  ctx: InterfaceEmitContext,
+): InterfaceTokenBinding | null {
   if (typeId === undefined) return null;
-  return interfaceById.get(typeId) ?? null;
+  const local = ctx.interfaceById.get(typeId);
+  if (local) {
+    return {
+      token: local,
+      createClient: `create${local}Client`,
+      createServiceClient: `create${local}ServiceClient`,
+    };
+  }
+  const entry = ctx.imports.crossFileEntry(typeId);
+  if (entry?.kind !== "interface") return null;
+  const typeName = entry.info.typeName;
+  return {
+    token: ctx.imports.importValueName(entry, typeName),
+    createClient: ctx.imports.importValueName(
+      entry,
+      `create${typeName}Client`,
+    ),
+    createServiceClient: ctx.imports.importValueName(
+      entry,
+      `create${typeName}ServiceClient`,
+    ),
+  };
+}
+
+/** Render the `(transport, capability) => highLevelClient` stub factory. */
+function serviceStubFactoryExpression(binding: InterfaceTokenBinding): string {
+  return `(nextTransport, nextCapability) => ${binding.createServiceClient}(${binding.createClient}(nextTransport, nextCapability), nextTransport)`;
 }
 
 function emitClientParamConstruction(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
+  ctx: InterfaceEmitContext,
 ): string {
   switch (shape.paramKind) {
     case "none":
       return `{} as ${method.params.typeName}`;
     case "single": {
       if (shape.paramFieldKind === "interface") {
-        const tokenName = resolveLocalInterfaceTokenName(
+        const binding = resolveInterfaceTokenBinding(
           shape.paramFieldInterfaceId,
-          interfaceById,
+          ctx,
         );
-        if (tokenName) {
+        if (binding) {
+          // The raw pointer is cast to the struct's typed-stub field: the
+          // low-level client dehydrates it back to a pointer before encoding.
           return `{ ${
             quoteIfNeeded(shape.paramFieldName!)
-          }: exportCapabilityFromTransport(transport, ${tokenName}, value) }`;
+          }: exportCapabilityFromTransport(transport, ${binding.token}, value) as unknown as ${method.params.typeName}[${
+            JSON.stringify(shape.paramFieldName!)
+          }] }`;
         }
         return `{ ${
           quoteIfNeeded(shape.paramFieldName!)
@@ -1061,7 +1733,7 @@ function emitClientParamConstruction(
 function emitClientResultExtraction(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
+  ctx: InterfaceEmitContext,
 ): string {
   if (method.isStreaming) return "return;";
   switch (shape.resultKind) {
@@ -1069,18 +1741,18 @@ function emitClientResultExtraction(
       return "return;";
     case "single": {
       if (shape.resultFieldKind === "interface") {
-        const tokenName = resolveLocalInterfaceTokenName(
+        const binding = resolveInterfaceTokenBinding(
           shape.resultFieldInterfaceId,
-          interfaceById,
+          ctx,
         );
-        if (!tokenName) {
+        if (!binding) {
           return `throw new ProtocolError("cannot decode non-local capability result for method ${method.methodName}", { metadata: { phase: "capability_resolve", methodName: ${
             JSON.stringify(method.methodName)
           }, methodId: ${method.method.codeOrder} } });`;
         }
         return `return capabilityToServiceStub(${
           accessProperty("result", shape.resultFieldName!)
-        }, transport, (nextTransport, nextCapability) => create${tokenName}ServiceClient(create${tokenName}Client(nextTransport, nextCapability), nextTransport));`;
+        }, transport, ${serviceStubFactoryExpression(binding)});`;
       }
       return `return ${accessProperty("result", shape.resultFieldName!)};`;
     }
@@ -1092,19 +1764,18 @@ function emitClientResultExtraction(
 function emitServerParamExtraction(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
 ): string {
   switch (shape.paramKind) {
     case "none":
       return "";
     case "single": {
       if (shape.paramFieldKind === "interface") {
-        const tokenName = resolveLocalInterfaceTokenName(
+        const binding = resolveInterfaceTokenBinding(
           shape.paramFieldInterfaceId,
-          interfaceById,
+          ctx,
         );
-        if (!tokenName) {
+        if (!binding) {
           return `requireRpcStubCapability(${
             accessProperty("params", shape.paramFieldName!)
           } as unknown) as unknown as ${
@@ -1114,14 +1785,15 @@ function emitServerParamExtraction(
               method.params.typeName,
               "param",
               method,
-              interfaceById,
-              nodeById,
+              ctx,
             )
           }`;
         }
         return `capabilityToServiceStub(${
           accessProperty("params", shape.paramFieldName!)
-        }, requireOutboundClient(_ctx), (nextTransport, nextCapability) => create${tokenName}ServiceClient(create${tokenName}Client(nextTransport, nextCapability), nextTransport))`;
+        }, requireOutboundClient(_ctx), ${
+          serviceStubFactoryExpression(binding)
+        })`;
       }
       return `${accessProperty("params", shape.paramFieldName!)}`;
     }
@@ -1133,16 +1805,14 @@ function emitServerParamExtraction(
 function emitServerInvocationArguments(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
-  nodeById: Map<bigint, NodeModel>,
+  ctx: InterfaceEmitContext,
   includeContext: boolean,
 ): string {
   const args: string[] = [];
   const params = emitServerParamExtraction(
     method,
     shape,
-    interfaceById,
-    nodeById,
+    ctx,
   );
   if (params.length > 0) args.push(params);
   if (includeContext) args.push("_ctx");
@@ -1152,7 +1822,7 @@ function emitServerInvocationArguments(
 function emitServerResultConstruction(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
-  interfaceById: Map<bigint, string>,
+  ctx: InterfaceEmitContext,
 ): string {
   if (method.isStreaming) return "return;";
   switch (shape.resultKind) {
@@ -1160,14 +1830,18 @@ function emitServerResultConstruction(
       return `return {} as ${method.results!.typeName};`;
     case "single": {
       if (shape.resultFieldKind === "interface") {
-        const tokenName = resolveLocalInterfaceTokenName(
+        const binding = resolveInterfaceTokenBinding(
           shape.resultFieldInterfaceId,
-          interfaceById,
+          ctx,
         );
-        if (tokenName) {
+        if (binding) {
+          // The raw pointer is cast to the struct's typed-stub field: the
+          // dispatch layer dehydrates it back to a pointer before encoding.
           return `return { ${
             quoteIfNeeded(shape.resultFieldName!)
-          }: exportCapabilityFromContext(_ctx, ${tokenName}, result) };`;
+          }: exportCapabilityFromContext(_ctx, ${binding.token}, result) as unknown as ${
+            method.results!.typeName
+          }[${JSON.stringify(shape.resultFieldName!)}] };`;
         }
         return `return { ${
           quoteIfNeeded(shape.resultFieldName!)

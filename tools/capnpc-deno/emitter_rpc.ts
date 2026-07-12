@@ -7,7 +7,11 @@ import {
   type NodeModel,
   STREAM_RESULT_TYPE_ID,
 } from "./model.ts";
-import type { InterfaceInfo, StructInfo } from "./emitter_helpers.ts";
+import type {
+  CapabilityWalkerNames,
+  InterfaceInfo,
+  StructInfo,
+} from "./emitter_helpers.ts";
 import {
   collectLocalInterfaces,
   collectLocalTypes,
@@ -145,18 +149,30 @@ export function emitRpcModule(
   return out.join("\n");
 }
 
+/**
+ * Emit the low-level client/server definitions for every interface.
+ *
+ * `capabilityWalkers` maps cap-bearing struct ids to the module-local
+ * dehydrate/hydrate walker names emitted by the types module: method
+ * param/result structs found in the map get their capability fields
+ * dehydrated (stub -> pointer) before encoding and hydrated (pointer ->
+ * typed stub) after decoding. When omitted (the legacy standalone rpc
+ * module template), the raw structs pass straight through as before.
+ */
 export function emitRpcInterfaceDefinitions(
   out: string[],
   resolvedInterfaces: RpcResolvedInterfaceInfo[],
+  capabilityWalkers?: ReadonlyMap<bigint, CapabilityWalkerNames>,
 ): void {
   for (const resolvedInfo of resolvedInterfaces) {
-    emitInterfaceCode(out, resolvedInfo);
+    emitInterfaceCode(out, resolvedInfo, capabilityWalkers);
   }
 }
 
 function emitInterfaceCode(
   out: string[],
   resolvedInfo: ResolvedInterfaceInfo,
+  capabilityWalkers?: ReadonlyMap<bigint, CapabilityWalkerNames>,
 ): void {
   const info = resolvedInfo.info;
   const resolvedMethods = resolvedInfo.methods;
@@ -210,15 +226,27 @@ function emitInterfaceCode(
     const returnType = resolved.isStreaming
       ? "void"
       : resolved.results!.typeName;
+    const paramWalkers = capabilityWalkers?.get(resolved.params.id);
+    const resultWalkers = resolved.results
+      ? capabilityWalkers?.get(resolved.results.id)
+      : undefined;
+    const paramsExpression = paramWalkers
+      ? `${paramWalkers.dehydrate}(params)`
+      : "params";
+    const hydrateResult = (decodeExpression: string): string =>
+      resultWalkers
+        ? `${resultWalkers.hydrate}(${decodeExpression}, () => transport)`
+        : decodeExpression;
     out.push(
       `    ${
         quoteIfNeeded(resolved.methodName)
       }: async (params: ${resolved.params.typeName}, options?: RpcCallOptions): Promise<${returnType}> => {`,
     );
     out.push("      try {");
-    // Encode params with cap table support (handles capability parameters)
+    // Encode params with cap table support (handles capability parameters);
+    // dehydration converts typed RpcStub fields into raw capability pointers.
     out.push(
-      `        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, params);`,
+      `        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, ${paramsExpression});`,
     );
     out.push("        let questionId: number | undefined;");
     out.push(
@@ -251,9 +279,15 @@ function emitInterfaceCode(
       out.push("            return;");
     } else {
       out.push(
-        `            return decodeStructMessageWithCaps(${
-          resolved.results!.descriptorConst
-        }, raw.contentBytes, raw.capTable) as ${resolved.results!.typeName};`,
+        `            return ${
+          hydrateResult(
+            `decodeStructMessageWithCaps(${
+              resolved.results!.descriptorConst
+            }, raw.contentBytes, raw.capTable) as ${
+              resolved.results!.typeName
+            }`,
+          )
+        };`,
       );
     }
     out.push("          } finally {");
@@ -278,9 +312,13 @@ function emitInterfaceCode(
       out.push("          return;");
     } else {
       out.push(
-        `          return decodeStructMessageWithCaps(${
-          resolved.results!.descriptorConst
-        }, response, []) as ${resolved.results!.typeName};`,
+        `          return ${
+          hydrateResult(
+            `decodeStructMessageWithCaps(${
+              resolved.results!.descriptorConst
+            }, response, []) as ${resolved.results!.typeName}`,
+          )
+        };`,
       );
     }
     out.push("        } finally {");
@@ -368,6 +406,7 @@ function emitInterfaceCode(
         out,
         methodsByInterfaceId.get(interfaceId) ?? [],
         "          ",
+        capabilityWalkers,
       );
       out.push("        }");
     }
@@ -381,6 +420,7 @@ function emitInterfaceCode(
       out,
       methodsByInterfaceId.get(info.id) ?? [],
       "      ",
+      capabilityWalkers,
     );
   }
 
@@ -537,12 +577,23 @@ function emitServerMethodSwitch(
   out: string[],
   methods: ResolvedMethodInfo[],
   indent: string,
+  capabilityWalkers?: ReadonlyMap<bigint, CapabilityWalkerNames>,
 ): void {
   out.push(`${indent}switch (methodId) {`);
   for (const resolved of methods) {
+    const paramWalkers = capabilityWalkers?.get(resolved.params.id);
+    const resultWalkers = resolved.results
+      ? capabilityWalkers?.get(resolved.results.id)
+      : undefined;
+    const decodeExpression =
+      `decodeStructMessageWithCaps(${resolved.params.descriptorConst}, params, ctx.paramsCapTable ?? []) as ${resolved.params.typeName}`;
     out.push(`${indent}  case ${resolved.method.codeOrder}: {`);
     out.push(
-      `${indent}    const decoded = decodeStructMessageWithCaps(${resolved.params.descriptorConst}, params, ctx.paramsCapTable ?? []) as ${resolved.params.typeName};`,
+      `${indent}    const decoded = ${
+        paramWalkers
+          ? `${paramWalkers.hydrate}(${decodeExpression}, () => requireOutboundClient(ctx))`
+          : decodeExpression
+      };`,
     );
     out.push(
       `${indent}    const result = await server[${
@@ -556,7 +607,9 @@ function emitServerMethodSwitch(
       out.push(
         `${indent}    const encoded = encodeStructMessageWithCaps(${
           resolved.results!.descriptorConst
-        }, result);`,
+        }, ${
+          resultWalkers ? `${resultWalkers.dehydrate}(result)` : "result"
+        });`,
       );
       out.push(`${indent}    if (encoded.capTable.length > 0) {`);
       out.push(

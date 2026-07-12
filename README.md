@@ -95,7 +95,18 @@ Generated outputs include:
 
 - `*_types.ts` typed codecs + RPC helpers
 - `*_meta.ts` reflection metadata
-- `generated/mod.ts` barrel (unless disabled)
+- `generated/mod.ts` namespaced barrel (unless disabled): one
+  `export * as <name>` per module, so schemas that declare the same type or
+  method names never collide
+
+```ts
+// generated/mod.ts re-exports each module under its own namespace:
+//   export * as schemaPerson from "./schema/person_types.ts";
+//   export * as schemaPersonMeta from "./schema/person_meta.ts";
+import { schemaPerson } from "./generated/mod.ts";
+
+const bytes = schemaPerson.PersonCodec.encode(input);
+```
 
 ### 2) RPC Runtime + Typed Client/Server Stubs
 
@@ -399,7 +410,12 @@ GitHub release assets:
 
 Useful options:
 
-- `--layout schema|flat`
+- `--layout schema|flat` — `schema` mirrors the schema directory tree; `flat`
+  emits every module side by side. When two schema files in one flat run share a
+  basename (e.g. `a/x.capnp` and `b/x.capnp`), each colliding module is named by
+  its schema-relative path with `/` flattened to `_` (`a_x_types.ts`,
+  `b_x_types.ts`); generate such bundles together in one run so cross-file
+  import specifiers agree with the emitted filenames
 - `--no-barrel`
 - `--plugin-response`
 - `--config path/to/capnpc-deno.toml`

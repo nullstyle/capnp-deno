@@ -1,0 +1,40 @@
+// Source hygiene for the capnpc-deno tool sources and their tests.
+//
+// Regression for a literal NUL byte (0x00) that was once embedded inside a
+// template literal in emitter_helpers.ts: raw control bytes survive copy
+// and paste, silently break line-based tooling, and are invisible in review,
+// so control characters below 0x09 must always be written as escape
+// sequences (e.g. "\u0000") instead. This scan also covers
+// tests/codegen/ -- an earlier version policed only the tool sources and
+// so could not catch a raw NUL that landed in this very file.
+
+import { assert } from "../test_utils.ts";
+
+const SCAN_DIRS: Array<{ label: string; url: URL }> = [
+  {
+    label: "tools/capnpc-deno",
+    url: new URL("../../tools/capnpc-deno/", import.meta.url),
+  },
+  { label: "tests/codegen", url: new URL("./", import.meta.url) },
+];
+
+Deno.test("capnpc-deno sources contain no raw control bytes below 0x09", async () => {
+  let scanned = 0;
+  for (const { label, url } of SCAN_DIRS) {
+    for await (const entry of Deno.readDir(url)) {
+      if (!entry.isFile || !entry.name.endsWith(".ts")) continue;
+      scanned += 1;
+      const bytes = await Deno.readFile(new URL(entry.name, url));
+      for (let offset = 0; offset < bytes.length; offset += 1) {
+        const byte = bytes[offset];
+        assert(
+          byte >= 0x09,
+          `${label}/${entry.name} contains raw control byte 0x` +
+            `${byte.toString(16).padStart(2, "0")} at offset ${offset}; ` +
+            "write it as an escape sequence instead",
+        );
+      }
+    }
+  }
+  assert(scanned > 0, "expected to scan at least one *.ts source file");
+});

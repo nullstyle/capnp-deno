@@ -14,7 +14,12 @@ import type {
   NodeModel,
 } from "./model.ts";
 
-import { toCamelCase, toOutputPath } from "./emitter_helpers.ts";
+import type { CrossSchemaImportRef } from "./emitter_helpers.ts";
+import {
+  buildModuleIndex,
+  toCamelCase,
+  toOutputPath,
+} from "./emitter_helpers.ts";
 import { emitTypesModule } from "./emitter_types_module.ts";
 import { emitMetaModule } from "./emitter_meta.ts";
 import { emitRpcWireConstantsModule } from "./emitter_rpc_wire_constants.ts";
@@ -27,6 +32,12 @@ export interface GeneratedFile {
   path: string;
   contents: string;
   sourceFilename?: string;
+  /**
+   * Sibling generated modules this file imports from, keyed by the flat
+   * specifier emitted into `contents`. The CLI uses this to rewrite the
+   * specifiers to layout-correct relative paths.
+   */
+  crossSchemaImports?: CrossSchemaImportRef[];
 }
 
 // ---------------------------------------------------------------------------
@@ -41,17 +52,22 @@ export function generateTypescriptFiles(
     nodeById.set(node.id, node);
   }
 
+  const moduleIndex = buildModuleIndex(request, nodeById);
+
   const files: GeneratedFile[] = [];
   for (const requested of request.requestedFiles) {
     const fileNode = nodeById.get(requested.id);
     if (!fileNode || fileNode.kind !== "file") continue;
 
     const typesPath = toOutputPath(requested.filename, "types");
-    const typesContents = emitTypesModule(fileNode, nodeById);
+    const typesModule = emitTypesModule(fileNode, nodeById, moduleIndex);
     files.push({
       path: typesPath,
-      contents: typesContents,
+      contents: typesModule.contents,
       sourceFilename: requested.filename,
+      ...(typesModule.crossSchemaImports.length > 0
+        ? { crossSchemaImports: typesModule.crossSchemaImports }
+        : {}),
     });
 
     const metaPath = toOutputPath(requested.filename, "meta");

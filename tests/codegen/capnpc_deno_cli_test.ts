@@ -1,5 +1,6 @@
 import {
   applyImplicitPluginDefaults,
+  barrelNamespaceIdentifier,
   computeIncludePaths,
   discoverSchemaFiles,
   finalizeGeneratedFiles,
@@ -144,36 +145,45 @@ Deno.test("capnpc-deno CLI maps schema layout and emits barrel", () => {
   assertEquals(output[4].path, "person_types.ts");
   assertEquals(output[5].path, "mod.ts");
   assert(
-    output[5].contents.includes('export * from "./person_capnp.ts";'),
-    "expected barrel export for person schema",
+    output[5].contents.includes(
+      'export * as personCapnp from "./person_capnp.ts";',
+    ),
+    "expected namespaced barrel export for person schema",
   );
   assert(
     output[5].contents.includes(
-      'export * from "./person_rpc.ts";',
+      'export * as personRpc from "./person_rpc.ts";',
     ),
-    "expected barrel export for person rpc module",
+    "expected namespaced barrel export for person rpc module",
   );
   assert(
     output[5].contents.includes(
-      'export * from "./person_types.ts";',
+      'export * as person from "./person_types.ts";',
     ),
-    "expected barrel export for person types module",
+    "expected namespaced barrel export for person types module",
   );
   assert(
     output[5].contents.includes(
-      'export * from "./person_meta.ts";',
+      'export * as personMeta from "./person_meta.ts";',
     ),
-    "expected barrel export for person meta module",
+    "expected namespaced barrel export for person meta module",
   );
   assert(
     output[5].contents.includes(
-      'export * from "./nested/addressbook_capnp.ts";',
+      'export * as nestedAddressbookCapnp from "./nested/addressbook_capnp.ts";',
     ),
-    "expected barrel export for nested schema",
+    "expected namespaced barrel export for nested schema",
+  );
+  assert(
+    !output[5].contents.includes("export * from"),
+    "expected no flat re-exports to remain in the barrel",
   );
 });
 
-Deno.test("capnpc-deno CLI reports output collisions in flat layout", () => {
+Deno.test("capnpc-deno CLI flat layout disambiguates same-basename schema files", () => {
+  // Two schema files sharing a basename used to abort flat runs with an
+  // output-path collision; each claimant now takes its schema-relative path
+  // with "/" flattened to "_".
   const generated: GeneratedFile[] = [
     {
       path: "same_capnp.ts",
@@ -185,6 +195,25 @@ Deno.test("capnpc-deno CLI reports output collisions in flat layout", () => {
       sourceFilename: "two/same.capnp",
       contents: "// two",
     },
+  ];
+
+  const out = finalizeGeneratedFiles(generated, {
+    layout: "flat",
+    srcDirs: [],
+    emitBarrel: false,
+  });
+  assertEquals(
+    out.map((file) => file.path).join(","),
+    "one_same_capnp.ts,two_same_capnp.ts",
+  );
+});
+
+Deno.test("capnpc-deno CLI reports flat collisions it cannot disambiguate", () => {
+  // Without source filenames there is no schema path to disambiguate with,
+  // so the collision must still fail loudly.
+  const generated: GeneratedFile[] = [
+    { path: "same_capnp.ts", contents: "// one" },
+    { path: "same_capnp.ts", contents: "// two" },
   ];
 
   assertThrows(
@@ -946,7 +975,9 @@ Deno.test("capnpc-deno CLI flattens a single absolute --schema input to its base
   assertEquals(output[0].path, "person_codegen_types.ts");
   assertEquals(output[1].path, "mod.ts");
   assert(
-    output[1].contents.includes('export * from "./person_codegen_types.ts";'),
+    output[1].contents.includes(
+      'export * as personCodegen from "./person_codegen_types.ts";',
+    ),
     "expected barrel to export the flattened, non-mirrored module",
   );
 });
@@ -1118,12 +1149,48 @@ Deno.test("capnpc-deno CLI normalizes output paths and rejects empty normalized 
 Deno.test("capnpc-deno CLI barrel rendering preserves explicit relative specifiers", () => {
   const source = renderBarrelModule(["./already.ts", "nested/file.ts"]);
   assert(
-    source.includes('export * from "./already.ts";'),
+    source.includes('export * as already from "./already.ts";'),
     "expected explicit relative specifier to be preserved",
   );
   assert(
-    source.includes('export * from "./nested/file.ts";'),
+    source.includes('export * as nestedFile from "./nested/file.ts";'),
     "expected implicit relative specifier to be normalized",
+  );
+});
+
+Deno.test("capnpc-deno CLI barrel namespaces are sanitized valid identifiers", () => {
+  // _types is the primary surface and drops its suffix; _meta keeps a Meta
+  // tail; directories join the stem so sibling schemas with the same basename
+  // stay distinct.
+  assertEquals(barrelNamespaceIdentifier("person_types.ts"), "person");
+  assertEquals(barrelNamespaceIdentifier("person_meta.ts"), "personMeta");
+  assertEquals(barrelNamespaceIdentifier("a/schema_types.ts"), "aSchema");
+  assertEquals(barrelNamespaceIdentifier("b/schema_types.ts"), "bSchema");
+  assertEquals(
+    barrelNamespaceIdentifier("nested/deep_meta.ts"),
+    "nestedDeepMeta",
+  );
+  // Sanitization: leading digits and reserved words cannot become bare
+  // namespace bindings.
+  assertEquals(barrelNamespaceIdentifier("1st_schema_types.ts"), "$1stSchema");
+  assertEquals(barrelNamespaceIdentifier("default_types.ts"), "default$");
+  assertEquals(barrelNamespaceIdentifier("class_types.ts"), "class$");
+  // Strict-mode-restricted identifiers: modules always run in strict mode,
+  // so a bare `eval` / `arguments` binding would be a syntax error downstream.
+  assertEquals(barrelNamespaceIdentifier("eval_types.ts"), "eval$");
+  assertEquals(barrelNamespaceIdentifier("arguments_types.ts"), "arguments$");
+
+  // Distinct paths that sanitize to the same identifier are uniqued
+  // deterministically in sorted-entry order ("foo_bar_types.ts" sorts before
+  // "foo/bar_types.ts" under localeCompare).
+  const source = renderBarrelModule(["foo/bar_types.ts", "foo_bar_types.ts"]);
+  assert(
+    source.includes('export * as fooBar from "./foo_bar_types.ts";'),
+    "expected first sorted entry to keep the base namespace",
+  );
+  assert(
+    source.includes('export * as fooBar2 from "./foo/bar_types.ts";'),
+    "expected colliding namespace to be uniqued with a numeric suffix",
   );
 });
 
@@ -1180,6 +1247,16 @@ Deno.test("capnpc-deno CLI parses machine-generated barrel entries", () => {
     "a_types.ts,b_types.ts,nested/c_meta.ts",
   );
   assertEquals(parseBarrelModuleEntries(renderBarrelModule([]))?.length, 0);
+
+  // Legacy flat barrels (from releases before namespaced barrels) must keep
+  // parsing so a merge can migrate them to the namespaced form.
+  assertEquals(
+    parseBarrelModuleEntries(
+      '// Generated by capnpc-deno\nexport * from "./a_types.ts";\nexport * from "./a_meta.ts";\n',
+    )?.join(","),
+    "a_types.ts,a_meta.ts",
+    "expected legacy flat barrel entries to parse for migration",
+  );
 
   assertEquals(
     parseBarrelModuleEntries('export * from "./a_types.ts";\n'),
@@ -1295,7 +1372,7 @@ Deno.test("capnpc-deno CLI barrel merge drops stale entries and skips hand-writt
     const barrel = merged.find((file) => file.path === "mod.ts");
     assert(barrel !== undefined, "expected merged output to include barrel");
     assert(
-      barrel.contents.includes('export * from "./a_types.ts";'),
+      barrel.contents.includes('export * as a from "./a_types.ts";'),
       "expected existing module with file on disk to be preserved",
     );
     assert(
@@ -1313,6 +1390,52 @@ Deno.test("capnpc-deno CLI barrel merge drops stale entries and skips hand-writt
     assert(
       merged === current,
       "expected hand-written barrel to be overwritten, not merged",
+    );
+  });
+});
+
+Deno.test("capnpc-deno CLI barrel merge migrates legacy flat barrels to the namespaced form", async () => {
+  const current = finalizeGeneratedFiles(
+    [
+      {
+        path: "b_types.ts",
+        sourceFilename: "schema/b.capnp",
+        contents: "// b types",
+      },
+    ],
+    { layout: "flat", srcDirs: [], emitBarrel: true },
+  );
+
+  // An old-form barrel written by a release before namespaced barrels: the
+  // entries carry the same module paths, so a merge rewrites them namespaced.
+  const legacyDisk = new Map<string, string>([
+    [
+      "gen/mod.ts",
+      "// Generated by capnpc-deno\n// DO NOT EDIT MANUALLY.\n\n" +
+      'export * from "./a_meta.ts";\nexport * from "./a_types.ts";\n',
+    ],
+    ["gen/a_types.ts", "// a types"],
+    ["gen/a_meta.ts", "// a meta"],
+  ]);
+  await withFakeOutputDir(legacyDisk, async () => {
+    const merged = await mergeBarrelWithExistingModule(current, "gen");
+    const barrel = merged.find((file) => file.path === "mod.ts");
+    assert(barrel !== undefined, "expected merged output to include barrel");
+    assertEquals(
+      barrel.contents,
+      renderBarrelModule(["a_meta.ts", "a_types.ts", "b_types.ts"]),
+    );
+    assert(
+      barrel.contents.includes('export * as a from "./a_types.ts";'),
+      "expected legacy flat entry to be rewritten as a namespaced export",
+    );
+    assert(
+      barrel.contents.includes('export * as aMeta from "./a_meta.ts";'),
+      "expected legacy meta entry to be rewritten as a namespaced export",
+    );
+    assert(
+      !barrel.contents.includes("export * from"),
+      "expected migration to leave no flat re-exports behind",
     );
   });
 });

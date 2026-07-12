@@ -102,8 +102,32 @@ Deno.test("capnpc-deno generates interface/anyPointer codec surface", () => {
   );
   const source = types.contents;
   assert(
-    source.includes("cap: CapabilityPointer | null;"),
-    "expected interface pointer field type",
+    source.includes("cap: RpcStub<Pinger> | null;"),
+    "expected typed stub field for a same-file interface-typed struct field",
+  );
+  assert(
+    !source.includes("cap: CapabilityPointer | null;"),
+    "same-file interface struct fields must not stay raw capability pointers",
+  );
+  // The cap-bearing struct gets capability walkers, and its codec dehydrates
+  // live stubs back to raw pointers before encoding.
+  assert(
+    source.includes(
+      "function dehydrateStubs$Holder(value: Holder): Holder {",
+    ),
+    "expected the dehydrate walker for the cap-bearing struct",
+  );
+  assert(
+    source.includes(
+      "function hydrateStubs$Holder(value: Holder, transport: () => RpcClientTransport): Holder {",
+    ),
+    "expected the hydrate walker for the cap-bearing struct",
+  );
+  assert(
+    source.includes(
+      "encodeStructMessage(HolderStruct, dehydrateStubs$Holder(value)),",
+    ),
+    "expected the cap-bearing struct codec to dehydrate stubs on encode",
   );
   assert(
     source.includes("dyn: AnyPointerValue;"),

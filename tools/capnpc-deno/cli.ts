@@ -405,13 +405,136 @@ export function finalizeGeneratedFiles(
     ...options.srcDirs,
     ...absoluteSchemaLayoutRoots(schemas),
   ];
+  // Cross-schema import targets can be import-only files that were never a
+  // --schema input, so on top of reconstructSource they may also need
+  // re-anchoring under an absolute schema layout root (capnp strips the
+  // leading "/" from absolute paths).
+  const absoluteSchemaRoots = schemaRoots
+    .map((root) => trimTrailingSlash(normalizePath(root)))
+    .filter((root) => root.length > 0 && isAbsolutePath(root));
+  const reconstructImportTargetSource = (name: string): string => {
+    const source = reconstructSource(name);
+    if (isAbsolutePath(source)) return source;
+    const reconstructed = `/${normalizeRelativeSegments(source)}`;
+    if (
+      absoluteSchemaRoots.some((root) =>
+        reconstructed === root || reconstructed.startsWith(`${root}/`)
+      )
+    ) {
+      return reconstructed;
+    }
+    return source;
+  };
+  // Flat layout collapses every generated module onto its basename, so two
+  // schema files with the same basename in different directories would land
+  // on one output path. Disambiguation rule: when 2+ distinct schema files in
+  // this run (generated files AND cross-schema import targets) claim the same
+  // flat filename, EVERY claimant's output name becomes its schema-relative
+  // path with "/" flattened to "_" (e.g. "a/x.capnp" -> "a_x_types.ts",
+  // "b/x.capnp" -> "b_x_types.ts"), reusing the same schema-root derivation
+  // as --layout schema (including the absolute-input common-ancestor rooting
+  // from c299914). Unique basenames keep their historical flat names.
+  const flatClaimants = new Map<string, Set<string>>();
+  const claimFlatName = (emitterPath: string, source: string): void => {
+    const flatName = basenamePath(normalizePath(emitterPath));
+    let owners = flatClaimants.get(flatName);
+    if (!owners) {
+      owners = new Set();
+      flatClaimants.set(flatName, owners);
+    }
+    owners.add(normalizePath(source));
+  };
+  if (options.layout === "flat") {
+    for (const file of generated) {
+      if (file.sourceFilename !== undefined) {
+        claimFlatName(file.path, reconstructSource(file.sourceFilename));
+      }
+      for (const ref of file.crossSchemaImports ?? []) {
+        claimFlatName(
+          ref.specifier,
+          reconstructImportTargetSource(ref.targetSourceFilename),
+        );
+      }
+    }
+  }
+  const flatOutputPath = (
+    emitterPath: string,
+    source: string | undefined,
+    kind: "file" | "importTarget",
+  ): string => {
+    // Generated files keep the emitter-provided path verbatim (normalized;
+    // parent traversal is still rejected by ensureSafeOutputPath). Import
+    // TARGETS are collapsed to their basename: ambiguity-qualified emitter
+    // specifiers carry directory segments that never exist on disk in flat
+    // layout.
+    const normalized = normalizePath(emitterPath);
+    const flatName = kind === "importTarget"
+      ? basenamePath(normalized)
+      : normalized;
+    if (source === undefined) return flatName;
+    const owners = flatClaimants.get(basenamePath(normalized));
+    if (!owners || owners.size < 2) return flatName;
+    const schemaRel = deriveSchemaRelativePath(source, schemaRoots);
+    if (!schemaRel) return flatName;
+    return toModulePathFromSchema(schemaRel, detectGeneratedSuffix(emitterPath))
+      .split("/")
+      .join("_");
+  };
+  const mapOutputPath = (
+    file: GeneratedFile,
+    kind: "file" | "importTarget",
+  ): string =>
+    options.layout === "flat"
+      ? flatOutputPath(file.path, file.sourceFilename, kind)
+      : mapGeneratedFilePath(file, options.layout, schemaRoots);
+  // The emitter writes cross-module imports as sibling specifiers (e.g.
+  // "./base_types.ts"). Remap each one through the same layout machinery as
+  // the files themselves so the specifier stays correct wherever the target
+  // module lands — including targets not emitted by this run. All specifier
+  // replacements for one file are applied in a single simultaneous pass: a
+  // rewritten specifier can textually equal ANOTHER ref's original specifier
+  // (e.g. "./nested/x_types.ts" -> "./x_types.ts" while "./x_types.ts" ->
+  // "../x_types.ts"), and sequential replaceAll would clobber it.
+  const rewriteCrossSchemaImports = (
+    file: GeneratedFile,
+    mappedPath: string,
+  ): string => {
+    const replacements = new Map<string, string>();
+    for (const ref of file.crossSchemaImports ?? []) {
+      const flatPath = ref.specifier.startsWith("./")
+        ? ref.specifier.slice(2)
+        : ref.specifier;
+      const targetMapped = ensureSafeOutputPath(mapOutputPath({
+        path: flatPath,
+        contents: "",
+        sourceFilename: reconstructImportTargetSource(
+          ref.targetSourceFilename,
+        ),
+      }, "importTarget"));
+      const specifier = relativeModuleSpecifier(mappedPath, targetMapped);
+      if (specifier !== ref.specifier) {
+        replacements.set(
+          JSON.stringify(ref.specifier),
+          JSON.stringify(specifier),
+        );
+      }
+    }
+    if (replacements.size === 0) return file.contents;
+    const pattern = [...replacements.keys()]
+      .map(escapeRegExpLiteral)
+      .join("|");
+    return file.contents.replace(
+      new RegExp(pattern, "g"),
+      (match) => replacements.get(match) ?? match,
+    );
+  };
   const out: GeneratedFile[] = [];
   const pathToSource = new Map<string, string>();
   for (const file of generated) {
     const resolved = file.sourceFilename === undefined
       ? file
       : { ...file, sourceFilename: reconstructSource(file.sourceFilename) };
-    const mapped = mapGeneratedFilePath(resolved, options.layout, schemaRoots);
+    const mapped = mapOutputPath(resolved, "file");
     const safePath = ensureSafeOutputPath(mapped);
     const source = file.sourceFilename ?? file.path;
     const prior = pathToSource.get(safePath);
@@ -423,7 +546,7 @@ export function finalizeGeneratedFiles(
     pathToSource.set(safePath, source);
     out.push({
       path: safePath,
-      contents: file.contents,
+      contents: rewriteCrossSchemaImports(file, safePath),
       sourceFilename: file.sourceFilename,
     });
   }
@@ -552,6 +675,90 @@ function normalizeRelativeSegments(value: string): string {
 
 const GENERATED_MODULE_HEADER = "// Generated by capnpc-deno";
 
+// Reserved words that cannot be used as a plain `export * as <name>` binding
+// without confusing downstream `import { <name> }` sites. Includes the
+// strict-mode-restricted identifiers "eval" and "arguments", which are
+// invalid binding names in downstream module code. Sanitized with a trailing
+// "$" so the namespace stays predictable.
+const BARREL_NAMESPACE_RESERVED_WORDS = new Set([
+  "arguments",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "eval",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+
+/**
+ * Derive the barrel namespace identifier for a generated module path.
+ *
+ * The whole output-relative path participates (so `a/schema_types.ts` and
+ * `b/schema_types.ts` get distinct namespaces), a trailing `_types` suffix is
+ * dropped (the types module is the primary surface of a schema), and the
+ * remaining words are camelCased into a valid TS identifier: `x_types.ts` ->
+ * `x`, `x_meta.ts` -> `xMeta`, `nested/deep_types.ts` -> `nestedDeep`.
+ */
+export function barrelNamespaceIdentifier(modulePath: string): string {
+  const normalized = normalizePath(modulePath);
+  let stem = normalized.endsWith(".ts")
+    ? normalized.slice(0, -".ts".length)
+    : normalized;
+  if (stem.endsWith("_types")) stem = stem.slice(0, -"_types".length);
+  const words = stem.split(/[^A-Za-z0-9]+/).filter((word) => word.length > 0);
+  let name = "";
+  for (const word of words) {
+    name += name.length === 0
+      ? word[0].toLowerCase() + word.slice(1)
+      : word[0].toUpperCase() + word.slice(1);
+  }
+  if (name.length === 0) name = "module";
+  if (/^[0-9]/.test(name)) name = `$${name}`;
+  if (BARREL_NAMESPACE_RESERVED_WORDS.has(name)) name = `${name}$`;
+  return name;
+}
+
 export function renderBarrelModule(paths: string[]): string {
   const entries = [
     ...new Set(
@@ -568,9 +775,19 @@ export function renderBarrelModule(paths: string[]): string {
   if (entries.length === 0) {
     out.push("export {};");
   } else {
+    // Namespaced re-exports: distinct generated modules legitimately export
+    // identical names (shared runtime re-exports, same-named domain types),
+    // so a flat `export * from` barrel would collide. Uniquing keeps the
+    // barrel valid even when two paths sanitize to the same identifier;
+    // entries are sorted, so the numbering is deterministic.
+    const usedNames = new Set<string>();
     for (const entry of entries) {
       const specifier = entry.startsWith(".") ? entry : `./${entry}`;
-      out.push(`export * from ${JSON.stringify(specifier)};`);
+      const base = barrelNamespaceIdentifier(entry);
+      let name = base;
+      for (let n = 2; usedNames.has(name); n += 1) name = `${base}${n}`;
+      usedNames.add(name);
+      out.push(`export * as ${name} from ${JSON.stringify(specifier)};`);
     }
   }
   out.push("");
@@ -580,10 +797,13 @@ export function renderBarrelModule(paths: string[]): string {
 /**
  * Parse the export entries of a machine-generated `mod.ts` barrel module.
  *
- * Only sources produced by {@link renderBarrelModule} are accepted: the
- * generated header must be present and every non-comment line must be a
- * simple `export * from "...";` statement pointing at a relative module path
- * without parent traversal.
+ * Only machine-generated sources are accepted: the generated header must be
+ * present and every non-comment line must be a namespaced
+ * `export * as name from "...";` statement (as produced by
+ * {@link renderBarrelModule}) or a legacy flat `export * from "...";`
+ * statement (produced by earlier releases; accepting it lets a merge migrate
+ * an old barrel to the namespaced form, since both carry the same module
+ * path). Module paths must be relative without parent traversal.
  *
  * @param source - Contents of a candidate barrel module.
  * @returns Normalized module paths (without a leading `./`), or `null` when
@@ -602,7 +822,9 @@ export function parseBarrelModuleEntries(source: string): string[] | null {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith("//")) continue;
     if (trimmed === "export {};") continue;
-    const match = trimmed.match(/^export \* from "([^"]+)";$/);
+    const match = trimmed.match(
+      /^export \* (?:as [A-Za-z$_][A-Za-z0-9$_]* )?from "([^"]+)";$/,
+    );
     if (!match) return null;
     const specifier = match[1];
     const normalized = normalizePath(
@@ -631,7 +853,9 @@ export function parseBarrelModuleEntries(source: string): string[] | null {
  * Existing entries are kept only when their module file still exists on disk
  * and is not superseded by the current run. When `outDir` has no barrel, the
  * barrel is hand-written, or nothing needs to be preserved, `outputFiles` is
- * returned unchanged (the current run's barrel wins).
+ * returned unchanged (the current run's barrel wins). A legacy flat
+ * `export * from` barrel is migrated on merge: its preserved entries are
+ * re-rendered in the namespaced form together with the current run's.
  *
  * @param outputFiles - Finalized files of the current run, including the
  * rendered barrel produced by {@link finalizeGeneratedFiles}.
@@ -1013,6 +1237,32 @@ function resolvePathFromBase(baseDir: string, value: string): string {
   if (isAbsolutePath(normalizedValue)) return normalizedValue;
   if (baseDir === ".") return normalizedValue;
   return normalizePath(joinPath(baseDir, normalizedValue));
+}
+
+// Relative import specifier from one generated module to another, both given
+// as normalized output-relative paths. Used only by finalizeGeneratedFiles to
+// rewrite cross-schema import specifiers after layout mapping.
+function relativeModuleSpecifier(fromFile: string, toFile: string): string {
+  const fromDir = fromFile.split("/").slice(0, -1);
+  const toParts = toFile.split("/");
+  let common = 0;
+  while (
+    common < fromDir.length &&
+    common < toParts.length - 1 &&
+    fromDir[common] === toParts[common]
+  ) {
+    common += 1;
+  }
+  const ups = fromDir.length - common;
+  const tail = toParts.slice(common).join("/");
+  if (ups === 0) return `./${tail}`;
+  return `${"../".repeat(ups)}${tail}`;
+}
+
+// Escape a literal string for embedding in a RegExp alternation. Used by the
+// simultaneous cross-schema specifier rewrite in finalizeGeneratedFiles.
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizePath(value: string): string {

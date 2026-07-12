@@ -2,8 +2,7 @@
  * Struct, enum, and union type emission functions.
  */
 
-import type { NodeModel } from "./model.ts";
-import type { EnumInfo, StructInfo } from "./emitter_helpers.ts";
+import type { EnumInfo, StructInfo, TypeEmitContext } from "./emitter_helpers.ts";
 import {
   defaultValueExpression,
   inferUnionFields,
@@ -34,9 +33,7 @@ export function emitEnum(out: string[], info: EnumInfo): void {
 export function emitStructInterface(
   out: string[],
   structInfo: StructInfo,
-  nodeById: Map<bigint, NodeModel>,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): void {
   const structNode = structInfo.node.structNode;
   if (!structNode) return;
@@ -59,9 +56,9 @@ export function emitStructInterface(
     const optionalMark = unionFieldNames.has(fieldName) ? "?" : "";
     let tsType: string;
     if (field.slot) {
-      tsType = typeToTs(field.slot.type, nodeById, enumById, structById);
+      tsType = typeToTs(field.slot.type, ctx);
     } else if (field.group) {
-      tsType = resolveTypeName(field.group.typeId, nodeById, enumById, structById);
+      tsType = resolveTypeName(field.group.typeId, ctx);
     } else {
       continue;
     }
@@ -74,9 +71,7 @@ export function emitStructInterface(
 export function emitStructDescriptor(
   out: string[],
   structInfo: StructInfo,
-  nodeById: Map<bigint, NodeModel>,
-  enumById: Map<bigint, EnumInfo>,
-  structById: Map<bigint, StructInfo>,
+  ctx: TypeEmitContext,
 ): void {
   const structNode = structInfo.node.structNode;
   if (!structNode) return;
@@ -97,14 +92,9 @@ export function emitStructDescriptor(
     const fieldName = quoteIfNeeded(toCamelCase(field.name));
     let defaultExpr: string;
     if (field.slot) {
-      defaultExpr = defaultValueExpression(
-        field.slot.type,
-        nodeById,
-        enumById,
-        structById,
-      );
+      defaultExpr = defaultValueExpression(field.slot.type, ctx);
     } else if (field.group) {
-      const groupInfo = structById.get(field.group.typeId);
+      const groupInfo = ctx.structById.get(field.group.typeId);
       defaultExpr = groupInfo
         ? `${groupInfo.descriptorConst}.createDefault()`
         : "{} as Record<string, unknown>";
@@ -147,15 +137,11 @@ export function emitStructDescriptor(
     out.push(`      kind: ${field.slot ? JSON.stringify("slot") : JSON.stringify("group")},`);
     out.push(`      name: ${JSON.stringify(fieldName)},`);
     if (field.slot) {
-      const typeExpr = typeDescriptorExpression(
-        field.slot.type,
-        enumById,
-        structById,
-      );
+      const typeExpr = typeDescriptorExpression(field.slot.type, ctx);
       out.push(`      offset: ${field.slot.offset},`);
       out.push(`      type: ${typeExpr},`);
     } else if (field.group) {
-      const groupInfo = structById.get(field.group.typeId);
+      const groupInfo = ctx.structById.get(field.group.typeId);
       if (!groupInfo) {
         throw new Error(
           `group field ${field.name} references unknown local struct id ${field.group.typeId}`,
@@ -171,9 +157,13 @@ export function emitStructDescriptor(
   out.push("  ],");
   out.push("};");
   if (structInfo.exported) {
+    // Cap-bearing structs dehydrate typed RpcStub fields to raw capability
+    // pointers before the encoding runtime serializes them.
+    const walkers = ctx.capabilityWalkers?.get(structInfo.id);
+    const encodeValue = walkers ? `${walkers.dehydrate}(value)` : "value";
     out.push(`export const ${structInfo.codecConst}: StructCodec<${structInfo.typeName}> = {`);
     out.push(`  encode: (value: ${structInfo.typeName}): Uint8Array =>`);
-    out.push(`    encodeStructMessage(${structInfo.descriptorConst}, value),`);
+    out.push(`    encodeStructMessage(${structInfo.descriptorConst}, ${encodeValue}),`);
     out.push(`  decode: (bytes: Uint8Array): ${structInfo.typeName} =>`);
     out.push(`    decodeStructMessage(${structInfo.descriptorConst}, bytes),`);
     out.push("};");

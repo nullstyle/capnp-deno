@@ -38,7 +38,19 @@ This generates files like:
 
 - `generated/schema/person_types.ts`
 - `generated/schema/person_meta.ts`
-- `generated/mod.ts`
+- `generated/mod.ts` — a namespaced barrel that re-exports each module under its
+  own name (`export * as schemaPerson from "./schema/person_types.ts";` plus a
+  `schemaPersonMeta` namespace for the metadata module), so multiple schemas can
+  share type and method names without export collisions
+
+You can import directly from the per-schema module (byte-stable across runs) or
+go through the barrel namespaces:
+
+```ts
+import { schemaPerson } from "./generated/mod.ts";
+
+const bytes = schemaPerson.PersonCodec.encode(input);
+```
 
 ## 3. Use Generated Binary Serde (Primary Path)
 
