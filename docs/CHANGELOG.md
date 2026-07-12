@@ -6,35 +6,6 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added
-
-- Server handlers can retain a call's parameter capabilities past dispatch: call
-  the new `ctx.retainParamCaps()` (or return an explicit
-  `releaseParamCaps: false`) and the Return carries `releaseParamCaps: false`,
-  the WASM relay keeps the capability alive instead of releasing it, and the
-  handler releases it later via `outboundClient.release(...)` when done. This
-  unblocks the "register a client-hosted sink, stream into it after returning"
-  pattern. Requires a runtime module with host-call param-cap retention
-  (`WasmAbiCapabilities.hasHostCallParamCapRetention`, feature bit
-  `WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION`); the bridge fails the call
-  loudly when a handler requests retention on a module that cannot honor it.
-
-### Fixed
-
-- The WASM relay released a host call's parameter capabilities as soon as the
-  call was queued — before the handler even ran — sending the client a premature
-  `Release` that destroyed client-hosted callback exports the moment their
-  registering call completed (subsequent server-originated calls failed with
-  unknown-capability errors). Param caps now stay alive until the host answers;
-  non-retaining handlers keep the existing contract (an explicit `Release`
-  spends the reference), just at Return time instead of dispatch time.
-- `RpcWireClient.finish` no longer defaults to releasing result capabilities for
-  questions whose Return carried cap-table entries, matching the
-  session-transport fix from 0.3.0: generated stubs auto-finish through this
-  path, and the old `releaseResultCaps: true` default destroyed every fresh
-  capability a server returned before the caller could use it. An explicit
-  `releaseResultCaps` still wins.
-
 ### Breaking
 
 - capnpc-deno's generated `mod.ts` barrel now uses namespaced re-exports
@@ -63,6 +34,37 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   textually equals another import's pre-rewrite specifier.
 - capnpc-deno: the generated barrel sanitizes the strict-mode-restricted
   identifiers `eval` and `arguments` (emitted as `eval$` / `arguments$`).
+
+## [0.4.0] - 2026-07-11
+
+### Added
+
+- Server handlers can retain a call's parameter capabilities past dispatch: call
+  the new `ctx.retainParamCaps()` (or return an explicit
+  `releaseParamCaps: false`) and the Return carries `releaseParamCaps: false`,
+  the WASM relay keeps the capability alive instead of releasing it, and the
+  handler releases it later via `outboundClient.release(...)` when done. This
+  unblocks the "register a client-hosted sink, stream into it after returning"
+  pattern. Requires a runtime module with host-call param-cap retention
+  (`WasmAbiCapabilities.hasHostCallParamCapRetention`, feature bit
+  `WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION`); the bridge fails the call
+  loudly when a handler requests retention on a module that cannot honor it.
+
+### Fixed
+
+- The WASM relay released a host call's parameter capabilities as soon as the
+  call was queued — before the handler even ran — sending the client a premature
+  `Release` that destroyed client-hosted callback exports the moment their
+  registering call completed (subsequent server-originated calls failed with
+  unknown-capability errors). Param caps now stay alive until the host answers;
+  non-retaining handlers keep the existing contract (an explicit `Release`
+  spends the reference), just at Return time instead of dispatch time.
+- `RpcWireClient.finish` no longer defaults to releasing result capabilities for
+  questions whose Return carried cap-table entries, matching the
+  session-transport fix from 0.3.0: generated stubs auto-finish through this
+  path, and the old `releaseResultCaps: true` default destroyed every fresh
+  capability a server returned before the caller could use it. An explicit
+  `releaseResultCaps` still wins.
 
 ## [0.1.0] - 2026-07-11
 
