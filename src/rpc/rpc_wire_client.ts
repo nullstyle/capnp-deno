@@ -118,6 +118,13 @@ export class RpcWireClient {
   #startPromise: Promise<void>;
   #pendingReturns = new Map<number, PendingReturnWaiter>();
   #localBridge: RpcServerBridge | null = null;
+  /**
+   * Questions whose Return carried capability-table entries. The caller
+   * received live capability references for these, so a later
+   * {@link finish} must not spend the wire references by default. Entries
+   * are removed when the question is finished (or the client closes).
+   */
+  #questionsWithResultCaps = new Set<number>();
 
   constructor(
     transport: RpcTransport,
@@ -305,15 +312,24 @@ export class RpcWireClient {
 
   /**
    * Send a finish message for a question.
+   *
+   * When `options.releaseResultCaps` is not specified, the default depends
+   * on the question's Return: if it carried capability-table entries the
+   * finish retains them (`releaseResultCaps: false`) because the caller
+   * holds live references that release themselves on close; cap-free
+   * returns release (`true`). An explicit option always wins. Generated
+   * stubs rely on this default when they auto-finish after a call whose
+   * results carried capabilities.
    */
   async finish(
     questionId: number,
     options: RpcFinishOptions = {},
   ): Promise<void> {
     await this.#ensureReady();
+    const returnedCaps = this.#questionsWithResultCaps.delete(questionId);
     await this.transport.send(encodeFinishFrame({
       questionId,
-      releaseResultCaps: options.releaseResultCaps ?? true,
+      releaseResultCaps: options.releaseResultCaps ?? !returnedCaps,
       requireEarlyCancellation: options.requireEarlyCancellation ?? false,
     }));
   }
@@ -365,6 +381,7 @@ export class RpcWireClient {
     if (this.#closed) return;
     this.#closed = true;
     this.#rejectAllPending(new SessionError("rpc wire client is closed"));
+    this.#questionsWithResultCaps.clear();
     this.#localBridge = null;
     await this.transport.close();
   }
@@ -444,6 +461,14 @@ export class RpcWireClient {
 
     const waiter = this.#pendingReturns.get(decoded.answerId);
     if (!waiter) return;
+    if (
+      !waiter.settled && decoded.kind === "results" &&
+      decoded.capTable.length > 0
+    ) {
+      // The caller is about to receive live capability references from this
+      // Return; remember that so finish() retains them by default.
+      this.#questionsWithResultCaps.add(decoded.answerId);
+    }
     this.#settleWaiter(decoded.answerId, waiter, decoded);
   }
 

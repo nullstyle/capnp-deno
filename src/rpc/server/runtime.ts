@@ -305,6 +305,8 @@ export class RpcServerRuntime {
           abi: {
             supportsHostCallReturnFrame:
               peer.abi.capabilities.hasHostCallReturnFrame,
+            supportsParamCapRetention:
+              peer.abi.capabilities.hasHostCallParamCapRetention,
             popHostCall: (handle) => peer.abi.popHostCall(handle),
             respondHostCallReturnFrame: (handle, frame) =>
               peer.abi.respondHostCallReturnFrame(handle, frame),

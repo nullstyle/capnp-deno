@@ -144,6 +144,96 @@ Deno.test("RpcWireClient callRaw uses default interfaceId and params cap table",
   assertEquals(client.stats.closed, true);
 });
 
+Deno.test("RpcWireClient finish retains result caps by default when the Return carried capabilities", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport, { interfaceId: 0x1234n });
+
+  const callPromise = client.callRaw(
+    { capabilityIndex: 0 },
+    1,
+    new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  );
+  await waitForSentFrames(transport, 1);
+  await transport.emitInbound(encodeReturnResultsFrame({
+    answerId: 1,
+    content: new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    capTable: [{ tag: 1, id: 3 }],
+  }));
+  await callPromise;
+
+  // The generated-stub pattern: an explicit finish with no options after a
+  // Return that imported a fresh capability. The wire reference must be
+  // retained so the caller's stub stays alive.
+  await client.finish(1);
+  await waitForSentFrames(transport, 2);
+  const finish = decodeFinishFrame(transport.sent[1]);
+  assertEquals(finish.questionId, 1);
+  assertEquals(finish.releaseResultCaps, false);
+
+  await client.close();
+});
+
+Deno.test("RpcWireClient finish releases result caps for cap-free returns and honors explicit options", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport, { interfaceId: 0x1234n });
+
+  // Question 1: cap-free Return -> default finish releases.
+  const capFree = client.callRaw(
+    { capabilityIndex: 0 },
+    1,
+    new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  );
+  await waitForSentFrames(transport, 1);
+  await transport.emitInbound(encodeReturnResultsFrame({
+    answerId: 1,
+    content: new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  }));
+  await capFree;
+  await client.finish(1);
+  await waitForSentFrames(transport, 2);
+  assertEquals(decodeFinishFrame(transport.sent[1]).releaseResultCaps, true);
+
+  // Question 2: cap-bearing Return, but the caller explicitly releases.
+  const capBearing = client.callRaw(
+    { capabilityIndex: 0 },
+    1,
+    new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  );
+  await waitForSentFrames(transport, 3);
+  await transport.emitInbound(encodeReturnResultsFrame({
+    answerId: 2,
+    content: new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    capTable: [{ tag: 1, id: 5 }],
+  }));
+  await capBearing;
+  await client.finish(2, { releaseResultCaps: true });
+  await waitForSentFrames(transport, 4);
+  assertEquals(decodeFinishFrame(transport.sent[3]).releaseResultCaps, true);
+
+  // Question 3: cap-bearing Return again; a second finish for the same
+  // question falls back to the release default once the tracked entry is
+  // consumed.
+  const again = client.callRaw(
+    { capabilityIndex: 0 },
+    1,
+    new Uint8Array(EMPTY_STRUCT_MESSAGE),
+  );
+  await waitForSentFrames(transport, 5);
+  await transport.emitInbound(encodeReturnResultsFrame({
+    answerId: 3,
+    content: new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    capTable: [{ tag: 1, id: 6 }],
+  }));
+  await again;
+  await client.finish(3);
+  await client.finish(3);
+  await waitForSentFrames(transport, 7);
+  assertEquals(decodeFinishFrame(transport.sent[5]).releaseResultCaps, false);
+  assertEquals(decodeFinishFrame(transport.sent[6]).releaseResultCaps, true);
+
+  await client.close();
+});
+
 Deno.test("RpcWireClient sends early-cancel finish when a pending call aborts", async () => {
   const transport = new MockTransport();
   const client = new RpcWireClient(transport, {

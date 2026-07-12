@@ -5,6 +5,7 @@ export {
   DEFAULT_MAX_DRAIN_FRAMES,
   type DrainOutFramesResult,
   getCapnpWasmExports,
+  WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION,
   WasmAbi,
   type WasmAbiCapabilities,
   WasmAbiError,

@@ -264,6 +264,150 @@ Deno.test("real wasm generated callbacks: cap-bearing params call back before th
   });
 });
 
+const SINK_INTERFACE_ID = 0x5678n;
+
+async function waitForCondition(
+  check: () => boolean,
+  label: string,
+): Promise<void> {
+  await withTimeout(
+    (async () => {
+      while (!check()) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    })(),
+    1_000,
+    label,
+  );
+}
+
+Deno.test("real wasm service flow: default host-call answers release param caps only after the Return", async () => {
+  await withRealServer(async ({ bridge, client, runtime }) => {
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+    });
+    let paramCapSeenDuringDispatch = -1;
+
+    bridge.exportCapability({
+      interfaceId: INTERFACE_ID,
+      dispatch(_methodId, _params, ctx) {
+        paramCapSeenDuringDispatch = ctx.paramsCapTable[0]?.id ?? -1;
+        return encodeSingleU32StructMessage(1);
+      },
+    }, {
+      capabilityIndex: bootstrap.capabilityIndex,
+      referenceCount: 2,
+    });
+
+    const sink = client.exportCapability({
+      interfaceId: SINK_INTERFACE_ID,
+      dispatch: () => encodeSingleU32StructMessage(0),
+    });
+    assertEquals(client.stats.exportedCapabilities, 1);
+
+    await client.callRaw(bootstrap, 5, encodeSingleU32StructMessage(0), {
+      paramsCapTable: [{
+        tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+        id: sink.capabilityIndex,
+      }],
+      timeoutMs: 2_000,
+    });
+    assertEquals(paramCapSeenDuringDispatch, sink.capabilityIndex);
+
+    // A handler that does not retain gets the pre-retention contract: the
+    // peer spends the param-cap reference with an explicit Release once the
+    // Return is on the wire, and the client-side export unregisters.
+    await runtime.flush();
+    await waitForCondition(
+      () => client.stats.exportedCapabilities === 0,
+      "await post-Return param-cap release",
+    );
+
+    await client.release(bootstrap, 1);
+  });
+});
+
+Deno.test("real wasm service flow: retained param cap stays callable after the originating call returned", async () => {
+  await withRealServer(async ({ bridge, client, runtime, peer }) => {
+    assert(
+      peer.abi.capabilities.hasHostCallParamCapRetention,
+      "expected the runtime module to support host-call param-cap retention",
+    );
+
+    const bootstrap = await client.bootstrap({
+      finish: { releaseResultCaps: false },
+    });
+    let retainedSinkIndex = -1;
+
+    // The studiobox OutputSink pump pattern: registerSink stores the param
+    // capability and returns immediately; the server streams into the sink
+    // only after the originating call completed.
+    bridge.exportCapability({
+      interfaceId: INTERFACE_ID,
+      dispatch(_methodId, _params, ctx) {
+        retainedSinkIndex = ctx.paramsCapTable[0]?.id ?? -1;
+        ctx.retainParamCaps?.();
+        return encodeSingleU32StructMessage(1);
+      },
+    }, {
+      capabilityIndex: bootstrap.capabilityIndex,
+      referenceCount: 2,
+    });
+
+    const sinkWrites: number[] = [];
+    const sink = client.exportCapability({
+      interfaceId: SINK_INTERFACE_ID,
+      dispatch(_methodId, params) {
+        sinkWrites.push(decodeSingleU32StructMessage(params));
+        return encodeSingleU32StructMessage(0);
+      },
+    });
+
+    await client.callRaw(bootstrap, 5, encodeSingleU32StructMessage(0), {
+      paramsCapTable: [{
+        tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+        id: sink.capabilityIndex,
+      }],
+      timeoutMs: 2_000,
+    });
+    assertEquals(retainedSinkIndex, sink.capabilityIndex);
+
+    // No Release may arrive for the retained sink: the export must survive
+    // the originating call's completion.
+    await runtime.flush();
+    assertEquals(client.stats.exportedCapabilities, 1);
+
+    // Server-originated pump AFTER the originating call returned.
+    for (const value of [41, 42]) {
+      const pumped = await withTimeout(
+        runtime.outboundClient.call(
+          { capabilityIndex: retainedSinkIndex },
+          3,
+          encodeSingleU32StructMessage(value),
+          { interfaceId: SINK_INTERFACE_ID, timeoutMs: 2_000 },
+        ),
+        2_500,
+        `pump retained sink value ${value}`,
+      );
+      assertEquals(decodeSingleU32StructMessage(pumped), 0);
+    }
+    assertEquals(sinkWrites.join(","), "41,42");
+
+    // The server owns the retained reference and spends it when done; only
+    // then does the client-side export unregister.
+    await runtime.outboundClient.release(
+      { capabilityIndex: retainedSinkIndex },
+      1,
+    );
+    await waitForCondition(
+      () => client.stats.exportedCapabilities === 0,
+      "await host-owned release of the retained sink",
+    );
+
+    await client.release(bootstrap, 1);
+  });
+});
+
 Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
   await withRealServer(async ({ bridge, client, runtime }) => {
     const bootstrap = await client.bootstrap({

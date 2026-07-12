@@ -136,6 +136,15 @@ export interface WasmAbiCapabilities {
   hasHostCallBridge: boolean;
   hasHostCallReturnFrame: boolean;
   hasHostCallFrameRelease: boolean;
+  /**
+   * Whether the peer retains host-call param caps until the host answers
+   * and honors `releaseParamCaps = false` on relayed Return frames (the
+   * host keeps the capabilities; no Release frames are emitted for them).
+   * Modules without this feature release param caps as soon as a host call
+   * is queued, so server handlers cannot retain a param capability past
+   * the call.
+   */
+  hasHostCallParamCapRetention: boolean;
   hasLifecycleHelpers: boolean;
   hasBootstrapStubIdentity: boolean;
   hasSchemaManifest: boolean;
@@ -150,6 +159,13 @@ export interface WasmAbiCapabilities {
   abiMaxVersion: number | null;
   featureFlags: bigint;
 }
+
+/**
+ * Feature-flag bit reported via `capnp_wasm_feature_flags_lo/hi` when the
+ * WASM peer retains host-call param caps until the host answers and honors
+ * `releaseParamCaps = false` on relayed Return frames.
+ */
+export const WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION = 1n << 9n;
 
 /**
  * Represents a single host call extracted from the WASM peer's outbound queue.
@@ -318,6 +334,10 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     );
   }
 
+  const featureFlags = hasFeatureFlags
+    ? (BigInt(featureFlagsHi!) << 32n) | BigInt(featureFlagsLo!)
+    : 0n;
+
   return {
     hasPeerPopCommit: typeof exports.capnp_peer_pop_commit === "function",
     hasHostCallBridge: typeof exports.capnp_peer_pop_host_call === "function" &&
@@ -326,6 +346,8 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     hasHostCallReturnFrame,
     hasHostCallFrameRelease:
       typeof exports.capnp_peer_free_host_call_frame === "function",
+    hasHostCallParamCapRetention:
+      (featureFlags & WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION) !== 0n,
     hasLifecycleHelpers: typeof exports.capnp_peer_send_finish === "function" &&
       typeof exports.capnp_peer_send_release === "function",
     hasBootstrapStubIdentity:
@@ -340,9 +362,7 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     abiVersion,
     abiMinVersion,
     abiMaxVersion,
-    featureFlags: hasFeatureFlags
-      ? (BigInt(featureFlagsHi!) << 32n) | BigInt(featureFlagsLo!)
-      : 0n,
+    featureFlags,
   };
 }
 

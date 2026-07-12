@@ -237,6 +237,23 @@ export interface RpcCallContext {
     dispatch: RpcServerDispatch,
     options?: { capabilityIndex?: number; referenceCount?: number },
   ) => CapabilityPointer;
+  /**
+   * Marks this call's parameter capabilities as retained by the handler.
+   *
+   * By default a call's param caps are released back to the caller once the
+   * call completes. A handler that keeps a param capability past dispatch —
+   * for example to stream into a client-hosted sink after returning — must
+   * call this (or return an explicit `releaseParamCaps: false`) so the
+   * Return carries `releaseParamCaps: false` and no Release is sent for
+   * the params. The handler then owns the references: release each retained
+   * capability later via {@link outboundClient}'s `release` when done.
+   *
+   * An explicit `releaseParamCaps` on the returned {@link RpcCallResponse}
+   * wins over this marker. Serving through the WASM relay requires a
+   * runtime module with host-call param-cap retention support (see
+   * `WasmAbiCapabilities.hasHostCallParamCapRetention`).
+   */
+  readonly retainParamCaps?: () => void;
 }
 
 /**
@@ -250,7 +267,13 @@ export interface RpcCallResponse {
   readonly content?: Uint8Array;
   /** Capability descriptors to include in the response. */
   readonly capTable?: RpcCapDescriptor[];
-  /** Whether to release parameter capabilities. Defaults to true. */
+  /**
+   * Whether the call's parameter capabilities are released when this
+   * response returns. Defaults to `true`. Set `false` when the handler
+   * retained a param capability past dispatch (or use
+   * {@link RpcCallContext.retainParamCaps}); the handler then owns the
+   * references and must release them itself once done.
+   */
   readonly releaseParamCaps?: boolean;
   /** Whether a Finish message is unnecessary. Defaults to false. */
   readonly noFinishNeeded?: boolean;
@@ -348,6 +371,15 @@ export interface RpcServerWasmHost {
   readonly handle: number;
   readonly abi: {
     supportsHostCallReturnFrame?: boolean;
+    /**
+     * Whether the WASM peer retains host-call param caps until the host
+     * answers and honors `releaseParamCaps = false` on relayed Returns.
+     * When explicitly `false`, the bridge rejects responses that request
+     * param-cap retention instead of letting the stale module silently
+     * release the capability out from under the handler. Leave undefined
+     * when unknown.
+     */
+    supportsParamCapRetention?: boolean;
     popHostCall(peer: number): WasmHostCallRecord | null;
     respondHostCallReturnFrame?(
       peer: number,
@@ -1418,6 +1450,28 @@ export class RpcServerBridge {
     const supportsReturnFrame = wasmHost.abi.supportsHostCallReturnFrame ??
       true;
     if (wasmHost.abi.respondHostCallReturnFrame && supportsReturnFrame) {
+      // A stale runtime module would relay releaseParamCaps=false verbatim
+      // while having already released the param caps at dispatch time,
+      // silently destroying the capability the handler retained. Fail the
+      // call loudly instead. Only pay the frame decode when the module has
+      // explicitly declared it cannot retain.
+      if (wasmHost.abi.supportsParamCapRetention === false) {
+        let requestsRetention = false;
+        try {
+          requestsRetention =
+            decodeReturnFrame(responseFrame).releaseParamCaps === false;
+        } catch {
+          // Undecodable frames are the relay's problem; fall through.
+        }
+        if (requestsRetention) {
+          wasmHost.abi.respondHostCallException(
+            wasmHost.handle,
+            call.questionId,
+            "wasm module does not support retaining host-call param caps (releaseParamCaps=false); rebuild the runtime module with host-call param-cap retention",
+          );
+          return;
+        }
+      }
       try {
         wasmHost.abi.respondHostCallReturnFrame(
           wasmHost.handle,
@@ -1641,6 +1695,7 @@ export class RpcServerBridge {
       state: middlewareState,
     };
 
+    let retainParamCapsRequested = false;
     const ctx: RpcCallContext = {
       target: call.target,
       capability: { capabilityIndex },
@@ -1661,6 +1716,9 @@ export class RpcServerBridge {
           capabilityIndex: options?.capabilityIndex,
           referenceCount: options?.referenceCount ?? 0,
         }),
+      retainParamCaps: () => {
+        retainParamCapsRequested = true;
+      },
     };
 
     try {
@@ -1690,6 +1748,12 @@ export class RpcServerBridge {
           ctx,
         ),
       );
+
+      // ctx.retainParamCaps() fills the releaseParamCaps default; an
+      // explicit value on the handler's response always wins.
+      if (retainParamCapsRequested && response.releaseParamCaps === undefined) {
+        response = { ...response, releaseParamCaps: false };
+      }
 
       // Run onResponse middleware chain.
       for (const mw of this.#middleware) {

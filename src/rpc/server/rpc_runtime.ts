@@ -57,6 +57,18 @@ export interface RpcCallContext {
     dispatch: RpcServerDispatch,
     options?: RpcExportCapabilityOptions,
   ) => CapabilityPointer;
+  /**
+   * Marks this call's parameter capabilities as retained by the handler.
+   *
+   * By default param caps are released back to the caller when the call
+   * completes. A handler that keeps a param capability past dispatch (for
+   * example to stream into a client-hosted sink after returning) calls this
+   * so the Return carries `releaseParamCaps: false` and the capability
+   * stays alive; the handler then owns the reference and releases it via
+   * the outbound client when done. An explicit `releaseParamCaps` on the
+   * handler's response wins over this marker.
+   */
+  readonly retainParamCaps?: () => void;
 }
 
 /**

@@ -925,6 +925,132 @@ Deno.test("RpcServerBridge host-call pump rejects non-default return flags", asy
   );
 });
 
+Deno.test("RpcServerBridge ctx.retainParamCaps marks the Return with releaseParamCaps=false", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) => {
+      ctx.retainParamCaps?.();
+      return Promise.resolve(encodeSingleU32StructMessage(5));
+    },
+  }, { capabilityIndex: 4 });
+
+  const response = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 31,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 4,
+    paramsContent: encodeSingleU32StructMessage(0),
+    paramsCapTable: [{ tag: 1, id: 9 }],
+  }));
+  if (!response) throw new Error("expected response frame");
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.releaseParamCaps, false);
+});
+
+Deno.test("RpcServerBridge explicit releaseParamCaps wins over ctx.retainParamCaps", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) => {
+      ctx.retainParamCaps?.();
+      return Promise.resolve({
+        content: encodeSingleU32StructMessage(5),
+        releaseParamCaps: true,
+      });
+    },
+  }, { capabilityIndex: 4 });
+
+  const response = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 32,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 4,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!response) throw new Error("expected response frame");
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "results");
+  assertEquals(decoded.releaseParamCaps, true);
+});
+
+Deno.test("RpcServerBridge host-call relay rejects retention when the wasm module cannot honor it", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(6),
+        releaseParamCaps: false,
+      }),
+  }, { capabilityIndex: 4 });
+
+  const hostAbi = new MockWasmHostAbiWithReturnFrame();
+  hostAbi.calls.push({
+    questionId: 23,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 23,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 4,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: Object.assign(hostAbi, { supportsParamCapRetention: false }),
+  });
+  assertEquals(handled, 1);
+  assertEquals(hostAbi.returnFrames.length, 0);
+  assertEquals(hostAbi.exceptions.length, 1);
+  assert(
+    /does not support retaining host-call param caps/i.test(
+      hostAbi.exceptions[0].reason,
+    ),
+    `unexpected retention exception reason: ${hostAbi.exceptions[0].reason}`,
+  );
+});
+
+Deno.test("RpcServerBridge host-call relay forwards retention Returns when the module supports it", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) => {
+      ctx.retainParamCaps?.();
+      return Promise.resolve(encodeSingleU32StructMessage(6));
+    },
+  }, { capabilityIndex: 4 });
+
+  const hostAbi = new MockWasmHostAbiWithReturnFrame();
+  hostAbi.calls.push({
+    questionId: 24,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 24,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 4,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({
+    handle: 1,
+    abi: Object.assign(hostAbi, { supportsParamCapRetention: true }),
+  });
+  assertEquals(handled, 1);
+  assertEquals(hostAbi.exceptions.length, 0);
+  assertEquals(hostAbi.returnFrames.length, 1);
+  const relayed = decodeReturnFrame(hostAbi.returnFrames[0]);
+  assertEquals(relayed.answerId, 24);
+  assertEquals(relayed.releaseParamCaps, false);
+});
+
 Deno.test("RpcServerBridge host-call pump defaults missing results content to empty struct frame", async () => {
   const bridge = new RpcServerBridge();
   bridge.exportCapability({

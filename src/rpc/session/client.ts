@@ -153,6 +153,11 @@ export interface RpcFinishOptions {
    * capabilities: the caller received live stubs for those capabilities and
    * each stub sends its own `release` message on close, so the finish must
    * not spend the wire references first.
+   *
+   * `RpcWireClient.finish` applies the same capability-aware default to the
+   * finish generated stubs send after each call: questions whose Return
+   * carried cap-table entries retain (`false`), cap-free questions release
+   * (`true`). An explicit value always wins on either transport.
    */
   releaseResultCaps?: boolean;
   /**
