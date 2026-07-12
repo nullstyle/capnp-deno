@@ -6,6 +6,35 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- capnpc-deno's generated `mod.ts` barrel now uses namespaced re-exports
+  (`export * as <schemaNamespace> from "./<module>.ts";`) instead of flat
+  `export * from` lines, so same-named exports across schema files cannot
+  collide. Downstream code that imported names directly from a generated barrel
+  must switch to the per-schema namespace (or import from the individual
+  generated module). The committed `src/rpc/gen/capnp/mod.ts` artifact reflects
+  this churn.
+- capnpc-deno now fails loudly (`CodegenEmitError`) when a schema references a
+  type NESTED inside a struct of another schema file (e.g. `:Lib.Outer.Inner`);
+  such references previously emitted silently broken output (bare unimported
+  type names and `undefined as unknown as` defaults). Hoist the type to the top
+  level of its owning schema.
+
+### Fixed
+
+- capnpc-deno: cross-file imports of two schema files that share a basename in
+  different directories (e.g. `a/x.capnp` and `b/x.capnp`) no longer collapse
+  onto a single module; the import collector keys modules by the full schema
+  path. Under `--layout flat`, same-basename schema files are now disambiguated
+  by flattening their schema-relative path into the module name (`a_x_types.ts`,
+  `b_x_types.ts`) instead of aborting with an output-path collision.
+- capnpc-deno: cross-schema import specifiers are rewritten in a single
+  simultaneous pass, so a rewritten specifier can no longer be clobbered when it
+  textually equals another import's pre-rewrite specifier.
+- capnpc-deno: the generated barrel sanitizes the strict-mode-restricted
+  identifiers `eval` and `arguments` (emitted as `eval$` / `arguments$`).
+
 ## [0.1.0] - 2026-07-11
 
 ### Breaking

@@ -871,3 +871,159 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
     await runtime.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Same-basename schema files (a/shape.capnp + b/shape.capnp)
+// ---------------------------------------------------------------------------
+
+const SAMEBASE_REQUEST =
+  "tests/fixtures/codegen_requests/crossfile_samebase_request.b64";
+const SAMEBASE_SRC_DIR = "tests/fixtures/schemas/crossfile/samebase";
+
+Deno.test("crossfile: same-basename imports stay two distinct modules", async () => {
+  // a/shape.capnp and b/shape.capnp share a basename AND a struct name; the
+  // import collector must key them by their full schema path, never by the
+  // flat "./shape_types.ts" specifier both basenames map to.
+  const generated = await generateFromFixture(SAMEBASE_REQUEST);
+  const consumer = fileByPath(generated, "consumer_types.ts");
+
+  assertEquals(
+    JSON.stringify(consumer.crossSchemaImports),
+    JSON.stringify([
+      {
+        specifier: `./${SAMEBASE_SRC_DIR}/a/shape_types.ts`,
+        targetSourceFilename: `${SAMEBASE_SRC_DIR}/a/shape.capnp`,
+      },
+      {
+        specifier: `./${SAMEBASE_SRC_DIR}/b/shape_types.ts`,
+        targetSourceFilename: `${SAMEBASE_SRC_DIR}/b/shape.capnp`,
+      },
+    ]),
+    "expected one cross-schema import per owning schema file",
+  );
+
+  // Both type names are imported, the second under a disambiguating alias,
+  // and each field is bound to the module that owns its type.
+  assert(
+    consumer.contents.includes(
+      `import type { Shape } from "./${SAMEBASE_SRC_DIR}/a/shape_types.ts";\n`,
+    ),
+    "expected a/shape.capnp's Shape import",
+  );
+  assert(
+    consumer.contents.includes(
+      `import type { Shape as Shape$Shape } from "./${SAMEBASE_SRC_DIR}/b/shape_types.ts";\n`,
+    ),
+    "expected b/shape.capnp's Shape import under an alias",
+  );
+  assert(
+    consumer.contents.includes("  left: Shape;\n") &&
+      consumer.contents.includes("  right: Shape$Shape;\n"),
+    "expected each Pair field to reference its own owning module's type",
+  );
+  assert(
+    consumer.contents.includes("left: ShapeStruct.createDefault(),") &&
+      consumer.contents.includes("right: ShapeStruct$Shape.createDefault(),"),
+    "expected per-module descriptor imports for defaults",
+  );
+});
+
+Deno.test("crossfile: flat layout disambiguates same-basename modules", async () => {
+  const generated = await generateFromFixture(SAMEBASE_REQUEST);
+  const finalized = finalizeGeneratedFiles(generated, {
+    layout: "flat",
+    srcDirs: [SAMEBASE_SRC_DIR],
+    emitBarrel: false,
+  });
+  // Colliding flat basenames become their schema-relative path with "/"
+  // flattened to "_"; unique basenames (consumer) keep their flat names.
+  assertEquals(
+    finalized.map((file) => file.path).join(","),
+    "a_shape_meta.ts,a_shape_types.ts,b_shape_meta.ts,b_shape_types.ts," +
+      "consumer_meta.ts,consumer_types.ts",
+  );
+  const consumer = fileByPath(finalized, "consumer_types.ts");
+  assert(
+    consumer.contents.includes(
+      'import type { Shape } from "./a_shape_types.ts";\n',
+    ),
+    "expected the flat specifier to point at the disambiguated a-module",
+  );
+  assert(
+    consumer.contents.includes(
+      'import type { Shape as Shape$Shape } from "./b_shape_types.ts";\n',
+    ),
+    "expected the flat specifier to point at the disambiguated b-module",
+  );
+});
+
+Deno.test("crossfile: schema layout keeps same-basename modules in their directories", async () => {
+  const generated = await generateFromFixture(SAMEBASE_REQUEST);
+  const finalized = finalizeGeneratedFiles(generated, {
+    layout: "schema",
+    srcDirs: [SAMEBASE_SRC_DIR],
+    emitBarrel: false,
+  });
+  assertEquals(
+    finalized.map((file) => file.path).join(","),
+    "a/shape_meta.ts,a/shape_types.ts,b/shape_meta.ts,b/shape_types.ts," +
+      "consumer_meta.ts,consumer_types.ts",
+  );
+  const consumer = fileByPath(finalized, "consumer_types.ts");
+  assert(
+    consumer.contents.includes(
+      'import type { Shape } from "./a/shape_types.ts";\n',
+    ) &&
+      consumer.contents.includes(
+        'import type { Shape as Shape$Shape } from "./b/shape_types.ts";\n',
+      ),
+    "expected directory-qualified specifiers, one per owning module",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cross-file references to NESTED foreign types fail loudly
+// ---------------------------------------------------------------------------
+
+const HOIST_REQUEST =
+  "tests/fixtures/codegen_requests/crossfile_hoist_request.b64";
+const HOIST_OK_REQUEST =
+  "tests/fixtures/codegen_requests/crossfile_hoist_ok_request.b64";
+
+Deno.test("crossfile: referencing a nested foreign type is a loud emitter error", async () => {
+  // Uses.direct is typed Lib.Outer.Inner; the owning module keeps nested
+  // declarations module-private, so this used to degrade to a bare
+  // unimported name plus an `undefined as unknown as` default.
+  const request = parseCodeGeneratorRequest(
+    await decodeFixture(HOIST_REQUEST),
+  );
+  let thrown: unknown = null;
+  try {
+    generateTypescriptFiles(request);
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown instanceof Error, "expected generation to throw");
+  assertEquals((thrown as Error).name, "CodegenEmitError");
+  const message = (thrown as Error).message;
+  assert(
+    message.includes("cross-file reference to nested type Outer.Inner") &&
+      message.includes("tests/fixtures/schemas/crossfile/hoist/lib.capnp") &&
+      message.includes("hoist the type to the top level"),
+    `expected an actionable nested-type error, got: ${message}`,
+  );
+});
+
+Deno.test("crossfile: top-level foreign types with nested members keep working", async () => {
+  // Holder.outer references only the exported top-level Outer; traversing
+  // Outer's own nested Inner/Kind members (walker planning, defaults) must
+  // not trip the nested-type error.
+  const generated = await generateFromFixture(HOIST_OK_REQUEST);
+  const holder = fileByPath(generated, "toplevel_consumer_types.ts");
+  assert(
+    holder.contents.includes(
+      'import type { Outer } from "./lib_types.ts";\n',
+    ) && holder.contents.includes("  outer: Outer;\n"),
+    "expected the top-level foreign struct to import and resolve normally",
+  );
+});

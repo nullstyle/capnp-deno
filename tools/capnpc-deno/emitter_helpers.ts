@@ -9,6 +9,7 @@ import type {
   NodeModel,
   TypeModel,
 } from "./model.ts";
+import { CodegenEmitError } from "./errors.ts";
 
 export interface EnumInfo {
   readonly id: bigint;
@@ -16,6 +17,7 @@ export interface EnumInfo {
   readonly valuesConst: string;
   readonly descriptorConst: string;
   readonly values: string[];
+  readonly node: NodeModel;
   readonly exported: boolean;
 }
 
@@ -50,6 +52,27 @@ export function toOutputPath(
   const normalized = filename.replaceAll("\\", "/");
   const base = normalized.slice(normalized.lastIndexOf("/") + 1);
   const withoutExt = base.endsWith(".capnp") ? base.slice(0, -6) : base;
+  return `${withoutExt}_${suffix}.ts`;
+}
+
+/**
+ * Like {@link toOutputPath}, but keeps the schema file's directory segments
+ * (e.g. `"a/x.capnp"` -> `"a/x_types.ts"`). Used for cross-file import
+ * specifiers whose flat basename would be ambiguous between two schema files
+ * with the same basename in different directories.
+ */
+export function toOutputPathPreservingDirs(
+  filename: string,
+  suffix: OutputModuleSuffix,
+): string {
+  const normalized = filename
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((segment) => segment.length > 0 && segment !== ".")
+    .join("/");
+  const withoutExt = normalized.endsWith(".capnp")
+    ? normalized.slice(0, -6)
+    : normalized;
   return `${withoutExt}_${suffix}.ts`;
 }
 
@@ -152,6 +175,7 @@ export function collectLocalTypes(
       valuesConst,
       descriptorConst,
       values,
+      node,
       exported: exportedIds.has(node.id),
     };
   });
@@ -327,7 +351,12 @@ export function buildModuleIndex(
 
 /** Cross-module import recorded on a generated file for layout-aware fixup. */
 export interface CrossSchemaImportRef {
-  /** Flat sibling specifier as emitted, e.g. `"./base_types.ts"`. */
+  /**
+   * Sibling specifier as emitted, e.g. `"./base_types.ts"`. When two schema
+   * files in the request share a basename the specifier keeps the directory
+   * segments (e.g. `"./a/x_types.ts"`) so the two modules never collapse
+   * onto one import; the CLI rewrites it to the final layout-correct path.
+   */
   specifier: string;
   /** Schema source filename of the module the specifier points at. */
   targetSourceFilename: string;
@@ -363,9 +392,13 @@ export class ModuleImportCollector {
   readonly #fileId: bigint;
   readonly #reservedNames: Set<string>;
   readonly #moduleIndex: ModuleIndex;
+  /** Keyed by the owning schema's full (relative) filename, never by the
+   * flat output basename: two schema files with the same basename in
+   * different directories must stay distinct modules. */
   readonly #modules = new Map<string, CollectedModuleImports>();
   readonly #aliasByKey = new Map<string, string>();
   readonly #enumMirrors = new Map<bigint, EnumImportMirror>();
+  #ambiguousFlatSpecifiers: Set<string> | null = null;
 
   constructor(options: {
     fileId: bigint;
@@ -388,6 +421,37 @@ export class ModuleImportCollector {
     if (!entry || entry.fileId === this.#fileId) return null;
     if (entry.kind === "enum" || entry.kind === "struct") {
       return entry.info.exported ? entry : null;
+    }
+    return entry;
+  }
+
+  /**
+   * Like {@link crossFileEntry}, but for positions that must REFERENCE the
+   * foreign type in emitted output (type names, descriptors, defaults).
+   *
+   * A cross-file reference to a NESTED foreign struct/enum cannot be lowered
+   * correctly: the owning module only exports its top-level declarations (and
+   * method param/result structs), so the reference would degrade to a bare
+   * unimported name. Instead of emitting silently-broken output this throws a
+   * loud {@link CodegenEmitError}. Probe-style callers (capability walker
+   * planning) keep using {@link crossFileEntry}, which returns `null` for
+   * these entries, because merely traversing a foreign struct's fields is
+   * fine. Unknown ids still return `null` (callers keep their fallbacks).
+   */
+  crossFileTypeReference(id: bigint): ModuleIndexEntry | null {
+    const entry = this.#moduleIndex.byId.get(id);
+    if (!entry || entry.fileId === this.#fileId) return null;
+    if (
+      (entry.kind === "enum" || entry.kind === "struct") &&
+      !entry.info.exported
+    ) {
+      const qualified = nestedTypeDisplayPath(entry.info.node.displayName);
+      throw new CodegenEmitError(
+        `cross-file reference to nested type ${qualified} ` +
+          `(file ${entry.schemaFilename}) is not supported by capnpc-deno ` +
+          `yet; hoist the type to the top level of ${entry.schemaFilename} ` +
+          `so its generated module exports it`,
+      );
     }
     return entry;
   }
@@ -498,7 +562,7 @@ export class ModuleImportCollector {
     const module = this.#moduleFor(entry);
     const existing = module[slot].get(exportedName);
     if (existing) return existing;
-    const aliasKey = `${module.specifier} ${slot} ${exportedName}`;
+    const aliasKey = `${module.specifier}\u0000${slot}\u0000${exportedName}`;
     let alias = this.#aliasByKey.get(aliasKey);
     if (alias === undefined) {
       alias = this.#claimImportAlias(exportedName, entry.schemaFilename);
@@ -509,17 +573,46 @@ export class ModuleImportCollector {
   }
 
   #moduleFor(entry: ModuleIndexEntry): CollectedModuleImports {
-    const specifier = `./${toOutputPath(entry.schemaFilename, "types")}`;
-    const existing = this.#modules.get(specifier);
+    const existing = this.#modules.get(entry.schemaFilename);
     if (existing) return existing;
+    // Flat sibling specifier by default; when another schema file in the
+    // request shares the basename, keep the directory segments so the two
+    // modules stay distinct (the CLI rewrites every specifier to its final
+    // layout-correct path via targetSourceFilename either way).
+    const specifier = this.#flatSpecifierAmbiguities().has(
+        toOutputPath(entry.schemaFilename, "types"),
+      )
+      ? `./${toOutputPathPreservingDirs(entry.schemaFilename, "types")}`
+      : `./${toOutputPath(entry.schemaFilename, "types")}`;
     const created: CollectedModuleImports = {
       specifier,
       targetSourceFilename: entry.schemaFilename,
       types: new Map(),
       values: new Map(),
     };
-    this.#modules.set(specifier, created);
+    this.#modules.set(entry.schemaFilename, created);
     return created;
+  }
+
+  /** Flat `<basename>_types.ts` names claimed by 2+ distinct schema files. */
+  #flatSpecifierAmbiguities(): Set<string> {
+    if (this.#ambiguousFlatSpecifiers) return this.#ambiguousFlatSpecifiers;
+    const claimants = new Map<string, Set<string>>();
+    for (const entry of this.#moduleIndex.byId.values()) {
+      const flatName = toOutputPath(entry.schemaFilename, "types");
+      let owners = claimants.get(flatName);
+      if (!owners) {
+        owners = new Set();
+        claimants.set(flatName, owners);
+      }
+      owners.add(entry.schemaFilename);
+    }
+    this.#ambiguousFlatSpecifiers = new Set(
+      [...claimants.entries()]
+        .filter(([, owners]) => owners.size > 1)
+        .map(([flatName]) => flatName),
+    );
+    return this.#ambiguousFlatSpecifiers;
   }
 
   #claimImportAlias(exportedName: string, schemaFilename: string): string {
@@ -549,6 +642,17 @@ function renderImportEntries(entries: Map<string, string>): string[] {
     .map(([exported, alias]) =>
       exported === alias ? exported : `${exported} as ${alias}`
     );
+}
+
+/**
+ * The dotted type path of a node's display name, e.g.
+ * `"a/lib.capnp:Outer.Inner"` -> `"Outer.Inner"`. Falls back to the whole
+ * display name when the `.capnp:` marker is absent.
+ */
+function nestedTypeDisplayPath(displayName: string): string {
+  const marker = displayName.lastIndexOf(".capnp:");
+  if (marker < 0) return displayName;
+  return displayName.slice(marker + ".capnp:".length);
 }
 
 function schemaModuleStem(filename: string): string {
@@ -643,7 +747,7 @@ export function typeDescriptorExpression(
     case "enum": {
       const enumInfo = ctx.enumById.get(type.typeId);
       if (enumInfo) return enumInfo.descriptorConst;
-      const entry = ctx.imports.crossFileEntry(type.typeId);
+      const entry = ctx.imports.crossFileTypeReference(type.typeId);
       if (entry?.kind === "enum") {
         return ctx.imports.enumMirror(entry).descriptorConst;
       }
@@ -654,7 +758,7 @@ export function typeDescriptorExpression(
       if (structInfo) {
         return `{ kind: "struct", get: () => ${structInfo.descriptorConst} }`;
       }
-      const entry = ctx.imports.crossFileEntry(type.typeId);
+      const entry = ctx.imports.crossFileTypeReference(type.typeId);
       if (entry?.kind === "struct") {
         // Deferred getter: the imported descriptor is only dereferenced at
         // use time, so mutually-importing schema modules cannot hit TDZ.
@@ -708,7 +812,7 @@ export function defaultValueExpression(
         }
         return `${info.valuesConst}[0]`;
       }
-      const entry = ctx.imports.crossFileEntry(type.typeId);
+      const entry = ctx.imports.crossFileTypeReference(type.typeId);
       if (entry?.kind === "enum" && entry.info.values.length > 0) {
         return `${ctx.imports.enumMirror(entry).valuesConst}[0]`;
       }
@@ -717,7 +821,7 @@ export function defaultValueExpression(
     case "struct": {
       const info = ctx.structById.get(type.typeId);
       if (info) return `${info.descriptorConst}.createDefault()`;
-      const entry = ctx.imports.crossFileEntry(type.typeId);
+      const entry = ctx.imports.crossFileTypeReference(type.typeId);
       if (entry?.kind === "struct") {
         // Evaluated inside the surrounding createDefault() lambda, so the
         // imported descriptor is dereferenced lazily (no module-init TDZ).
@@ -786,7 +890,7 @@ export function resolveTypeName(
   if (enumInfo) return enumInfo.typeName;
   const structInfo = ctx.structById.get(id);
   if (structInfo) return structInfo.typeName;
-  const entry = ctx.imports.crossFileEntry(id);
+  const entry = ctx.imports.crossFileTypeReference(id);
   if (entry && (entry.kind === "enum" || entry.kind === "struct")) {
     return ctx.imports.importTypeName(entry);
   }

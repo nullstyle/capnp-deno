@@ -180,7 +180,10 @@ Deno.test("capnpc-deno CLI maps schema layout and emits barrel", () => {
   );
 });
 
-Deno.test("capnpc-deno CLI reports output collisions in flat layout", () => {
+Deno.test("capnpc-deno CLI flat layout disambiguates same-basename schema files", () => {
+  // Two schema files sharing a basename used to abort flat runs with an
+  // output-path collision; each claimant now takes its schema-relative path
+  // with "/" flattened to "_".
   const generated: GeneratedFile[] = [
     {
       path: "same_capnp.ts",
@@ -192,6 +195,25 @@ Deno.test("capnpc-deno CLI reports output collisions in flat layout", () => {
       sourceFilename: "two/same.capnp",
       contents: "// two",
     },
+  ];
+
+  const out = finalizeGeneratedFiles(generated, {
+    layout: "flat",
+    srcDirs: [],
+    emitBarrel: false,
+  });
+  assertEquals(
+    out.map((file) => file.path).join(","),
+    "one_same_capnp.ts,two_same_capnp.ts",
+  );
+});
+
+Deno.test("capnpc-deno CLI reports flat collisions it cannot disambiguate", () => {
+  // Without source filenames there is no schema path to disambiguate with,
+  // so the collision must still fail loudly.
+  const generated: GeneratedFile[] = [
+    { path: "same_capnp.ts", contents: "// one" },
+    { path: "same_capnp.ts", contents: "// two" },
   ];
 
   assertThrows(
@@ -1153,6 +1175,10 @@ Deno.test("capnpc-deno CLI barrel namespaces are sanitized valid identifiers", (
   assertEquals(barrelNamespaceIdentifier("1st_schema_types.ts"), "$1stSchema");
   assertEquals(barrelNamespaceIdentifier("default_types.ts"), "default$");
   assertEquals(barrelNamespaceIdentifier("class_types.ts"), "class$");
+  // Strict-mode-restricted identifiers: modules always run in strict mode,
+  // so a bare `eval` / `arguments` binding would be a syntax error downstream.
+  assertEquals(barrelNamespaceIdentifier("eval_types.ts"), "eval$");
+  assertEquals(barrelNamespaceIdentifier("arguments_types.ts"), "arguments$");
 
   // Distinct paths that sanitize to the same identifier are uniqued
   // deterministically in sorted-entry order ("foo_bar_types.ts" sorts before

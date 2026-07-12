@@ -425,39 +425,108 @@ export function finalizeGeneratedFiles(
     }
     return source;
   };
-  // The emitter writes cross-module imports as flat sibling specifiers
-  // (e.g. "./base_types.ts"). Remap each one through the same layout
-  // machinery as the files themselves so the specifier stays correct wherever
-  // the target module lands — including targets not emitted by this run.
+  // Flat layout collapses every generated module onto its basename, so two
+  // schema files with the same basename in different directories would land
+  // on one output path. Disambiguation rule: when 2+ distinct schema files in
+  // this run (generated files AND cross-schema import targets) claim the same
+  // flat filename, EVERY claimant's output name becomes its schema-relative
+  // path with "/" flattened to "_" (e.g. "a/x.capnp" -> "a_x_types.ts",
+  // "b/x.capnp" -> "b_x_types.ts"), reusing the same schema-root derivation
+  // as --layout schema (including the absolute-input common-ancestor rooting
+  // from c299914). Unique basenames keep their historical flat names.
+  const flatClaimants = new Map<string, Set<string>>();
+  const claimFlatName = (emitterPath: string, source: string): void => {
+    const flatName = basenamePath(normalizePath(emitterPath));
+    let owners = flatClaimants.get(flatName);
+    if (!owners) {
+      owners = new Set();
+      flatClaimants.set(flatName, owners);
+    }
+    owners.add(normalizePath(source));
+  };
+  if (options.layout === "flat") {
+    for (const file of generated) {
+      if (file.sourceFilename !== undefined) {
+        claimFlatName(file.path, reconstructSource(file.sourceFilename));
+      }
+      for (const ref of file.crossSchemaImports ?? []) {
+        claimFlatName(
+          ref.specifier,
+          reconstructImportTargetSource(ref.targetSourceFilename),
+        );
+      }
+    }
+  }
+  const flatOutputPath = (
+    emitterPath: string,
+    source: string | undefined,
+    kind: "file" | "importTarget",
+  ): string => {
+    // Generated files keep the emitter-provided path verbatim (normalized;
+    // parent traversal is still rejected by ensureSafeOutputPath). Import
+    // TARGETS are collapsed to their basename: ambiguity-qualified emitter
+    // specifiers carry directory segments that never exist on disk in flat
+    // layout.
+    const normalized = normalizePath(emitterPath);
+    const flatName = kind === "importTarget"
+      ? basenamePath(normalized)
+      : normalized;
+    if (source === undefined) return flatName;
+    const owners = flatClaimants.get(basenamePath(normalized));
+    if (!owners || owners.size < 2) return flatName;
+    const schemaRel = deriveSchemaRelativePath(source, schemaRoots);
+    if (!schemaRel) return flatName;
+    return toModulePathFromSchema(schemaRel, detectGeneratedSuffix(emitterPath))
+      .split("/")
+      .join("_");
+  };
+  const mapOutputPath = (
+    file: GeneratedFile,
+    kind: "file" | "importTarget",
+  ): string =>
+    options.layout === "flat"
+      ? flatOutputPath(file.path, file.sourceFilename, kind)
+      : mapGeneratedFilePath(file, options.layout, schemaRoots);
+  // The emitter writes cross-module imports as sibling specifiers (e.g.
+  // "./base_types.ts"). Remap each one through the same layout machinery as
+  // the files themselves so the specifier stays correct wherever the target
+  // module lands — including targets not emitted by this run. All specifier
+  // replacements for one file are applied in a single simultaneous pass: a
+  // rewritten specifier can textually equal ANOTHER ref's original specifier
+  // (e.g. "./nested/x_types.ts" -> "./x_types.ts" while "./x_types.ts" ->
+  // "../x_types.ts"), and sequential replaceAll would clobber it.
   const rewriteCrossSchemaImports = (
     file: GeneratedFile,
     mappedPath: string,
   ): string => {
-    let contents = file.contents;
+    const replacements = new Map<string, string>();
     for (const ref of file.crossSchemaImports ?? []) {
       const flatPath = ref.specifier.startsWith("./")
         ? ref.specifier.slice(2)
         : ref.specifier;
-      const targetMapped = ensureSafeOutputPath(mapGeneratedFilePath(
-        {
-          path: flatPath,
-          contents: "",
-          sourceFilename: reconstructImportTargetSource(
-            ref.targetSourceFilename,
-          ),
-        },
-        options.layout,
-        schemaRoots,
-      ));
+      const targetMapped = ensureSafeOutputPath(mapOutputPath({
+        path: flatPath,
+        contents: "",
+        sourceFilename: reconstructImportTargetSource(
+          ref.targetSourceFilename,
+        ),
+      }, "importTarget"));
       const specifier = relativeModuleSpecifier(mappedPath, targetMapped);
       if (specifier !== ref.specifier) {
-        contents = contents.replaceAll(
+        replacements.set(
           JSON.stringify(ref.specifier),
           JSON.stringify(specifier),
         );
       }
     }
-    return contents;
+    if (replacements.size === 0) return file.contents;
+    const pattern = [...replacements.keys()]
+      .map(escapeRegExpLiteral)
+      .join("|");
+    return file.contents.replace(
+      new RegExp(pattern, "g"),
+      (match) => replacements.get(match) ?? match,
+    );
   };
   const out: GeneratedFile[] = [];
   const pathToSource = new Map<string, string>();
@@ -465,7 +534,7 @@ export function finalizeGeneratedFiles(
     const resolved = file.sourceFilename === undefined
       ? file
       : { ...file, sourceFilename: reconstructSource(file.sourceFilename) };
-    const mapped = mapGeneratedFilePath(resolved, options.layout, schemaRoots);
+    const mapped = mapOutputPath(resolved, "file");
     const safePath = ensureSafeOutputPath(mapped);
     const source = file.sourceFilename ?? file.path;
     const prior = pathToSource.get(safePath);
@@ -607,9 +676,12 @@ function normalizeRelativeSegments(value: string): string {
 const GENERATED_MODULE_HEADER = "// Generated by capnpc-deno";
 
 // Reserved words that cannot be used as a plain `export * as <name>` binding
-// without confusing downstream `import { <name> }` sites. Sanitized with a
-// trailing "$" so the namespace stays predictable.
+// without confusing downstream `import { <name> }` sites. Includes the
+// strict-mode-restricted identifiers "eval" and "arguments", which are
+// invalid binding names in downstream module code. Sanitized with a trailing
+// "$" so the namespace stays predictable.
 const BARREL_NAMESPACE_RESERVED_WORDS = new Set([
+  "arguments",
   "await",
   "break",
   "case",
@@ -623,6 +695,7 @@ const BARREL_NAMESPACE_RESERVED_WORDS = new Set([
   "do",
   "else",
   "enum",
+  "eval",
   "export",
   "extends",
   "false",
@@ -1184,6 +1257,12 @@ function relativeModuleSpecifier(fromFile: string, toFile: string): string {
   const tail = toParts.slice(common).join("/");
   if (ups === 0) return `./${tail}`;
   return `${"../".repeat(ups)}${tail}`;
+}
+
+// Escape a literal string for embedding in a RegExp alternation. Used by the
+// simultaneous cross-schema specifier rewrite in finalizeGeneratedFiles.
+function escapeRegExpLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizePath(value: string): string {

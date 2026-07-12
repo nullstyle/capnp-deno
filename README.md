@@ -410,7 +410,12 @@ GitHub release assets:
 
 Useful options:
 
-- `--layout schema|flat`
+- `--layout schema|flat` — `schema` mirrors the schema directory tree; `flat`
+  emits every module side by side. When two schema files in one flat run share a
+  basename (e.g. `a/x.capnp` and `b/x.capnp`), each colliding module is named by
+  its schema-relative path with `/` flattened to `_` (`a_x_types.ts`,
+  `b_x_types.ts`); generate such bundles together in one run so cross-file
+  import specifiers agree with the emitted filenames
 - `--no-barrel`
 - `--plugin-response`
 - `--config path/to/capnpc-deno.toml`
