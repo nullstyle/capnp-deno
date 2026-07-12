@@ -224,7 +224,7 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 

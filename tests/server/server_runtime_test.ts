@@ -1,10 +1,13 @@
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  type CapabilityPointer,
   decodeCallRequestFrame,
   decodeReleaseFrame,
   decodeReturnFrame,
   decodeRpcMessageTag,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
+  encodeFinishFrame,
   encodeReleaseFrame,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
@@ -830,6 +833,94 @@ Deno.test("RpcServerRuntime swallows warning callback failures at limit boundari
     await runtime.flush();
     assertEquals(hostAbi.results.length, 1);
     assertEquals(runtime.hostCallPumpDisabled, true);
+  } finally {
+    await runtime.close();
+  }
+});
+
+class ReturnFrameHostAbi extends MockHostAbi {
+  readonly supportsHostCallReturnFrame = true;
+  readonly returnFrames: Uint8Array[] = [];
+
+  respondHostCallReturnFrame(_peer: number, returnFrame: Uint8Array): void {
+    this.returnFrames.push(new Uint8Array(returnFrame));
+  }
+}
+
+Deno.test("RpcServerRuntime forwards Release frames so context exports drain with the wasm peer", async () => {
+  const fake = new FakeCapnpWasm({
+    onPushFrame: () => [],
+  });
+  const peer = WasmPeer.fromExports(fake.exports);
+  const transport = new MockTransport();
+  const bridge = new RpcServerBridge({ nextCapabilityIndex: 9 });
+  let child: CapabilityPointer | null = null;
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId: number, _params: Uint8Array, ctx: {
+      exportCapability?: (
+        dispatch: { interfaceId: bigint; dispatch: () => Uint8Array },
+      ) => CapabilityPointer;
+    }) => {
+      if (!ctx.exportCapability) {
+        throw new Error("expected ctx.exportCapability");
+      }
+      child = ctx.exportCapability({
+        interfaceId: 0x5678n,
+        dispatch: () => encodeSingleU32StructMessage(9),
+      });
+      return {
+        content: encodeSingleU32StructMessage(88),
+        capTable: [{
+          tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+          id: child.capabilityIndex,
+        }],
+      };
+    },
+  }, { capabilityIndex: 5 });
+
+  const hostAbi = new ReturnFrameHostAbi();
+  hostAbi.calls.push(createHostCall(1));
+  const runtime = new RpcServerRuntime(peer, transport, bridge, {
+    wasmHost: {
+      handle: peer.handle,
+      abi: hostAbi,
+    },
+    hostCallPump: {
+      maxCallsPerInboundFrame: 4,
+      maxCallsTotal: 10,
+    },
+  });
+
+  try {
+    await runtime.start();
+    await transport.emit(new Uint8Array([0x01]));
+    await runtime.flush();
+
+    assertEquals(hostAbi.exceptions.length, 0);
+    assertEquals(hostAbi.returnFrames.length, 1);
+    const decoded = decodeReturnFrame(hostAbi.returnFrames[0]);
+    assertEquals(decoded.kind, "results");
+    assert(child !== null, "expected context export during dispatch");
+    const childIndex = (child as CapabilityPointer).capabilityIndex;
+    assertEquals(bridge.hasCapability(childIndex), true);
+
+    // The peer finishes the question but keeps the returned capability.
+    await transport.emit(
+      encodeFinishFrame({ questionId: 1, releaseResultCaps: false }),
+    );
+    await runtime.flush();
+    assertEquals(bridge.hasCapability(childIndex), true);
+
+    // An inbound Release frame must reach the bridge and drop the
+    // context-exported dispatch entry, mirroring the wasm export table.
+    await transport.emit(
+      encodeReleaseFrame({ id: childIndex, referenceCount: 1 }),
+    );
+    await runtime.flush();
+    assertEquals(bridge.hasCapability(childIndex), false);
+    // Statically registered capabilities are unaffected.
+    assertEquals(bridge.hasCapability(5), true);
   } finally {
     await runtime.close();
   }

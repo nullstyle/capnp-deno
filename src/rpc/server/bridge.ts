@@ -19,6 +19,7 @@ import {
   type RpcObservability,
 } from "../../observability/observability.ts";
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   decodeBootstrapRequestFrame,
   decodeCallRequestFrame,
   decodeFinishFrame,
@@ -226,6 +227,11 @@ export interface RpcCallContext {
   };
   /**
    * Optional export hook for returning local capability implementations.
+   *
+   * Unless `referenceCount` is given, capabilities exported through this
+   * hook are wire-managed: they carry no standing references of their own,
+   * gain one reference per Return frame capTable occurrence, and are
+   * unregistered once the peer releases every reference.
    */
   readonly exportCapability?: (
     dispatch: RpcServerDispatch,
@@ -390,6 +396,8 @@ export interface RpcServerBridgeStats {
   readonly exportedCapabilities: number;
   /** Total retained references across exported capabilities. */
   readonly totalCapabilityReferences: number;
+  /** Total answer holds keeping exported capabilities alive until Finish. */
+  readonly answerHeldCapabilityReferences: number;
   /** Capability index that will be assigned to the next auto-exported capability. */
   readonly nextCapabilityIndex: number;
   /** Configured answer table size limit, or `null` when disabled. */
@@ -402,7 +410,22 @@ export interface RpcServerBridgeStats {
 
 interface RegisteredDispatch {
   readonly dispatch: RpcServerDispatch;
+  /**
+   * References the peer can release over the wire: the registration's
+   * initial `referenceCount` (grants made out-of-band, such as a bootstrap
+   * answer produced by the WASM peer) plus one reference per senderHosted
+   * capTable occurrence in every Return frame this bridge builds. This
+   * mirrors the peer-visible wire refcount, so inbound Release frames drain
+   * it one-for-one.
+   */
   refCount: number;
+  /**
+   * Number of retained (unfinished) answers whose results reference this
+   * capability. Answers hold their result capabilities until Finish or
+   * eviction, so pipelined calls resolved through the answer table never
+   * observe a capability that a concurrent Release already drained.
+   */
+  answerHoldCount: number;
 }
 
 type RpcDispatchOutcome =
@@ -435,6 +458,12 @@ interface AnswerTableEntry {
    * Incremented each time eviction is deferred due to pipelineRefCount > 0.
    */
   evictionAttempts: number;
+  /**
+   * Capability indexes referenced by this answer's Return capTable, one
+   * entry per senderHosted occurrence. Each occurrence contributes an
+   * answer-hold on the registered capability until Finish or eviction.
+   */
+  heldCapabilityIndexes?: number[];
 }
 
 function normalizeCapability(
@@ -609,6 +638,27 @@ export class RpcServerBridge {
     this.#onAsyncHostCallSettled = onSettled;
   }
 
+  /**
+   * Register a dispatch handler under a capability index.
+   *
+   * `referenceCount` seeds the wire refcount with references granted
+   * out-of-band (defaults to `1`, matching a bootstrap grant). Every
+   * senderHosted capTable occurrence in a Return frame built by this bridge
+   * adds one more reference, and inbound Release frames drain them. Pass
+   * `referenceCount: 0` for a wire-managed capability whose lifetime is
+   * driven entirely by Return/Release accounting — this is the default for
+   * capabilities exported through {@link RpcCallContext.exportCapability}.
+   *
+   * @param dispatch - The handler implementing the capability.
+   * @param options - Optional explicit index and initial reference count.
+   * @returns A pointer holding the registered capability index.
+   * @throws {ProtocolError} If the index is taken or the count is invalid.
+   *
+   * @example
+   * ```ts
+   * const cap = bridge.exportCapability(myDispatch, { referenceCount: 1 });
+   * ```
+   */
   exportCapability(
     dispatch: RpcServerDispatch,
     options: { capabilityIndex?: number; referenceCount?: number } = {},
@@ -632,9 +682,9 @@ export class RpcServerBridge {
     }
 
     const referenceCount = options.referenceCount ?? 1;
-    if (!Number.isInteger(referenceCount) || referenceCount <= 0) {
+    if (!Number.isInteger(referenceCount) || referenceCount < 0) {
       throw new ProtocolError(
-        `referenceCount must be a positive integer, got ${referenceCount}`,
+        `referenceCount must be a non-negative integer, got ${referenceCount}`,
         {
           metadata: {
             phase: "capability_resolve",
@@ -648,6 +698,7 @@ export class RpcServerBridge {
     this.#dispatchByCapability.set(capabilityIndex, {
       dispatch,
       refCount: referenceCount,
+      answerHoldCount: 0,
     });
     emitObservabilityEvent(this.#observability, {
       name: "rpc.server.capability_export",
@@ -689,6 +740,26 @@ export class RpcServerBridge {
     registered.refCount += referenceCount;
   }
 
+  /**
+   * Drop wire references from a registered capability, deleting the
+   * registration once its refcount and answer holds both reach zero.
+   *
+   * Inbound Release frames route through this method, so releasing more
+   * references than the capability's current refcount is a protocol error.
+   * A capability whose refcount reaches zero while retained answers still
+   * reference it stays registered until those answers finish or evict.
+   *
+   * @param capability - The capability index or pointer to release.
+   * @param referenceCount - Number of references to drop (default `1`).
+   * @returns `true` if the capability remains registered, `false` if it was
+   * removed or was not registered.
+   * @throws {ProtocolError} If the count is invalid or exceeds the refcount.
+   *
+   * @example
+   * ```ts
+   * const stillRegistered = bridge.releaseCapability(cap, 1);
+   * ```
+   */
   releaseCapability(
     capability: number | CapabilityPointer,
     referenceCount = 1,
@@ -725,7 +796,8 @@ export class RpcServerBridge {
 
     registered.refCount -= referenceCount;
     const remainingRefCount = Math.max(registered.refCount, 0);
-    const released = registered.refCount <= 0;
+    const released = registered.refCount <= 0 &&
+      registered.answerHoldCount <= 0;
     emitObservabilityEvent(this.#observability, {
       name: "rpc.server.capability_release",
       attributes: {
@@ -735,7 +807,7 @@ export class RpcServerBridge {
         "rpc.released": released,
       },
     });
-    if (registered.refCount <= 0) {
+    if (released) {
       this.#dispatchByCapability.delete(capabilityIndex);
       return false;
     }
@@ -793,8 +865,10 @@ export class RpcServerBridge {
     }
 
     let totalCapabilityReferences = 0;
+    let answerHeldCapabilityReferences = 0;
     for (const registered of this.#dispatchByCapability.values()) {
       totalCapabilityReferences += registered.refCount;
+      answerHeldCapabilityReferences += registered.answerHoldCount;
     }
 
     return {
@@ -807,6 +881,7 @@ export class RpcServerBridge {
       evictionAttempts,
       exportedCapabilities: this.#dispatchByCapability.size,
       totalCapabilityReferences,
+      answerHeldCapabilityReferences,
       nextCapabilityIndex: this.#nextCapabilityIndex,
       maxAnswerTableSize: normalizeOptionalPositiveLimit(
         this.#maxAnswerTableSize,
@@ -882,6 +957,10 @@ export class RpcServerBridge {
             },
           });
         }
+        // Finish ends the answer's hold on its result capabilities. When the
+        // peer sets releaseResultCaps it also implicitly releases the wire
+        // reference each Return capTable occurrence granted.
+        this.#releaseAnswerHeldCapabilities(entry, finish.releaseResultCaps);
       }
       this.#answerTable.delete(finish.questionId);
       if (this.#onFinish) {
@@ -1065,6 +1144,11 @@ export class RpcServerBridge {
       });
     }
 
+    // The Return frame below hands the peer one wire reference per
+    // senderHosted capTable occurrence; mirror that in the registry so
+    // inbound Release frames can drain exported dispatch entries.
+    this.#trackReturnedCapabilities(entry, outcome.response.capTable);
+
     return encodeReturnResultsFrame({
       answerId: call.questionId,
       content: outcome.response.content,
@@ -1105,7 +1189,10 @@ export class RpcServerBridge {
           this.#maxEvictionRetries !== Infinity &&
           entry.evictionAttempts > this.#maxEvictionRetries
         ) {
-          // Force-evict the entry and report a warning.
+          // Force-evict the entry and report a warning. Eviction ends the
+          // answer's holds but never drops peer wire references: those can
+          // only drain via Release frames or Finish releaseResultCaps.
+          this.#releaseAnswerHeldCapabilities(entry, false);
           this.#answerTable.delete(questionId);
           const error = new SessionError(
             `Force-evicted answer table entry for question ${questionId} after ${entry.evictionAttempts} eviction attempts (pipelineRefCount=${entry.pipelineRefCount})`,
@@ -1158,6 +1245,7 @@ export class RpcServerBridge {
         this.#scheduleEviction(questionId, entry);
         return;
       }
+      this.#releaseAnswerHeldCapabilities(entry, false);
       this.#answerTable.delete(questionId);
     }, this.#answerEvictionTimeoutMs);
     // Unref the timer so it does not prevent the process from exiting
@@ -1172,6 +1260,67 @@ export class RpcServerBridge {
     }
     (entry as { evictionTimer?: ReturnType<typeof setTimeout> })
       .evictionTimer = timer;
+  }
+
+  /**
+   * Record the wire references granted by a Return frame's capTable: each
+   * senderHosted occurrence of a registered capability adds one peer-owned
+   * reference and one answer hold that lasts until the question finishes.
+   */
+  #trackReturnedCapabilities(
+    entry: AnswerTableEntry,
+    capTable: RpcCapDescriptor[] | undefined,
+  ): void {
+    if (!capTable || capTable.length === 0) return;
+    let held: number[] | undefined;
+    for (const descriptor of capTable) {
+      if (descriptor.tag !== CAP_DESCRIPTOR_TAG_SENDER_HOSTED) continue;
+      const registered = this.#dispatchByCapability.get(descriptor.id);
+      if (!registered) continue;
+      registered.refCount += 1;
+      registered.answerHoldCount += 1;
+      (held ??= []).push(descriptor.id);
+    }
+    if (held) entry.heldCapabilityIndexes = held;
+  }
+
+  /**
+   * End an answer's holds on its result capabilities. When
+   * `releaseWireRefs` is set (Finish with releaseResultCaps), the peer's
+   * wire reference from each capTable occurrence is dropped as well;
+   * eviction paths pass `false` so only the holds end. Registrations are
+   * deleted once neither wire references nor answer holds remain.
+   */
+  #releaseAnswerHeldCapabilities(
+    entry: AnswerTableEntry,
+    releaseWireRefs: boolean,
+  ): void {
+    const held = entry.heldCapabilityIndexes;
+    if (!held) return;
+    entry.heldCapabilityIndexes = undefined;
+    for (const capabilityIndex of held) {
+      const registered = this.#dispatchByCapability.get(capabilityIndex);
+      if (!registered) continue;
+      registered.answerHoldCount = Math.max(
+        registered.answerHoldCount - 1,
+        0,
+      );
+      if (releaseWireRefs && registered.refCount > 0) {
+        registered.refCount -= 1;
+      }
+      if (registered.refCount <= 0 && registered.answerHoldCount <= 0) {
+        this.#dispatchByCapability.delete(capabilityIndex);
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.server.capability_release",
+          attributes: {
+            "rpc.capability_id": capabilityIndex,
+            "rpc.reference_count": releaseWireRefs ? 1 : 0,
+            "rpc.remaining_reference_count": 0,
+            "rpc.released": true,
+          },
+        });
+      }
+    }
   }
 
   async #handleWasmHostCall(
@@ -1504,8 +1653,14 @@ export class RpcServerBridge {
       })),
       signal,
       outboundClient: this.#outboundClient,
+      // Context exports default to a wire-managed lifetime (referenceCount
+      // 0): the Return frame that carries the capability adds the peer's
+      // reference, so a full wire release can drop the registration.
       exportCapability: (dispatch, options) =>
-        this.exportCapability(dispatch, options),
+        this.exportCapability(dispatch, {
+          capabilityIndex: options?.capabilityIndex,
+          referenceCount: options?.referenceCount ?? 0,
+        }),
     };
 
     try {
