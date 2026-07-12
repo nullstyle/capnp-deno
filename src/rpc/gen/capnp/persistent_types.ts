@@ -462,7 +462,13 @@ export interface Persistent {
   ): Promise<SaveResults["sturdyRef"]>;
 }
 
-function createPersistentServiceClient(
+/**
+ * Adapt a low-level `PersistentClient` into the high-level `Persistent` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Persistent>` values for cross-file interface references.
+ */
+export function createPersistentServiceClient(
   client: PersistentClient,
   transport: RpcClientTransport,
 ): Persistent {
