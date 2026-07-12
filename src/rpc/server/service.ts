@@ -328,9 +328,12 @@ function withStubLifecycle<TClient extends object>(
   client: TClient,
   close: () => Promise<void>,
 ): RpcStub<TClient> {
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return () => {
@@ -1427,7 +1430,12 @@ async function bootstrapConnectedClient<
   };
 
   try {
-    const client = await service.bootstrapClient(transport, bootstrap);
+    // `await` widens the generic to `Awaited<TClient>`, which the conditional
+    // `RpcStub<TClient>` cannot re-unify with; pin it back to `TClient`.
+    const client = await service.bootstrapClient(
+      transport,
+      bootstrap,
+    ) as TClient;
     return withStubLifecycle(client, close);
   } catch (error) {
     await close().catch(() => {});

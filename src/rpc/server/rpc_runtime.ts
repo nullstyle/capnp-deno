@@ -181,6 +181,10 @@ export interface RpcServiceToken<
 
 /**
  * Type of generated service stubs returned from high-level connectors.
+ *
+ * When the schema interface itself defines a `close` method, the stub
+ * forwards `close` to that RPC method instead and lifecycle release is
+ * reachable only through `Symbol.dispose` / `Symbol.asyncDispose`.
  */
 export interface RpcStubLifecycle {
   close(): Promise<void>;
@@ -190,8 +194,14 @@ export interface RpcStubLifecycle {
 
 /**
  * Typed RPC stub plus lifecycle controls.
+ *
+ * A schema method named `close` wins the property: the lifecycle `close()` is
+ * merged only when `TClient` does not define one, so colliding schema methods
+ * keep their generated signature.
  */
-export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
+export type RpcStub<TClient extends object> = TClient extends { close: unknown }
+  ? TClient & Omit<RpcStubLifecycle, "close">
+  : TClient & RpcStubLifecycle;
 
 /**
  * Generic high-level helper: connect transport, bootstrap typed client.

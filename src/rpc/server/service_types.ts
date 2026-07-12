@@ -106,13 +106,31 @@ export class RpcPeer {
   }
 }
 
+/**
+ * Lifecycle members merged onto typed RPC stubs.
+ *
+ * `close()` releases the stub's underlying resource (a capability reference
+ * or the connection). When the schema interface itself defines a `close`
+ * method, the stub forwards `close` to that RPC method instead and lifecycle
+ * release is reachable only through `Symbol.dispose` / `Symbol.asyncDispose`
+ * (`using` / `await using`).
+ */
 export interface RpcStubLifecycle {
   close(): Promise<void>;
   [Symbol.dispose](): void;
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-export type RpcStub<TClient extends object> = TClient & RpcStubLifecycle;
+/**
+ * Typed RPC stub plus lifecycle controls.
+ *
+ * A schema method named `close` wins the property: the lifecycle `close()` is
+ * merged only when `TClient` does not define one, so colliding schema methods
+ * keep their generated signature.
+ */
+export type RpcStub<TClient extends object> = TClient extends { close: unknown }
+  ? TClient & Omit<RpcStubLifecycle, "close">
+  : TClient & RpcStubLifecycle;
 
 export interface RpcServiceContext {
   /** Peer metadata and transport lifecycle for the accepted connection. */

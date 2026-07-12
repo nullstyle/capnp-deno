@@ -7,20 +7,21 @@ import { assert, assertEquals } from "../test_utils.ts";
 const REQUEST_FIXTURE =
   "tests/fixtures/codegen_requests/multi_schema_request.b64";
 
-// The four per-module hashes are the goldens from BEFORE the namespaced
-// barrel change: single-file module output is a compatibility surface and
-// must stay byte-identical across barrel work. Only the mod.ts hash was
-// deliberately updated when the barrel switched from flat `export * from`
-// re-exports to namespaced `export * as <stem>` re-exports.
+// The per-module hashes pin the single-file module output, which is a
+// compatibility surface: they may only move for deliberate emitter changes.
+// The mod.ts hash was updated when the barrel switched from flat
+// `export * from` re-exports to namespaced `export * as <stem>` re-exports;
+// the *_types.ts hashes were updated when `withCapabilityStubLifecycle`
+// learned to forward a schema-defined `close` method instead of shadowing it.
 const EXPECTED_HASH_BY_PATH: Record<string, string> = {
   "person_codegen_meta.ts":
     "ff17ccca414fa180ebdb6ac9c2b9fdeb2a7a11ba57f0755acad3d376f0bc73a8",
   "person_codegen_types.ts":
-    "0fb1027d7f509eeebcd614e7827c101e075e253de2a1239bd259b9b38fc99f86",
+    "f1d1e984e7a9c766b16f4c6406c92d54e5e13bf63a00f860ac036b984f5059b8",
   "union_group_codegen_meta.ts":
     "55f346ad1d1dd9c4c7bffe0ac1f9d4180d2df09a101d294dbfba2d30ae8eb9fb",
   "union_group_codegen_types.ts":
-    "8546e585aa826a0c11ecfa1c4e665e6674e42f1785f38bc56fd5d63bd369531f",
+    "64850c39b14e95f333b12ad410a496856ef947d710e8a4825f12933891fc9dc1",
   "mod.ts": "79f82485c4ce665e407aa12118e9d5bf636a72fcf6599ecae99a453b6b956a5c",
 };
 

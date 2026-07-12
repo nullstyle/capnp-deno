@@ -446,9 +446,16 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("    closed = true;");
   out.push("    await transport.release?.(capability, 1);");
   out.push("  };");
+  out.push(
+    "  // A schema method literally named `close` keeps the property, so the",
+  );
+  out.push(
+    "  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.",
+  );
+  out.push('  const hasSchemaClose = Reflect.has(client, "close");');
   out.push("  return new Proxy(client as object, {");
   out.push("    get(target, prop, receiver) {");
-  out.push('      if (prop === "close") return close;');
+  out.push('      if (prop === "close" && !hasSchemaClose) return close;');
   out.push("      if (prop === Symbol.asyncDispose) return close;");
   out.push("      if (prop === Symbol.dispose) {");
   out.push("        return (): void => {");

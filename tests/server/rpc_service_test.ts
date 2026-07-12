@@ -108,6 +108,45 @@ Deno.test("connect bootstraps over a started transport and adds stub lifecycle",
   assertEquals(closeCount, 1);
 });
 
+Deno.test("connect forwards a schema-defined close method to the client", async () => {
+  let transportCloseCount = 0;
+  let wireCloseCount = 0;
+  const transport = {
+    start(): void {},
+    send(): Promise<void> {
+      return Promise.resolve();
+    },
+    close(): Promise<void> {
+      transportCloseCount += 1;
+      return Promise.resolve();
+    },
+  };
+
+  const service = createRpcServiceToken({
+    interfaceId: 0x2223n,
+    interfaceName: "CloseCollisionProbe",
+    bootstrapClient: () =>
+      Promise.resolve({
+        close(): Promise<string> {
+          wireCloseCount += 1;
+          return Promise.resolve("wire");
+        },
+      }),
+    registerServer: () => ({ capabilityIndex: 0 }),
+  });
+
+  const client = await connect(service, transport);
+  // The schema method keeps its signature and reaches the client; the
+  // lifecycle close is only available via Symbol.dispose/asyncDispose.
+  const result: string = await client.close();
+  assertEquals(result, "wire");
+  assertEquals(wireCloseCount, 1);
+  assertEquals(transportCloseCount, 0);
+
+  await client[Symbol.asyncDispose]();
+  assertEquals(transportCloseCount, 1);
+});
+
 Deno.test("serveConnection builds peer metadata for accepted transports", async () => {
   const originalCreateWithRoot = RpcServerRuntime.createWithRoot;
   const connectedPeer = deferred<RpcPeer>();
