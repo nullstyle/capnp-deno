@@ -1,9 +1,12 @@
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  type CapabilityPointer,
   decodeReturnFrame,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
   encodeFinishFrame,
   encodeReleaseFrame,
+  RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RpcServerBridge,
   type RpcServerWasmHost,
   SessionError,
@@ -471,18 +474,27 @@ Deno.test("RpcServerBridge validates capability registration and ref-count opera
     `expected duplicate capability error, got: ${String(duplicateThrown)}`,
   );
 
+  // referenceCount 0 is a valid wire-managed registration: it carries no
+  // standing references and lives only through Return/Release accounting.
+  const wireManaged = bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () => encodeSingleU32StructMessage(1),
+  }, { capabilityIndex: 2, referenceCount: 0 });
+  assertEquals(wireManaged.capabilityIndex, 2);
+  assertEquals(bridge.hasCapability(2), true);
+
   let invalidExportRefCount: unknown;
   try {
     bridge.exportCapability({
       interfaceId: 0x1234n,
       dispatch: () => encodeSingleU32StructMessage(1),
-    }, { capabilityIndex: 2, referenceCount: 0 });
+    }, { capabilityIndex: 3, referenceCount: -1 });
   } catch (error) {
     invalidExportRefCount = error;
   }
   assert(
     invalidExportRefCount instanceof Error &&
-      /referenceCount must be a positive integer/i.test(
+      /referenceCount must be a non-negative integer/i.test(
         invalidExportRefCount.message,
       ),
     `expected invalid referenceCount error, got: ${
@@ -1999,4 +2011,313 @@ Deno.test("RpcServerBridge force-evicts entry after maxEvictionRetries and repor
   gate.resolve();
   await pipelinedPromise;
   await bridge.handleFrame(encodeFinishFrame({ questionId: 2 }));
+});
+
+// ---------------------------------------------------------------------------
+// Wire-refcount lifecycle for context-exported capabilities
+// ---------------------------------------------------------------------------
+
+interface WireLifecycleHarness {
+  bridge: RpcServerBridge;
+  rootCall(questionId: number): Promise<number>;
+  childIndex(): number;
+}
+
+/**
+ * Build a bridge whose root capability (index 0) exports a child capability
+ * through `ctx.exportCapability` on every call and returns it in the Return
+ * frame's capTable. The same child dispatch is reused across calls, so each
+ * Return adds one wire reference to a single registration.
+ */
+function createWireLifecycleHarness(
+  childDispatch: () => Promise<Uint8Array> | Uint8Array,
+): WireLifecycleHarness {
+  const bridge = new RpcServerBridge({ nextCapabilityIndex: 30 });
+  let child: CapabilityPointer | null = null;
+  bridge.exportCapability({
+    interfaceId: 0x1111n,
+    dispatch: (_methodId, _params, ctx) => {
+      if (!ctx.exportCapability) {
+        throw new Error("expected ctx.exportCapability");
+      }
+      child ??= ctx.exportCapability({
+        interfaceId: 0x2222n,
+        dispatch: childDispatch,
+      });
+      return {
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{
+          tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+          id: child.capabilityIndex,
+        }],
+      };
+    },
+  }, { capabilityIndex: 0 });
+
+  async function rootCall(questionId: number): Promise<number> {
+    const response = await bridge.handleFrame(encodeCallRequestFrame({
+      questionId,
+      interfaceId: 0x1111n,
+      methodId: 0,
+      targetImportedCap: 0,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }));
+    if (!response) throw new Error("expected return frame");
+    const decoded = decodeReturnFrame(response);
+    if (decoded.kind !== "results") {
+      throw new Error(`expected results, got exception: ${decoded.reason}`);
+    }
+    return decoded.capTable[0].id;
+  }
+
+  return {
+    bridge,
+    rootCall,
+    childIndex: () => {
+      if (!child) throw new Error("root capability was never called");
+      return child.capabilityIndex;
+    },
+  };
+}
+
+async function callCapability(
+  bridge: RpcServerBridge,
+  questionId: number,
+  capabilityIndex: number,
+): Promise<{ kind: string; value?: number; reason?: string }> {
+  const response = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId,
+    interfaceId: 0x2222n,
+    methodId: 0,
+    targetImportedCap: capabilityIndex,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  if (!response) throw new Error("expected return frame");
+  const decoded = decodeReturnFrame(response);
+  await bridge.handleFrame(encodeFinishFrame({ questionId }));
+  if (decoded.kind === "results") {
+    return {
+      kind: decoded.kind,
+      value: decodeSingleU32StructMessage(decoded.contentBytes),
+    };
+  }
+  return { kind: decoded.kind, reason: decoded.reason };
+}
+
+Deno.test("RpcServerBridge context export survives the first of two returned references", async () => {
+  const harness = createWireLifecycleHarness(() =>
+    encodeSingleU32StructMessage(77)
+  );
+  const { bridge } = harness;
+
+  // Return the same child capability from two separate questions; the peer
+  // keeps both returned references by finishing without releaseResultCaps.
+  for (const questionId of [1, 2]) {
+    await harness.rootCall(questionId);
+    await bridge.handleFrame(
+      encodeFinishFrame({ questionId, releaseResultCaps: false }),
+    );
+  }
+  const childIndex = harness.childIndex();
+  assertEquals(bridge.hasCapability(childIndex), true);
+
+  // First release drops one of the two wire references; the capability
+  // must survive and keep dispatching.
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: childIndex, referenceCount: 1 }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), true);
+  const alive = await callCapability(bridge, 3, childIndex);
+  assertEquals(alive.kind, "results");
+  assertEquals(alive.value, 77);
+
+  // Second release drains the export: the registration is dropped and
+  // further calls fail with an unknown capability index.
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: childIndex, referenceCount: 1 }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), false);
+  const gone = await callCapability(bridge, 4, childIndex);
+  assertEquals(gone.kind, "exception");
+  assert(
+    /unknown capability index/i.test(gone.reason ?? ""),
+    `expected unknown capability exception, got: ${gone.reason}`,
+  );
+});
+
+Deno.test("RpcServerBridge keeps a released context export alive while its answer is unfinished", async () => {
+  const gate = deferred<Uint8Array>();
+  const harness = createWireLifecycleHarness(() => gate.promise);
+  const { bridge } = harness;
+
+  await harness.rootCall(1);
+  const childIndex = harness.childIndex();
+
+  // Pipeline a call through question 1 into the child's gated handler.
+  const pipelined = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 2,
+    interfaceId: 0x2222n,
+    methodId: 0,
+    target: {
+      tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+      promisedAnswer: { questionId: 1 },
+    },
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+
+  // Release the child's only wire reference while the pipelined call is
+  // still in flight. Question 1 has not finished, so its answer hold must
+  // keep the registration alive.
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: childIndex, referenceCount: 1 }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), true);
+  assertEquals(bridge.stats.answerHeldCapabilityReferences, 1);
+
+  gate.resolve(encodeSingleU32StructMessage(55));
+  const response = await pipelined;
+  assert(response !== null, "expected pipelined return frame");
+  const decoded = decodeReturnFrame(response);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind === "results") {
+    assertEquals(decodeSingleU32StructMessage(decoded.contentBytes), 55);
+  }
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 2 }));
+
+  // Finishing question 1 ends the answer hold; with the wire reference
+  // already released the registration is dropped.
+  await bridge.handleFrame(
+    encodeFinishFrame({ questionId: 1, releaseResultCaps: false }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), false);
+  assertEquals(bridge.stats.answerHeldCapabilityReferences, 0);
+});
+
+Deno.test("RpcServerBridge allows re-exporting a capability index after a full wire release", async () => {
+  const bridge = new RpcServerBridge();
+  let generation = 0;
+  bridge.exportCapability({
+    interfaceId: 0x1111n,
+    dispatch: (_methodId, _params, ctx) => {
+      if (!ctx.exportCapability) {
+        throw new Error("expected ctx.exportCapability");
+      }
+      generation += 1;
+      const value = generation * 10;
+      const cap = ctx.exportCapability({
+        interfaceId: 0x2222n,
+        dispatch: () => encodeSingleU32StructMessage(value),
+      }, { capabilityIndex: 40 });
+      return {
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{
+          tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+          id: cap.capabilityIndex,
+        }],
+      };
+    },
+  }, { capabilityIndex: 0 });
+
+  async function rootCall(questionId: number): Promise<void> {
+    const response = await bridge.handleFrame(encodeCallRequestFrame({
+      questionId,
+      interfaceId: 0x1111n,
+      methodId: 0,
+      targetImportedCap: 0,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }));
+    if (!response) throw new Error("expected return frame");
+    const decoded = decodeReturnFrame(response);
+    if (decoded.kind !== "results") {
+      throw new Error(`expected results, got exception: ${decoded.reason}`);
+    }
+    await bridge.handleFrame(
+      encodeFinishFrame({ questionId, releaseResultCaps: false }),
+    );
+  }
+
+  // First generation lives at index 40, then fully drains.
+  await rootCall(1);
+  assertEquals(bridge.hasCapability(40), true);
+  await bridge.handleFrame(encodeReleaseFrame({ id: 40, referenceCount: 1 }));
+  assertEquals(bridge.hasCapability(40), false);
+
+  // The same index can be exported again by a later call, and dispatches
+  // to the new generation's handler.
+  await rootCall(2);
+  assertEquals(bridge.hasCapability(40), true);
+  const revived = await callCapability(bridge, 3, 40);
+  assertEquals(revived.kind, "results");
+  assertEquals(revived.value, 20);
+});
+
+Deno.test("RpcServerBridge drops returned references when Finish releases result caps", async () => {
+  const harness = createWireLifecycleHarness(() =>
+    encodeSingleU32StructMessage(9)
+  );
+  const { bridge } = harness;
+
+  await harness.rootCall(1);
+  const childIndex = harness.childIndex();
+  assertEquals(bridge.hasCapability(childIndex), true);
+
+  // Finish with releaseResultCaps (the wire default) implicitly releases
+  // the reference granted by the Return frame, so no Release is expected.
+  await bridge.handleFrame(
+    encodeFinishFrame({ questionId: 1, releaseResultCaps: true }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), false);
+});
+
+Deno.test("RpcServerBridge answer eviction ends holds without dropping wire references", async () => {
+  const gate = deferred<Uint8Array>();
+  const bridge = new RpcServerBridge({
+    answerEvictionTimeoutMs: 5,
+    nextCapabilityIndex: 30,
+  });
+  let child: CapabilityPointer | null = null;
+  bridge.exportCapability({
+    interfaceId: 0x1111n,
+    dispatch: (_methodId, _params, ctx) => {
+      if (!ctx.exportCapability) {
+        throw new Error("expected ctx.exportCapability");
+      }
+      child = ctx.exportCapability({
+        interfaceId: 0x2222n,
+        dispatch: () => gate.promise,
+      });
+      return {
+        content: encodeSingleU32StructMessage(1),
+        capTable: [{
+          tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+          id: child.capabilityIndex,
+        }],
+      };
+    },
+  }, { capabilityIndex: 0 });
+
+  const response = await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 1,
+    interfaceId: 0x1111n,
+    methodId: 0,
+    targetImportedCap: 0,
+    paramsContent: encodeSingleU32StructMessage(0),
+  }));
+  assert(response !== null, "expected return frame");
+  const childIndex = child!.capabilityIndex;
+
+  // Wait for the unfinished answer to be evicted.
+  for (let i = 0; i < 100 && bridge.answerTableSize > 0; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assertEquals(bridge.answerTableSize, 0);
+
+  // Eviction ends the answer hold, but the peer still owns the returned
+  // wire reference, so the registration stays until an explicit Release.
+  assertEquals(bridge.stats.answerHeldCapabilityReferences, 0);
+  assertEquals(bridge.hasCapability(childIndex), true);
+  await bridge.handleFrame(
+    encodeReleaseFrame({ id: childIndex, referenceCount: 1 }),
+  );
+  assertEquals(bridge.hasCapability(childIndex), false);
 });

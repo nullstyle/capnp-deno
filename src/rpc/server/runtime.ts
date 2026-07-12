@@ -15,7 +15,11 @@ import {
 import { RpcSession, type RpcSessionOptions } from "../session/session.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { WasmPeer } from "../../wasm/peer.ts";
-import { decodeRpcMessageTag, RPC_MESSAGE_TAG_FINISH } from "../wire.ts";
+import {
+  decodeRpcMessageTag,
+  RPC_MESSAGE_TAG_FINISH,
+  RPC_MESSAGE_TAG_RELEASE,
+} from "../wire.ts";
 
 const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;
 const DEFAULT_MAX_HOST_CALLS_TOTAL = Number.MAX_SAFE_INTEGER;
@@ -584,7 +588,13 @@ export class RpcServerRuntime {
 
   async #afterInboundFrame(frame: Uint8Array): Promise<void> {
     try {
-      if (decodeRpcMessageTag(frame) === RPC_MESSAGE_TAG_FINISH) {
+      const tag = decodeRpcMessageTag(frame);
+      // The WASM peer consumes lifecycle frames for its own tables, but the
+      // bridge's dispatch registry tracks answers and exported capabilities
+      // in parallel, so Finish and Release must reach it as well.
+      if (
+        tag === RPC_MESSAGE_TAG_FINISH || tag === RPC_MESSAGE_TAG_RELEASE
+      ) {
         await this.bridge.handleFrame(frame);
       }
     } catch {
