@@ -134,9 +134,49 @@ function createLifecycleHarness(
   return { state, client, session };
 }
 
-Deno.test("rpc lifecycle: default finish eagerly releases result capabilities", async () => {
+Deno.test("rpc lifecycle: default finish retains imported result capabilities", async () => {
+  // A results Return that carries capabilities hands the caller live cap ids;
+  // the auto-finish must not spend the wire references for them (each cap is
+  // released explicitly, e.g. by a generated stub's close()). Before this
+  // default, every non-root capability a server returned was destroyed by the
+  // client's own auto-finish before it could be called.
   const { state, client, session } = createLifecycleHarness({
     resultCapsPerCall: 3,
+  });
+
+  try {
+    const iterations = 12;
+    const importedCaps: number[] = [];
+    for (let i = 0; i < iterations; i += 1) {
+      const response = await client.callRaw(
+        { capabilityIndex: 0 },
+        100 + i,
+        encodeSingleU32StructMessage(i + 1),
+      );
+      assertEquals(response.capTable.length, 3);
+      importedCaps.push(...response.capTable.map((entry) => entry.id));
+    }
+
+    assertEquals(state.capsByAnswer.size, 0);
+    assertEquals(state.capRefCounts.size, 36);
+    assertEquals(state.finishCount, 12);
+    assertEquals(state.releaseCount, 0);
+    assertEquals(state.events.length, 24);
+    assertEquals(state.events[1], "finish:1:retain");
+
+    for (const capId of importedCaps) {
+      await client.release({ capabilityIndex: capId }, 1);
+    }
+    assertEquals(state.capRefCounts.size, 0);
+    assertEquals(state.releaseCount, 36);
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("rpc lifecycle: default finish eagerly releases when results carry no capabilities", async () => {
+  const { state, client, session } = createLifecycleHarness({
+    resultCapsPerCall: 0,
   });
 
   try {
@@ -147,7 +187,7 @@ Deno.test("rpc lifecycle: default finish eagerly releases result capabilities", 
         100 + i,
         encodeSingleU32StructMessage(i + 1),
       );
-      assertEquals(response.capTable.length, 3);
+      assertEquals(response.capTable.length, 0);
     }
 
     assertEquals(state.capsByAnswer.size, 0);
@@ -155,6 +195,31 @@ Deno.test("rpc lifecycle: default finish eagerly releases result capabilities", 
     assertEquals(state.finishCount, 12);
     assertEquals(state.releaseCount, 0);
     assertEquals(state.events.length, 24);
+    assertEquals(state.events[1], "finish:1:release");
+  } finally {
+    await session.close();
+  }
+});
+
+Deno.test("rpc lifecycle: explicit releaseResultCaps=true overrides the retain default", async () => {
+  const { state, client, session } = createLifecycleHarness({
+    resultCapsPerCall: 2,
+  });
+
+  try {
+    const response = await client.callRaw(
+      { capabilityIndex: 0 },
+      5,
+      encodeSingleU32StructMessage(1),
+      {
+        finish: { releaseResultCaps: true },
+      },
+    );
+
+    assertEquals(response.capTable.length, 2);
+    assertEquals(state.finishCount, 1);
+    assertEquals(state.capRefCounts.size, 0);
+    assertEquals(state.events[1], "finish:1:release");
   } finally {
     await session.close();
   }

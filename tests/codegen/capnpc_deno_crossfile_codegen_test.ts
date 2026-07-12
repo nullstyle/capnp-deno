@@ -47,12 +47,9 @@ import {
   RpcServerRuntime,
   SessionRpcClientTransport,
 } from "../../src/mod.ts";
-import type { RpcGeneratedServerDispatch, RpcStub } from "../../src/rpc.ts";
+import type { RpcStub } from "../../src/rpc.ts";
 import type { Watcher } from "../fixtures/generated/crossfile/base_types.ts";
-import {
-  createWatcherServer,
-  WatcherInterfaceId,
-} from "../fixtures/generated/crossfile/base_types.ts";
+import { createWatcherServer } from "../fixtures/generated/crossfile/base_types.ts";
 import {
   Hub,
   HubInterfaceId,
@@ -700,9 +697,13 @@ Deno.test("crossfile: cap-bearing struct codec dehydrates live stubs on encode",
 Deno.test("crossfile: live RPC routes a base-module capability through a consumer-module service", async () => {
   // Consumer-module Hub service: receives a base-module Watcher capability as
   // a param, calls a method on it while the original call is still pending,
-  // holds it, and hands a Watcher capability back through the result path.
+  // holds it, and mints fresh Watcher capabilities back through both result
+  // paths (flattened single-field and struct-carried).
   const serverEchoes: number[] = [];
   let held: RpcStub<Watcher> | null = null;
+  // Exported on the bridge once the runtime exists; register() hands this
+  // pointer back through the struct-carried result path.
+  let structWatcherPointer: { capabilityIndex: number } | null = null;
   const hubImpl: Hub = {
     attach: async (value) => {
       // The generated server adapter always delivers a typed stub built from
@@ -717,70 +718,57 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
     },
     acquire: () => {
       if (!held) throw new Error("no watcher attached");
-      // Runtime limitations verified in this suite's development: the wasm
-      // host-call return path only relays capability ids the session already
-      // knows (the root export), and client-exported callback capabilities
-      // are released once their exporting call finishes. Returning the
-      // received stub itself therefore needs capability-reflection support
-      // the runtime does not have yet, so hand back the root-hosted Watcher
-      // endpoint. The generated cross-module result path still runs in full:
-      // exportCapabilityFromContext executes against the imported base-module
-      // token binding, and the client decodes the returned capability into a
-      // typed stub via the imported client factories.
-      return Promise.resolve(
-        { capabilityIndex: 0 } as unknown as RpcStub<Watcher>,
-      );
+      // Freshly minted per-acquire capability: the generated adapter exports
+      // it through ctx.exportCapability (exportCapabilityFromContext against
+      // the imported base-module token binding) and the wasm relay
+      // auto-registers the new export id named by the Return frame. Before
+      // that relay fix only the root export id survived, so this handler had
+      // to hand back the root-hosted endpoint.
+      const fresh: Watcher = {
+        ping: (chunk) =>
+          Promise.resolve({ seq: chunk.seq + 1000, payload: chunk.payload }),
+      };
+      // The friendly Hub type reuses the client-facing signature
+      // (RpcStub<Watcher>); the generated adapter accepts a raw local
+      // implementation and exports it via exportCapabilityFromContext.
+      return Promise.resolve(fresh as unknown as RpcStub<Watcher>);
     },
     register: () => {
       // P4 struct-carried capability: the Watcher rides inside a Registration
-      // struct field instead of a flattened single-field result. The same
-      // root-export limitation as acquire applies, so hand back the
-      // root-hosted Watcher endpoint as a raw pointer; the generated dispatch
-      // dehydrates the result struct and the client-side walker hydrates the
-      // field into a live typed stub.
+      // struct field instead of a flattened single-field result. The struct
+      // walker dehydrates stubs and pointers (it does not auto-export raw
+      // implementations), so hand back a capability pre-exported on the
+      // bridge — another id the wasm peer first learns about from this
+      // Return frame.
+      if (!structWatcherPointer) throw new Error("struct watcher not ready");
       return Promise.resolve({
-        label: "root-watcher",
-        watcher: { capabilityIndex: 0 } as unknown as RpcStub<Watcher>,
+        label: "fresh-watcher",
+        watcher: structWatcherPointer as unknown as RpcStub<Watcher>,
         backups: [],
         route: { primary: null },
       });
     },
   };
 
-  // The root capability serves Hub and doubles as a base-module Watcher
-  // endpoint so a Watcher capability can ride back through acquire's result.
-  const rootWatcherEndpoint = createWatcherServer({
-    ping: (params, _ctx) => {
-      const chunk = params.chunk;
-      return { chunk: { seq: chunk.seq + 100, payload: chunk.payload } };
-    },
-  });
-
   const transport = new InMemoryRpcHarnessTransport();
   const runtime = await RpcServerRuntime.createWithRoot(
     transport,
-    (registry, server: Hub, options) => {
-      let hubDispatch: RpcGeneratedServerDispatch | undefined;
-      Hub.registerServer({
-        exportCapability: (dispatch) => {
-          hubDispatch = dispatch;
-          return { capabilityIndex: 0 };
-        },
-      }, server);
-      const combined: RpcGeneratedServerDispatch = {
-        interfaceId: HubInterfaceId,
-        interfaceIds: [HubInterfaceId, WatcherInterfaceId],
-        dispatch: (methodId, params, ctx) =>
-          ctx.interfaceId === WatcherInterfaceId
-            ? rootWatcherEndpoint.dispatch(methodId, params, ctx)
-            : hubDispatch!.dispatch(methodId, params, ctx),
-      };
-      return registry.exportCapability(combined, options);
-    },
+    (registry, server: Hub, options) =>
+      Hub.registerServer(registry, server, options),
     hubImpl,
     { autoStart: true },
   );
   try {
+    // A base-module Watcher endpoint exported outside any call context; its
+    // capability id rides back inside register()'s struct-carried result.
+    structWatcherPointer = runtime.bridge.exportCapability(
+      createWatcherServer({
+        ping: (params, _ctx) => {
+          const chunk = params.chunk;
+          return { chunk: { seq: chunk.seq + 2000, payload: chunk.payload } };
+        },
+      }),
+    );
     const clientTransport = new SessionRpcClientTransport(
       runtime.session,
       transport,
@@ -822,7 +810,9 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
     );
 
     // The capability handed back through the single-field result flattening
-    // path decodes into a typed RpcStub<Watcher> and stays callable.
+    // path decodes into a typed RpcStub<Watcher> and stays callable. The
+    // +1000 reply proves the call reached the freshly minted per-acquire
+    // capability, not the root export.
     const reacquired = await withTimeout(
       hub.acquire({ timeoutMs: 2_000 }),
       2_500,
@@ -835,7 +825,7 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
       2_500,
       "call the reacquired watcher stub",
     );
-    assertEquals(pong.seq, 107);
+    assertEquals(pong.seq, 1007);
 
     // P4: a capability carried inside a struct-typed result field round-trips
     // into a live typed stub. The generated dispatch dehydrates the
@@ -847,7 +837,7 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
       2_500,
       "register: struct-carried capability round-trip",
     );
-    assertEquals(registration.label, "root-watcher");
+    assertEquals(registration.label, "fresh-watcher");
     assertEquals(registration.backups.length, 0);
     assertEquals(registration.route.primary, null);
     assert(
@@ -866,7 +856,7 @@ Deno.test("crossfile: live RPC routes a base-module capability through a consume
       2_500,
       "call the struct-carried watcher stub",
     );
-    assertEquals(structPong.seq, 111);
+    assertEquals(structPong.seq, 2011);
   } finally {
     await runtime.close();
   }

@@ -452,6 +452,105 @@ Deno.test("RpcServerBridge host-call pump uses return-frame bridge for advanced 
   }
 });
 
+class MockWasmHostAbiWithFailingReturnFrame extends MockWasmHostAbi {
+  respondHostCallReturnFrame(
+    _peer: number,
+    _returnFrame: Uint8Array,
+  ): void {
+    throw new Error("wasm peer rejected relay: UnknownExport");
+  }
+}
+
+Deno.test("RpcServerBridge falls back to an exception Return when the return-frame relay fails", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(42),
+        capTable: [{ tag: 1, id: 9 }],
+      }),
+  }, { capabilityIndex: 2 });
+
+  const hostAbi = new MockWasmHostAbiWithFailingReturnFrame();
+  hostAbi.calls.push({
+    questionId: 19,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 19,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 2,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  // Synchronous dispatch: the relay failure still propagates to the pump
+  // caller, but only after the exception fallback reached the wasm peer so
+  // the client observes a Return instead of hanging.
+  let pumpError: unknown;
+  try {
+    await bridge.pumpWasmHostCalls({ handle: 1, abi: hostAbi });
+  } catch (error) {
+    pumpError = error;
+  }
+  assert(
+    pumpError instanceof Error && /UnknownExport/.test(pumpError.message),
+    `expected relay error to propagate, got: ${String(pumpError)}`,
+  );
+  assertEquals(hostAbi.results.length, 0);
+  assertEquals(hostAbi.exceptions.length, 1);
+  assertEquals(hostAbi.exceptions[0].questionId, 19);
+  assert(
+    /UnknownExport/.test(hostAbi.exceptions[0].reason),
+    `unexpected exception reason: ${hostAbi.exceptions[0].reason}`,
+  );
+});
+
+Deno.test("RpcServerBridge reports async relay failures and still answers the client", async () => {
+  const unhandled = deferred<unknown>();
+  const bridge = new RpcServerBridge({
+    onUnhandledError: (error) => {
+      unhandled.resolve(error);
+    },
+  });
+  bridge.setAsyncHostCallDispatch(true);
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: () =>
+      Promise.resolve({
+        content: encodeSingleU32StructMessage(7),
+        capTable: [{ tag: 1, id: 3 }],
+      }),
+  }, { capabilityIndex: 2 });
+
+  const hostAbi = new MockWasmHostAbiWithFailingReturnFrame();
+  hostAbi.calls.push({
+    questionId: 23,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    frame: encodeCallRequestFrame({
+      questionId: 23,
+      interfaceId: 0x1234n,
+      methodId: 0,
+      targetImportedCap: 2,
+      paramsContent: encodeSingleU32StructMessage(0),
+    }),
+  });
+
+  const handled = await bridge.pumpWasmHostCalls({ handle: 1, abi: hostAbi });
+  assertEquals(handled, 1);
+
+  const reported = await unhandled.promise;
+  assert(
+    reported instanceof Error && /UnknownExport/.test(reported.message),
+    `expected relay error via onUnhandledError, got: ${String(reported)}`,
+  );
+  assertEquals(hostAbi.exceptions.length, 1);
+  assertEquals(hostAbi.exceptions[0].questionId, 23);
+});
+
 Deno.test("RpcServerBridge validates capability registration and ref-count operations", () => {
   const bridge = new RpcServerBridge();
   bridge.exportCapability({
