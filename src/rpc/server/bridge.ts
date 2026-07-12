@@ -1240,6 +1240,15 @@ export class RpcServerBridge {
           }
         })
         .catch((error) => {
+          emitObservabilityEvent(this.#observability, {
+            name: "rpc.server.async_host_call_error",
+            error,
+            attributes: {
+              "rpc.question_id": call.questionId,
+              "rpc.interface_id": call.interfaceId,
+              "rpc.method_id": call.methodId,
+            },
+          });
           if (this.#onUnhandledError) {
             Promise.resolve(this.#onUnhandledError(error, call)).catch(() => {
               // Nothing more to report if the error handler itself fails.
@@ -1260,11 +1269,46 @@ export class RpcServerBridge {
     const supportsReturnFrame = wasmHost.abi.supportsHostCallReturnFrame ??
       true;
     if (wasmHost.abi.respondHostCallReturnFrame && supportsReturnFrame) {
-      wasmHost.abi.respondHostCallReturnFrame(
-        wasmHost.handle,
-        responseFrame,
-      );
-      return;
+      try {
+        wasmHost.abi.respondHostCallReturnFrame(
+          wasmHost.handle,
+          responseFrame,
+        );
+        return;
+      } catch (error) {
+        // The WASM peer refused to relay the prebuilt Return frame. Without
+        // a fallback the client never receives a Return for this question
+        // and hangs until its own timeout, so degrade to an exception
+        // Return carrying the relay failure, then rethrow so callers still
+        // observe the error (onUnhandledError in the async dispatch path).
+        const annotated = annotateCapnpError(error, {
+          phase: "dispatch",
+          questionId: call.questionId,
+          interfaceId: call.interfaceId,
+          methodId: call.methodId,
+          messageName: "Return",
+        });
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.server.host_call_return_relay_error",
+          error: annotated,
+          attributes: {
+            "rpc.question_id": call.questionId,
+            "rpc.interface_id": call.interfaceId,
+            "rpc.method_id": call.methodId,
+          },
+        });
+        try {
+          wasmHost.abi.respondHostCallException(
+            wasmHost.handle,
+            call.questionId,
+            annotated instanceof Error ? annotated.message : String(annotated),
+          );
+        } catch {
+          // The exception fallback failed too (e.g. the question is already
+          // gone); nothing further can reach the client for this call.
+        }
+        throw annotated;
+      }
     }
 
     const response = decodeReturnFrame(responseFrame);

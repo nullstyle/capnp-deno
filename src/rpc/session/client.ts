@@ -146,7 +146,13 @@ export interface RpcClientMiddleware {
 export interface RpcFinishOptions {
   /**
    * Whether to release all capabilities in the result's cap table.
-   * Defaults to `true` when not specified.
+   *
+   * When not specified, an explicit {@link SessionRpcClientTransport.finish}
+   * defaults to `true`, while the auto-finish sent after a successful call
+   * or bootstrap defaults to `false` whenever the return carried
+   * capabilities: the caller received live stubs for those capabilities and
+   * each stub sends its own `release` message on close, so the finish must
+   * not spend the wire references first.
    */
   releaseResultCaps?: boolean;
   /**
@@ -154,6 +160,23 @@ export interface RpcFinishOptions {
    * processing it. Defaults to `false` when not specified.
    */
   requireEarlyCancellation?: boolean;
+}
+
+/**
+ * Default Finish flags for a received Return: keep the wire references for
+ * any capabilities the Return imported (the caller holds live stubs that
+ * release themselves on close), release them when the results carried none.
+ * An explicit `options.releaseResultCaps` always wins.
+ */
+function finishOptionsForReturn(
+  message: { capTable?: RpcCapDescriptor[] },
+  options: RpcFinishOptions = {},
+): RpcFinishOptions {
+  return {
+    ...options,
+    releaseResultCaps: options.releaseResultCaps ??
+      ((message.capTable?.length ?? 0) === 0),
+  };
 }
 
 /**
@@ -743,7 +766,10 @@ export class SessionRpcClientTransport {
       }
 
       if ((options.autoFinish ?? true) && !message.noFinishNeeded) {
-        await this.#sendFinish(questionId, options.finish);
+        await this.#sendFinish(
+          questionId,
+          finishOptionsForReturn(message, options.finish),
+        );
       }
 
       return {
@@ -868,7 +894,10 @@ export class SessionRpcClientTransport {
       }
 
       if ((options.autoFinish ?? true) && !resultMessage.noFinishNeeded) {
-        await this.#sendFinish(questionId, options.finish);
+        await this.#sendFinish(
+          questionId,
+          finishOptionsForReturn(resultMessage, options.finish),
+        );
       }
 
       const contentBytes = mwCtx
