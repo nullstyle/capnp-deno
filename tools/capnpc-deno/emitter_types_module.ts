@@ -537,7 +537,11 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("  return service.registerServer(");
   out.push("    { exportCapability: ctx.exportCapability },");
   out.push("    value as TServer,");
-  out.push("    { referenceCount: 1 },");
+  // Context exports are wire-managed: the server bridge counts one
+  // reference per Return-frame capTable occurrence and unregisters the
+  // dispatch when the peer releases them all, so the registration itself
+  // must not pin a standing reference.
+  out.push("    { referenceCount: 0 },");
   out.push("  );");
   out.push("}");
   out.push("");

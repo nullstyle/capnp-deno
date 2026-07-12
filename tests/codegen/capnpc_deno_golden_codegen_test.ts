@@ -11,17 +11,17 @@ const REQUEST_FIXTURE =
 // compatibility surface: they may only move for deliberate emitter changes.
 // The mod.ts hash was updated when the barrel switched from flat
 // `export * from` re-exports to namespaced `export * as <stem>` re-exports;
-// the *_types.ts hashes were updated when `withCapabilityStubLifecycle`
-// learned to forward a schema-defined `close` method instead of shadowing it.
+// the *_types.ts hashes were updated when `exportCapabilityFromContext`
+// switched to wire-managed registrations (`referenceCount: 0`).
 const EXPECTED_HASH_BY_PATH: Record<string, string> = {
   "person_codegen_meta.ts":
     "ff17ccca414fa180ebdb6ac9c2b9fdeb2a7a11ba57f0755acad3d376f0bc73a8",
   "person_codegen_types.ts":
-    "f1d1e984e7a9c766b16f4c6406c92d54e5e13bf63a00f860ac036b984f5059b8",
+    "c6f29a9e7e2bf80d55ceaf64336f510332ac2ef00407c0223a9a1258a8137c16",
   "union_group_codegen_meta.ts":
     "55f346ad1d1dd9c4c7bffe0ac1f9d4180d2df09a101d294dbfba2d30ae8eb9fb",
   "union_group_codegen_types.ts":
-    "64850c39b14e95f333b12ad410a496856ef947d710e8a4825f12933891fc9dc1",
+    "e0c6219799ab128f1f5c062d0ae595a44085922c50f8a1b5486440dce238d925",
   "mod.ts": "79f82485c4ce665e407aa12118e9d5bf636a72fcf6599ecae99a453b6b956a5c",
 };
 
