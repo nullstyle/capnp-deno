@@ -6,6 +6,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-15
+
 ### Breaking
 
 - capnpc-deno's generated `mod.ts` barrel now uses namespaced re-exports
@@ -21,6 +23,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   type names and `undefined as unknown as` defaults). Hoist the type to the top
   level of its owning schema.
 
+### Changed
+
+- Vendored capnp-zig bumped from v0.4.0 to v0.11.0 (upstream cut v0.4.0 on a
+  red-CI commit and considers it superseded by v0.5.0). The WASM host ABI is
+  unchanged (ABI version 1, feature bits 0–9); the rebuilt
+  `generated/capnp_deno.wasm` carries upstream's interop and memory-safety
+  fixes, including the spec-violating double release of parameter capabilities,
+  a `HostPeer` teardown use-after-free, pipelined calls on failed answers
+  hanging forever, and validation-CPU amplification.
+- The Zig toolchain is pinned in `mise.toml` to `0.17.0-dev.1683+5ceec001b` (the
+  snapshot capnp-zig v0.11.0 builds and verifies against), replacing the rolling
+  `zig = "master"` pin, so WASM builds are reproducible.
+
 ### Fixed
 
 - capnpc-deno: cross-file imports of two schema files that share a basename in
@@ -34,6 +49,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   textually equals another import's pre-rewrite specifier.
 - capnpc-deno: the generated barrel sanitizes the strict-mode-restricted
   identifiers `eval` and `arguments` (emitted as `eval$` / `arguments$`).
+- The session client now honors `Return.releaseParamCaps = true`: it retires the
+  sender-hosted param-cap exports the call granted locally instead of waiting
+  for explicit `Release` frames that, per rpc.capnp, the callee must not send.
+  Against the previous runtime module the redundant `Release` is ignored;
+  against the new one client-hosted callback exports no longer leak after a
+  non-retaining call.
 
 ## [0.4.0] - 2026-07-11
 
