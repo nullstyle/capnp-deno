@@ -28,6 +28,7 @@ import {
   type RpcServerWasmHost,
 } from "../server/bridge.ts";
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   decodeReturnFrame,
   decodeRpcMessageTag,
   encodeBootstrapRequestFrame,
@@ -630,6 +631,7 @@ export class SessionRpcClientTransport {
   #responsePumpAbort: AbortController | null = null;
   #responsePumpStopped = false;
   #localBridge: RpcServerBridge | null = null;
+  #questionParamCapGrants: Map<number, Map<number, number>> = new Map();
   #closed = false;
 
   /**
@@ -877,6 +879,7 @@ export class SessionRpcClientTransport {
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
       });
+      this.#recordParamCapGrants(questionId, options.paramsCapTable);
 
       let message;
       try {
@@ -981,6 +984,7 @@ export class SessionRpcClientTransport {
         paramsContent: params,
         paramsCapTable: options.paramsCapTable,
       });
+      this.#recordParamCapGrants(questionId, options.paramsCapTable);
 
       // Send the call frame but do NOT wait for the response yet.
       this.#markReturnExpected(questionId);
@@ -1116,6 +1120,7 @@ export class SessionRpcClientTransport {
     );
     this.#expectedReturns.clear();
     this.#queuedReturns.clear();
+    this.#questionParamCapGrants.clear();
     this.#responsePumpAbort?.abort();
     await this.session.close();
   }
@@ -1391,6 +1396,7 @@ export class SessionRpcClientTransport {
   #markReturnObserved(questionId: number): void {
     this.#expectedReturns.delete(questionId);
     this.#queuedReturns.delete(questionId);
+    this.#questionParamCapGrants.delete(questionId);
   }
 
   #abandonExpectedReturn(questionId: number): void {
@@ -1401,6 +1407,59 @@ export class SessionRpcClientTransport {
     const pending = this.#pendingReturns.get(questionId);
     if (pending && pending.length > 0) return;
     this.#abandonExpectedReturn(questionId);
+  }
+
+  /**
+   * Remember, per question, the wire references each senderHosted param-cap
+   * descriptor granted the remote, so a Return carrying `releaseParamCaps`
+   * can retire them without explicit Release frames.
+   */
+  #recordParamCapGrants(
+    questionId: number,
+    capTable: RpcCapDescriptor[] | undefined,
+  ): void {
+    if (!capTable || capTable.length === 0) return;
+    let grants: Map<number, number> | undefined;
+    for (const descriptor of capTable) {
+      if (descriptor.tag !== CAP_DESCRIPTOR_TAG_SENDER_HOSTED) continue;
+      grants ??= new Map<number, number>();
+      grants.set(descriptor.id, (grants.get(descriptor.id) ?? 0) + 1);
+    }
+    if (grants) {
+      this.#questionParamCapGrants.set(questionId, grants);
+    }
+  }
+
+  /**
+   * Retire the param-cap export references a question's Call granted when
+   * its Return carries `releaseParamCaps = true`.
+   *
+   * rpc.capnp defines that flag as "the sender must not send separate Release
+   * messages for them" — the callee never settles those references on the
+   * wire, so the caller must drop them locally. References of already
+   * unregistered exports (a peer that also sends explicit Releases) are
+   * ignored by the bridge.
+   */
+  #settleParamCapGrants(questionId: number): void {
+    const grants = this.#questionParamCapGrants.get(questionId);
+    if (!grants) return;
+    this.#questionParamCapGrants.delete(questionId);
+    if (!this.#localBridge) return;
+    for (const [capabilityIndex, referenceCount] of grants) {
+      try {
+        this.#localBridge.releaseCapability(capabilityIndex, referenceCount);
+      } catch (error) {
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.client.param_cap_settle_error",
+          error,
+          attributes: {
+            "rpc.question_id": questionId,
+            "rpc.capability_id": capabilityIndex,
+            "rpc.reference_count": referenceCount,
+          },
+        });
+      }
+    }
   }
 
   #resolvePendingReturn(message: RpcReturnMessage): boolean {
@@ -1511,6 +1570,9 @@ export class SessionRpcClientTransport {
       if (!this.#expectedReturns.has(decoded.answerId)) {
         // Ignore stale/forged returns for unknown or already-finished questions.
         continue;
+      }
+      if (decoded.releaseParamCaps) {
+        this.#settleParamCapGrants(decoded.answerId);
       }
       if (!this.#resolvePendingReturn(decoded)) {
         this.#queueReturn(decoded);

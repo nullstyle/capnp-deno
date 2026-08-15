@@ -1,4 +1,5 @@
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   decodeBootstrapRequestFrame,
   decodeCallRequestFrame,
   decodeFinishFrame,
@@ -1160,5 +1161,84 @@ Deno.test("SessionRpcClientTransport callRaw reports question ids and explicit f
     assertEquals(seenFinishFlags[0].requireEarlyCancellation, true);
   } finally {
     await session.close();
+  }
+});
+
+Deno.test("SessionRpcClientTransport settles param-cap exports per Return releaseParamCaps flag", async () => {
+  const answeredCalls: number[] = [];
+  const fake = new FakeCapnpWasm({
+    onPushFrame: (frame) => {
+      const tag = decodeRpcMessageTag(frame);
+      if (tag === RPC_MESSAGE_TAG_CALL) {
+        const call = decodeCallRequestFrame(frame);
+        answeredCalls.push(call.questionId);
+        // First answered call retains the param cap (releaseParamCaps=false);
+        // the second settles it via the flag alone, per rpc.capnp.
+        return [encodeReturnResultsFrame({
+          answerId: call.questionId,
+          content: EMPTY_STRUCT_MESSAGE,
+          releaseParamCaps: answeredCalls.length > 1,
+        })];
+      }
+      return [];
+    },
+    extraExports: {
+      capnp_peer_pop_host_call: () => 0,
+      capnp_peer_respond_host_call_results: () => {},
+      capnp_peer_respond_host_call_exception: () => {},
+    },
+  });
+  const peer = WasmPeer.fromExports(fake.exports, { expectedVersion: 1 });
+  const transport = new InMemoryRpcHarnessTransport();
+  const session = new RpcSession(peer, transport);
+  const client = new SessionRpcClientTransport(session, transport, {
+    interfaceId: 0x1234n,
+  });
+
+  try {
+    const retained = client.exportCapability({
+      interfaceId: 0x9000n,
+      dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    }, { capabilityIndex: 11 });
+    const spent = client.exportCapability({
+      interfaceId: 0x9000n,
+      dispatch: () => new Uint8Array(EMPTY_STRUCT_MESSAGE),
+    }, { capabilityIndex: 12 });
+    assertEquals(client.exportedCapabilityCount, 2);
+
+    await client.callRaw({ capabilityIndex: 0 }, 1, EMPTY_STRUCT_MESSAGE, {
+      paramsCapTable: [{
+        tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+        id: retained.capabilityIndex,
+      }],
+    });
+    assertEquals(
+      client.exportedCapabilityCount,
+      2,
+      "releaseParamCaps=false Return must leave the export registered",
+    );
+
+    await client.callRaw({ capabilityIndex: 0 }, 1, EMPTY_STRUCT_MESSAGE, {
+      paramsCapTable: [{
+        tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+        id: spent.capabilityIndex,
+      }],
+    });
+    assertEquals(
+      client.exportedCapabilityCount,
+      1,
+      "releaseParamCaps=true Return must retire the export without a Release frame",
+    );
+
+    transport.send(encodeReleaseFrame({
+      id: retained.capabilityIndex,
+      referenceCount: 1,
+    }));
+    await waitForCondition(
+      () => client.exportedCapabilityCount === 0,
+      "explicit release of the retained export",
+    );
+  } finally {
+    await client.close();
   }
 });
