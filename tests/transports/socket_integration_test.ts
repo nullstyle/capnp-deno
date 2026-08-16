@@ -2055,10 +2055,17 @@ Deno.test({
         ),
         "expected first stream timeout observability event",
       );
-      await Promise.race([
-        clientClosed,
-        delay(100),
-      ]);
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          clientClosed,
+          new Promise<void>((resolve) => {
+            graceTimer = setTimeout(resolve, 100);
+          }),
+        ]);
+      } finally {
+        clearTimeout(graceTimer);
+      }
     } finally {
       try {
         client?.close();
