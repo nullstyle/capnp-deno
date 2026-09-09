@@ -48,6 +48,25 @@ export interface RpcTransport {
    * Calling close() on an already-closed transport is a no-op.
    */
   close(): void | Promise<void>;
+
+  /**
+   * Observes terminal closure, including remote EOF and local `close()`.
+   *
+   * Built-in transports notify each subscriber once and immediately notify
+   * late subscribers. Observers do not block shutdown; their exceptions and
+   * rejected promises are isolated. MessagePort can only observe local closure.
+   * Optional for compatibility with custom transports; wrappers should forward
+   * the subscription when their underlying transport provides it.
+   *
+   * @param onClose - Observer called when the transport is closed.
+   * @returns An idempotent function that removes this subscription.
+   * @example
+   * ```ts
+   * const unsubscribe = transport.subscribeClose?.(() => console.log("closed"));
+   * unsubscribe?.();
+   * ```
+   */
+  subscribeClose?(onClose: () => void | Promise<void>): () => void;
 }
 
 /**

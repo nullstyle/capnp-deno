@@ -2,7 +2,11 @@
  * Struct, enum, and union type emission functions.
  */
 
-import type { EnumInfo, StructInfo, TypeEmitContext } from "./emitter_helpers.ts";
+import type {
+  EnumInfo,
+  StructInfo,
+  TypeEmitContext,
+} from "./emitter_helpers.ts";
 import {
   defaultValueExpression,
   inferUnionFields,
@@ -14,11 +18,19 @@ import {
 } from "./emitter_helpers.ts";
 
 export function emitEnum(out: string[], info: EnumInfo): void {
-  const valuesLiteral = info.values.map((value) => JSON.stringify(value)).join(", ");
+  const valuesLiteral = info.values.map((value) => JSON.stringify(value)).join(
+    ", ",
+  );
   const exportPrefix = info.exported ? "export " : "";
-  out.push(`${exportPrefix}const ${info.valuesConst} = [${valuesLiteral}] as const;`);
-  out.push(`${exportPrefix}type ${info.typeName} = typeof ${info.valuesConst}[number];`);
-  out.push(`const ${info.descriptorConst}: EnumTypeDescriptor<${info.typeName}> = {`);
+  out.push(
+    `${exportPrefix}const ${info.valuesConst} = [${valuesLiteral}] as const;`,
+  );
+  out.push(
+    `${exportPrefix}type ${info.typeName} = typeof ${info.valuesConst}[number];`,
+  );
+  out.push(
+    `const ${info.descriptorConst}: EnumTypeDescriptor<${info.typeName}> = {`,
+  );
   out.push('  kind: "enum",');
   out.push(`  byOrdinal: ${info.valuesConst},`);
   out.push("  toOrdinal: {");
@@ -40,13 +52,19 @@ export function emitStructInterface(
 
   const exportPrefix = structInfo.exported ? "export " : "";
   out.push(`${exportPrefix}interface ${structInfo.typeName} {`);
-  const fields = structNode.fields.slice().sort((a, b) => a.codeOrder - b.codeOrder)
+  const fields = structNode.fields.slice().sort((a, b) =>
+    a.codeOrder - b.codeOrder
+  )
     .filter((field) => field.slot !== undefined || field.group !== undefined);
   const unionFields = inferUnionFields(fields, structNode.discriminantCount);
-  const unionFieldNames = new Set(unionFields.map((field) => toCamelCase(field.name)));
+  const unionFieldNames = new Set(
+    unionFields.map((field) => toCamelCase(field.name)),
+  );
 
   if (unionFields.length > 0) {
-    const unionType = unionFields.map((field) => JSON.stringify(toCamelCase(field.name)))
+    const unionType = unionFields.map((field) =>
+      JSON.stringify(toCamelCase(field.name))
+    )
       .join(" | ");
     out.push(`  which?: ${unionType};`);
   }
@@ -76,13 +94,21 @@ export function emitStructDescriptor(
   const structNode = structInfo.node.structNode;
   if (!structNode) return;
 
-  const fields = structNode.fields.slice().sort((a, b) => a.codeOrder - b.codeOrder)
+  const fields = structNode.fields.slice().sort((a, b) =>
+    a.codeOrder - b.codeOrder
+  )
     .filter((field) => field.slot !== undefined || field.group !== undefined);
   const unionFields = inferUnionFields(fields, structNode.discriminantCount);
-  const unionFieldNames = new Set(unionFields.map((field) => toCamelCase(field.name)));
+  const unionFieldNames = new Set(
+    unionFields.map((field) => toCamelCase(field.name)),
+  );
   const defaultUnionField = unionFields[0];
 
-  out.push(`${structInfo.exported ? "export " : ""}const ${structInfo.descriptorConst}: StructDescriptor<${structInfo.typeName}> = {`);
+  out.push(
+    `${
+      structInfo.exported ? "export " : ""
+    }const ${structInfo.descriptorConst}: StructDescriptor<${structInfo.typeName}> = {`,
+  );
   out.push('  kind: "struct",');
   out.push(`  name: ${JSON.stringify(structInfo.typeName)},`);
   out.push(`  dataWordCount: ${structNode.dataWordCount},`);
@@ -92,7 +118,11 @@ export function emitStructDescriptor(
     const fieldName = quoteIfNeeded(toCamelCase(field.name));
     let defaultExpr: string;
     if (field.slot) {
-      defaultExpr = defaultValueExpression(field.slot.type, ctx);
+      defaultExpr = defaultValueExpression(
+        field.slot.type,
+        ctx,
+        field.slot.defaultValue,
+      );
     } else if (field.group) {
       const groupInfo = ctx.structById.get(field.group.typeId);
       defaultExpr = groupInfo
@@ -104,17 +134,23 @@ export function emitStructDescriptor(
     out.push(`    ${fieldName}: ${defaultExpr},`);
   }
   if (defaultUnionField) {
-    out.push(`    which: ${JSON.stringify(toCamelCase(defaultUnionField.name))},`);
+    out.push(
+      `    which: ${JSON.stringify(toCamelCase(defaultUnionField.name))},`,
+    );
   }
   out.push("  }),");
   if (defaultUnionField) {
     out.push("  union: {");
     out.push(`    discriminantOffset: ${structNode.discriminantOffset},`);
-    out.push(`    defaultDiscriminant: ${defaultUnionField.discriminantValue},`);
+    out.push(
+      `    defaultDiscriminant: ${defaultUnionField.discriminantValue},`,
+    );
     out.push("    byName: {");
     for (const field of unionFields) {
       out.push(
-        `      ${JSON.stringify(toCamelCase(field.name))}: ${field.discriminantValue},`,
+        `      ${
+          JSON.stringify(toCamelCase(field.name))
+        }: ${field.discriminantValue},`,
       );
     }
     out.push("    },");
@@ -134,12 +170,19 @@ export function emitStructDescriptor(
     const fieldName = toCamelCase(field.name);
     const inUnion = unionFieldNames.has(fieldName);
     out.push("    {");
-    out.push(`      kind: ${field.slot ? JSON.stringify("slot") : JSON.stringify("group")},`);
+    out.push(
+      `      kind: ${
+        field.slot ? JSON.stringify("slot") : JSON.stringify("group")
+      },`,
+    );
     out.push(`      name: ${JSON.stringify(fieldName)},`);
     if (field.slot) {
       const typeExpr = typeDescriptorExpression(field.slot.type, ctx);
       out.push(`      offset: ${field.slot.offset},`);
       out.push(`      type: ${typeExpr},`);
+      if (field.slot.defaultValue?.kind === "scalar") {
+        out.push(`      defaultMask: ${field.slot.defaultValue.bits}n,`);
+      }
     } else if (field.group) {
       const groupInfo = ctx.structById.get(field.group.typeId);
       if (!groupInfo) {
@@ -147,7 +190,9 @@ export function emitStructDescriptor(
           `group field ${field.name} references unknown local struct id ${field.group.typeId}`,
         );
       }
-      out.push(`      type: { kind: "struct", get: () => ${groupInfo.descriptorConst} },`);
+      out.push(
+        `      type: { kind: "struct", get: () => ${groupInfo.descriptorConst} },`,
+      );
     }
     if (inUnion) {
       out.push(`      discriminantValue: ${field.discriminantValue},`);
@@ -161,9 +206,13 @@ export function emitStructDescriptor(
     // pointers before the encoding runtime serializes them.
     const walkers = ctx.capabilityWalkers?.get(structInfo.id);
     const encodeValue = walkers ? `${walkers.dehydrate}(value)` : "value";
-    out.push(`export const ${structInfo.codecConst}: StructCodec<${structInfo.typeName}> = {`);
+    out.push(
+      `export const ${structInfo.codecConst}: StructCodec<${structInfo.typeName}> = {`,
+    );
     out.push(`  encode: (value: ${structInfo.typeName}): Uint8Array =>`);
-    out.push(`    encodeStructMessage(${structInfo.descriptorConst}, ${encodeValue}),`);
+    out.push(
+      `    encodeStructMessage(${structInfo.descriptorConst}, ${encodeValue}),`,
+    );
     out.push(`  decode: (bytes: Uint8Array): ${structInfo.typeName} =>`);
     out.push(`    decodeStructMessage(${structInfo.descriptorConst}, bytes),`);
     out.push("};");

@@ -26,6 +26,7 @@ import {
   notifyTransportClose,
   OutboundFrameQueue,
   type QueuedOutboundFrame,
+  TransportCloseSignal,
 } from "./internal/transport_internal.ts";
 
 interface PendingOutboundFrame extends QueuedOutboundFrame {}
@@ -512,6 +513,12 @@ function acceptTransportOptions(
  * ```
  */
 export class WebTransportTransport implements RpcTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   /** The underlying `WebTransport` session. */
   readonly webTransport: WebTransport;
   /** The bidirectional stream used for RPC traffic. */
@@ -686,9 +693,12 @@ export class WebTransportTransport implements RpcTransport {
       throw new TransportError("WebTransportTransport already started");
     }
     this.#started = true;
-    this.#readLoop = this.runReadLoop(onFrame).catch((error) =>
-      this.handleError(error)
-    );
+    this.#readLoop = this.runReadLoop(onFrame).catch((error) => {
+      this.#handleReadStreamClosed();
+      void this.handleError(error).catch(() => {
+        // Terminal cleanup must not depend on an error observer succeeding.
+      });
+    });
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.webtransport.start",
       attributes: {
@@ -957,6 +967,7 @@ export class WebTransportTransport implements RpcTransport {
   #notifyClose(): void {
     if (this.#closeNotified) return;
     this.#closeNotified = true;
+    this.#closeSignal.close();
     notifyTransportClose(this.options, "webtransport onClose callback failed");
   }
 

@@ -19,6 +19,10 @@ import {
 } from "../../observability/observability.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
+import {
+  subscribeTransportClose,
+  TransportCloseSignal,
+} from "../transports/internal/transport_internal.ts";
 import type { RpcRuntimeModuleOptions } from "../server/runtime_module.ts";
 import type { RpcExportCapabilityOptions } from "../server/rpc_runtime.ts";
 import {
@@ -524,6 +528,13 @@ export class InMemoryRpcHarnessTransport implements RpcSessionHarnessTransport {
  * ```
  */
 export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+  #unsubscribeClose: (() => void) | undefined;
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   /** The underlying real transport. */
   readonly transport: RpcTransport;
 
@@ -533,6 +544,10 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
 
   constructor(transport: RpcTransport) {
     this.transport = transport;
+    this.#unsubscribeClose = subscribeTransportClose(
+      transport,
+      () => this.#markClosed(),
+    );
   }
 
   start(
@@ -560,11 +575,18 @@ export class NetworkRpcHarnessTransport implements RpcSessionHarnessTransport {
   }
 
   async close(): Promise<void> {
+    this.#markClosed();
+    await this.transport.close();
+  }
+
+  #markClosed(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#unsubscribeClose?.();
+    this.#unsubscribeClose = undefined;
     this.#onFrame = null;
     this.#inboundFrames.close(new SessionError("transport is closed"));
-    await this.transport.close();
+    this.#closeSignal.close();
   }
 
   async emitInbound(frame: Uint8Array): Promise<void> {

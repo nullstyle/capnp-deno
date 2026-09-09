@@ -1,7 +1,9 @@
 import { CapnpReader, type StructReader } from "./capnp_reader.ts";
+import { CodegenRequestError } from "./errors.ts";
 import type {
   CodeGeneratorRequestModel,
   EnumNodeModel,
+  FieldDefaultModel,
   FieldModel,
   InterfaceNodeModel,
   NodeKind,
@@ -164,6 +166,13 @@ function parseField(reader: StructReader): FieldModel {
       offset: reader.readU32(4),
       type: parseType(typeReader),
     };
+    if (!reader.isPointerNull(3)) {
+      const value = reader.readStruct(3);
+      if (value) {
+        const defaultValue = parseDefault(value, field.slot.type, field.name);
+        if (defaultValue) field.slot.defaultValue = defaultValue;
+      }
+    }
   } else if (which === 1) {
     field.group = {
       typeId: reader.readU64(16),
@@ -173,6 +182,84 @@ function parseField(reader: StructReader): FieldModel {
   }
 
   return field;
+}
+
+function parseDefault(
+  reader: StructReader,
+  type: TypeModel,
+  field: string,
+): FieldDefaultModel | undefined {
+  const kinds = [
+    "void",
+    "bool",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "float32",
+    "float64",
+    "text",
+    "data",
+    "list",
+    "enum",
+    "struct",
+    "interface",
+    "anyPointer",
+  ];
+  if (kinds[reader.readU16(0)] !== type.kind) {
+    throw new CodegenRequestError(
+      `field ${field} default does not match ${type.kind}`,
+    );
+  }
+  let bits: bigint;
+  switch (type.kind) {
+    case "void":
+    case "interface":
+      return undefined;
+    case "text": {
+      const value = reader.readText(0) ?? "";
+      return value === "" ? undefined : { kind: "text", value };
+    }
+    case "data": {
+      const value = reader.readData(0);
+      return !value?.length ? undefined : { kind: "data", value: [...value] };
+    }
+    case "list":
+    case "struct":
+    case "anyPointer":
+      if (reader.isPointerNull(0)) return undefined;
+      throw new CodegenRequestError(
+        `field ${field} has unsupported non-null ${type.kind} default`,
+      );
+    case "bool":
+      bits = reader.readBool(2, 0) ? 1n : 0n;
+      break;
+    case "int8":
+    case "uint8":
+      bits = BigInt(reader.readU8(2));
+      break;
+    case "int16":
+    case "uint16":
+    case "enum":
+      bits = BigInt(reader.readU16(2));
+      break;
+    case "int32":
+    case "uint32":
+    case "float32":
+      bits = BigInt(reader.readU32(4));
+      break;
+    case "int64":
+    case "uint64":
+    case "float64":
+      bits = reader.readU64(8);
+      break;
+  }
+  // Omitting the all-zero default keeps existing implicit-default output stable.
+  return bits === 0n ? undefined : { kind: "scalar", bits };
 }
 
 function parseType(reader: StructReader): TypeModel {

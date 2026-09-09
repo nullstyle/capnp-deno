@@ -72,13 +72,18 @@ export class CapnpReader {
   }
 
   root(): StructReader {
-    if (this.segments.length === 0 || this.segments[0].byteLength < WORD_BYTES) {
+    if (
+      this.segments.length === 0 || this.segments[0].byteLength < WORD_BYTES
+    ) {
       throw new Error("capnp message missing root segment");
     }
     return this.readStructPointer(0, 0);
   }
 
-  readStructPointer(segmentId: number, pointerByteOffset: number): StructReader {
+  readStructPointer(
+    segmentId: number,
+    pointerByteOffset: number,
+  ): StructReader {
     const resolved = this.resolvePointer(segmentId, pointerByteOffset);
     const word = resolved.word;
     if (word === 0n) {
@@ -93,7 +98,8 @@ export class CapnpReader {
     const offsetWords = signed30((word >> 2n) & 0x3fff_ffffn);
     const dataWordCount = Number((word >> 32n) & 0xffffn);
     const pointerCount = Number((word >> 48n) & 0xffffn);
-    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 + offsetWords;
+    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 +
+      offsetWords;
     const targetByteOffset = targetWord * WORD_BYTES;
 
     return new StructReader(
@@ -138,7 +144,9 @@ export class CapnpReader {
       const pad0 = this.readWordAt(landingSegmentId, landingPadByteOffset);
       const pad0Kind = Number(pad0 & 0x3n);
       if (pad0Kind !== 2) {
-        throw new Error(`double-far landing pad[0] must be far pointer, got kind=${pad0Kind}`);
+        throw new Error(
+          `double-far landing pad[0] must be far pointer, got kind=${pad0Kind}`,
+        );
       }
       const pad0IsDoubleFar = ((pad0 >> 2n) & 0x1n) === 1n;
       if (pad0IsDoubleFar) {
@@ -149,7 +157,10 @@ export class CapnpReader {
 
       currentSegmentId = pad0SegmentId;
       currentPointerByteOffset = pad0OffsetWords * WORD_BYTES;
-      word = this.readWordAt(landingSegmentId, landingPadByteOffset + WORD_BYTES);
+      word = this.readWordAt(
+        landingSegmentId,
+        landingPadByteOffset + WORD_BYTES,
+      );
     }
 
     throw new Error("far pointer chain exceeded maximum hop count");
@@ -212,7 +223,8 @@ export class StructListReader {
       throw new Error(`struct list index out of range: ${index}`);
     }
     const strideWords = this.#dataWordCount + this.#pointerCount;
-    const offset = this.#elementsByteOffset + (index * strideWords * WORD_BYTES);
+    const offset = this.#elementsByteOffset +
+      (index * strideWords * WORD_BYTES);
     return new StructReader(
       this.#reader,
       this.#segmentId,
@@ -275,20 +287,26 @@ export class StructReader {
 
   readStruct(pointerIndex: number): StructReader | null {
     const pointerByteOffset = this.pointerByteOffset(pointerIndex);
-    const resolved = this.#reader.resolvePointer(this.#segmentId, pointerByteOffset);
+    const resolved = this.#reader.resolvePointer(
+      this.#segmentId,
+      pointerByteOffset,
+    );
     const word = resolved.word;
     if (word === 0n) return null;
 
     const kind = Number(word & 0x3n);
     if (kind !== 0) {
-      throw new Error(`expected struct pointer in pointer slot, got kind=${kind}`);
+      throw new Error(
+        `expected struct pointer in pointer slot, got kind=${kind}`,
+      );
     }
 
     const offsetWords = signed30((word >> 2n) & 0x3fff_ffffn);
     const dataWordCount = Number((word >> 32n) & 0xffffn);
     const pointerCount = Number((word >> 48n) & 0xffffn);
 
-    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 + offsetWords;
+    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 +
+      offsetWords;
     const targetByteOffset = targetWord * WORD_BYTES;
 
     return new StructReader(
@@ -302,19 +320,25 @@ export class StructReader {
 
   readStructList(pointerIndex: number): StructListReader | null {
     const pointerByteOffset = this.pointerByteOffset(pointerIndex);
-    const resolved = this.#reader.resolvePointer(this.#segmentId, pointerByteOffset);
+    const resolved = this.#reader.resolvePointer(
+      this.#segmentId,
+      pointerByteOffset,
+    );
     const word = resolved.word;
     if (word === 0n) return null;
 
     const kind = Number(word & 0x3n);
     if (kind !== 1) {
-      throw new Error(`expected list pointer in pointer slot, got kind=${kind}`);
+      throw new Error(
+        `expected list pointer in pointer slot, got kind=${kind}`,
+      );
     }
 
     const offsetWords = signed30((word >> 2n) & 0x3fff_ffffn);
     const elementSize = Number((word >> 32n) & 0x7n);
     const elementCountOrWords = Number((word >> 35n) & 0x1fff_ffffn);
-    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 + offsetWords;
+    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 +
+      offsetWords;
     const targetByteOffset = targetWord * WORD_BYTES;
 
     if (elementSize !== 7) {
@@ -326,7 +350,9 @@ export class StructReader {
     const tag = this.#reader.readWordAt(resolved.segmentId, targetByteOffset);
     const tagKind = Number(tag & 0x3n);
     if (tagKind !== 0) {
-      throw new Error(`inline-composite tag is not a struct pointer: kind=${tagKind}`);
+      throw new Error(
+        `inline-composite tag is not a struct pointer: kind=${tagKind}`,
+      );
     }
     const elementCount = Number((tag >> 2n) & 0x3fff_ffffn);
     const dataWordCount = Number((tag >> 32n) & 0xffffn);
@@ -360,12 +386,20 @@ export class StructReader {
     return this.readByteList(pointerIndex, false);
   }
 
+  isPointerNull(pointerIndex: number): boolean {
+    if (pointerIndex >= this.#pointerCount) return true;
+    return this.readPointerWord(pointerIndex) === 0n;
+  }
+
   private readByteList(
     pointerIndex: number,
     trimNul: boolean,
   ): Uint8Array | null {
     const pointerByteOffset = this.pointerByteOffset(pointerIndex);
-    const resolved = this.#reader.resolvePointer(this.#segmentId, pointerByteOffset);
+    const resolved = this.#reader.resolvePointer(
+      this.#segmentId,
+      pointerByteOffset,
+    );
     const word = resolved.word;
     if (word === 0n) return null;
 
@@ -380,7 +414,8 @@ export class StructReader {
       throw new Error(`expected byte-list element size 2, got ${elementSize}`);
     }
     const elementCount = Number((word >> 35n) & 0x1fff_ffffn);
-    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 + offsetWords;
+    const targetWord = (resolved.pointerByteOffset / WORD_BYTES) + 1 +
+      offsetWords;
     const targetByteOffset = targetWord * WORD_BYTES;
 
     const bytes = this.#reader.readBytesAt(
@@ -399,7 +434,8 @@ export class StructReader {
     if (pointerIndex < 0 || pointerIndex >= this.#pointerCount) {
       throw new Error(`pointer index out of range: ${pointerIndex}`);
     }
-    const pointerSection = this.#dataByteOffset + (this.#dataWordCount * WORD_BYTES);
+    const pointerSection = this.#dataByteOffset +
+      (this.#dataWordCount * WORD_BYTES);
     return pointerSection + (pointerIndex * WORD_BYTES);
   }
 

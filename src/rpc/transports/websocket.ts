@@ -23,8 +23,10 @@ import {
 import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   notifyTransportClose,
+  notifyTransportError,
   OutboundFrameQueue,
   type QueuedOutboundFrame,
+  TransportCloseSignal,
 } from "./internal/transport_internal.ts";
 
 interface PendingOutboundFrame extends QueuedOutboundFrame {
@@ -231,6 +233,12 @@ function toBinary(
  * ```
  */
 export class WebSocketTransport implements RpcTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   /** The underlying WebSocket connection. */
   readonly socket: WebSocket;
   /** The options this transport was configured with. */
@@ -282,9 +290,7 @@ export class WebSocketTransport implements RpcTransport {
     );
     this.#outbound.rejectQueued(error);
     this.#notifyClose();
-    if (this.options.onError) {
-      void Promise.resolve(this.options.onError(error));
-    }
+    notifyTransportError(this.options.onError, error);
   };
 
   constructor(socket: WebSocket, options: WebSocketTransportOptions = {}) {
@@ -622,6 +628,7 @@ export class WebSocketTransport implements RpcTransport {
       return;
     }
     this.#closeNotified = true;
+    this.#closeSignal.close();
     notifyTransportClose(this.options, "websocket onClose callback failed");
   }
 

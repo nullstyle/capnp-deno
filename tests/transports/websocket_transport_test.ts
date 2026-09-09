@@ -1,4 +1,9 @@
-import { TransportError, WebSocketTransport } from "../../src/advanced.ts";
+import {
+  RpcWireClient,
+  SessionError,
+  TransportError,
+  WebSocketTransport,
+} from "../../src/advanced.ts";
 import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 function buildFrame(words: number): Uint8Array {
@@ -95,6 +100,42 @@ function transportWithSocket(
   );
   return { socket, transport };
 }
+
+Deno.test("RpcWireClient rejects pending bootstrap on WebSocket close", async () => {
+  const { socket, transport } = transportWithSocket({
+    onError() {
+      throw new Error("close diagnostics failed");
+    },
+  });
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await withTimeout(
+      (async () => {
+        while (socket.sent.length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      })(),
+      1000,
+      "bootstrap sent",
+    );
+    assertEquals(client.pendingReturnCount, 1);
+    socket.close();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "WebSocket closure rejects bootstrap",
+    );
+    assert(settled.status === "rejected");
+    assert(settled.reason instanceof SessionError);
+    assertEquals(client.stats.closed, true);
+    assertEquals(client.pendingReturnCount, 0);
+  } finally {
+    await client.close();
+    await transport.close();
+    await result;
+  }
+});
 
 Deno.test("WebSocketTransport enforces queued outbound frame limits", async () => {
   const { socket, transport } = transportWithSocket({

@@ -642,7 +642,7 @@ export const CapDescriptorStruct: StructDescriptor<CapDescriptor> = {
     receiverHosted: 0,
     receiverAnswer: PromisedAnswerStruct.createDefault(),
     thirdPartyHosted: ThirdPartyCapDescriptorStruct.createDefault(),
-    attachedFd: 0,
+    attachedFd: 255,
     which: "none",
   }),
   union: {
@@ -713,6 +713,7 @@ export const CapDescriptorStruct: StructDescriptor<CapDescriptor> = {
       name: "attachedFd",
       offset: 2,
       type: TYPE_UINT8,
+      defaultMask: 255n,
     },
   ],
 };
@@ -897,8 +898,8 @@ export const FinishStruct: StructDescriptor<Finish> = {
   pointerCount: 0,
   createDefault: () => ({
     questionId: 0,
-    releaseResultCaps: false,
-    requireEarlyCancellationWorkaround: false,
+    releaseResultCaps: true,
+    requireEarlyCancellationWorkaround: true,
   }),
   fields: [
     {
@@ -912,12 +913,14 @@ export const FinishStruct: StructDescriptor<Finish> = {
       name: "releaseResultCaps",
       offset: 32,
       type: TYPE_BOOL,
+      defaultMask: 1n,
     },
     {
       kind: "slot",
       name: "requireEarlyCancellationWorkaround",
       offset: 33,
       type: TYPE_BOOL,
+      defaultMask: 1n,
     },
   ],
 };
@@ -1420,7 +1423,7 @@ export const ReturnStruct: StructDescriptor<Return> = {
   pointerCount: 1,
   createDefault: () => ({
     answerId: 0,
-    releaseParamCaps: false,
+    releaseParamCaps: true,
     noFinishNeeded: false,
     results: PayloadStruct.createDefault(),
     exception: ExceptionStruct.createDefault(),
@@ -1462,6 +1465,7 @@ export const ReturnStruct: StructDescriptor<Return> = {
       name: "releaseParamCaps",
       offset: 32,
       type: TYPE_BOOL,
+      defaultMask: 1n,
     },
     {
       kind: "slot",

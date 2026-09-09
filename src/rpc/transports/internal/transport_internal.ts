@@ -5,6 +5,36 @@
  */
 
 import { normalizeTransportError, TransportError } from "../../../errors.ts";
+import type { RpcTransport } from "./transport.ts";
+
+/** Subscribe to terminal closure and safely detach, including synchronous replay. */
+export function subscribeTransportClose(
+  transport: RpcTransport,
+  onClose: () => void,
+): () => void {
+  let unsubscribe: (() => void) | undefined;
+  let closed = false;
+  function detach(): void {
+    const callback = unsubscribe;
+    unsubscribe = undefined;
+    try {
+      callback?.();
+    } catch {
+      // Custom observer cleanup must not interrupt terminal state cleanup.
+    }
+  }
+  unsubscribe = transport.subscribeClose?.(() => {
+    if (closed) return;
+    closed = true;
+    try {
+      onClose();
+    } finally {
+      detach();
+    }
+  });
+  if (closed) detach();
+  return detach;
+}
 
 export interface QueuedOutboundFrame {
   frame: Uint8Array;
@@ -154,11 +184,64 @@ export function notifyTransportClose(options: {
 }, onCloseErrorContext: string): void {
   const { onClose, onError } = options;
   if (!onClose) return;
-  void Promise.resolve(onClose()).catch((error) => {
-    if (!onError) return;
-    const normalized = normalizeTransportError(error, onCloseErrorContext);
-    void Promise.resolve(onError(normalized)).catch(() => {
-      // Swallow callback failures to avoid unhandled rejections.
-    });
-  });
+  void (async () => {
+    try {
+      await onClose();
+    } catch (error) {
+      if (!onError) return;
+      const normalized = normalizeTransportError(error, onCloseErrorContext);
+      try {
+        await onError(normalized);
+      } catch {
+        // Observers must not interrupt shutdown or cause unhandled rejections.
+      }
+    }
+  })();
+}
+
+/** Report a transport error without allowing observer failures to escape. */
+export function notifyTransportError(
+  onError: ((error: unknown) => void | Promise<void>) | undefined,
+  error: unknown,
+): void {
+  if (!onError) return;
+  void (async () => {
+    try {
+      await onError(error);
+    } catch {
+      // Error observers must not replace the transport failure or escape globally.
+    }
+  })();
+}
+
+/** One-shot closure notification shared by the built-in transports. */
+export class TransportCloseSignal {
+  #closed = false;
+  #observers = new Set<() => void | Promise<void>>();
+
+  subscribe(onClose: () => void | Promise<void>): () => void {
+    // A distinct registration allows the same observer to subscribe twice.
+    const observer = () => onClose();
+    if (this.#closed) {
+      notifyTransportClose(
+        { onClose: observer },
+        "transport close observer failed",
+      );
+    } else {
+      this.#observers.add(observer);
+    }
+    return () => {
+      this.#observers.delete(observer);
+    };
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const observers = [...this.#observers];
+    this.#observers.clear();
+    for (const onClose of observers) {
+      notifyTransportClose({ onClose }, "transport close observer failed");
+    }
+  }
 }

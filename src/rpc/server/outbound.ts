@@ -18,6 +18,10 @@
 
 import { ProtocolError, SessionError } from "../../errors.ts";
 import { requireRpcReturnResults, toRpcCallResult } from "../call_result.ts";
+import {
+  subscribeTransportClose,
+  TransportCloseSignal,
+} from "../transports/internal/transport_internal.ts";
 import type {
   RpcClientCallOptions,
   RpcClientCallResult,
@@ -58,12 +62,23 @@ interface PendingQuestion {
  * {@link RpcServerOutboundClient} instead of being forwarded to the session.
  */
 export class RpcServerCallInterceptTransport implements RpcTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+  #unsubscribeClose: (() => void) | undefined;
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   readonly #inner: RpcTransport;
   readonly #pendingQuestions = new Map<number, PendingQuestion>();
   #closed = false;
 
   constructor(inner: RpcTransport) {
     this.#inner = inner;
+    this.#unsubscribeClose = subscribeTransportClose(
+      inner,
+      () => this.#markClosed(),
+    );
   }
 
   /**
@@ -74,6 +89,9 @@ export class RpcServerCallInterceptTransport implements RpcTransport {
     questionId: number,
     timeoutMs?: number,
   ): Promise<RpcReturnMessage> {
+    if (this.#closed) {
+      return Promise.reject(new SessionError("transport is closed"));
+    }
     return new Promise<RpcReturnMessage>((resolve, reject) => {
       const pending: PendingQuestion = { resolve, reject };
       if (
@@ -116,15 +134,22 @@ export class RpcServerCallInterceptTransport implements RpcTransport {
   }
 
   async close(): Promise<void> {
+    this.#markClosed();
+    await this.#inner.close();
+  }
+
+  #markClosed(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#unsubscribeClose?.();
+    this.#unsubscribeClose = undefined;
     const error = new SessionError("transport is closed");
     for (const [, pending] of this.#pendingQuestions) {
       if (pending.timeout) clearTimeout(pending.timeout);
       pending.reject(error);
     }
     this.#pendingQuestions.clear();
-    await this.#inner.close();
+    this.#closeSignal.close();
   }
 
   #tryInterceptReturn(frame: Uint8Array): boolean {
@@ -222,12 +247,24 @@ export class RpcServerOutboundClient {
       questionId,
       options.timeoutMs,
     );
+    void returnPromise.catch(() => {});
+    let stopWaitingForClose: (() => void) | undefined;
+    const closed = new Promise<never>((_, reject) => {
+      stopWaitingForClose = this.#transport.subscribeClose(() =>
+        reject(new SessionError("transport is closed"))
+      );
+    });
 
     try {
-      await this.#transport.send(frame);
+      await Promise.race([
+        this.#transport.send(frame),
+        closed,
+      ]);
     } catch (error) {
       this.#transport.unregisterQuestion(questionId);
       throw error;
+    } finally {
+      stopWaitingForClose?.();
     }
 
     let message: RpcReturnMessage;

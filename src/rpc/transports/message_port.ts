@@ -17,6 +17,7 @@ import type { RpcTransport, RpcTransportStats } from "./internal/transport.ts";
 import {
   OutboundFrameQueue,
   type QueuedOutboundFrame,
+  TransportCloseSignal,
 } from "./internal/transport_internal.ts";
 
 interface PendingOutboundFrame extends QueuedOutboundFrame {
@@ -95,6 +96,12 @@ function toBinary(
  * ```
  */
 export class MessagePortTransport implements RpcTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   /** The underlying `MessagePort` used for communication. */
   readonly port: MessagePort;
   /** The options this transport was configured with. */
@@ -239,6 +246,7 @@ export class MessagePortTransport implements RpcTransport {
     if (this.#closed) return;
     const startedAt = performance.now();
     this.#closed = true;
+    this.#closeSignal.close();
 
     const closeError = new TransportError("MessagePortTransport is closed");
     this.#outbound.rejectQueued(closeError);

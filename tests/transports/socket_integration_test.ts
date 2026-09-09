@@ -5,13 +5,19 @@ import {
   createRpcServiceToken,
   createWebTransportCertificateHashOptions,
   EMPTY_STRUCT_MESSAGE,
+  MiddlewareTransport,
+  NetworkRpcHarnessTransport,
   ReconnectingRpcClientTransport,
   type RpcPeer,
+  RpcServerCallInterceptTransport,
+  RpcServerOutboundClient,
   RpcSession,
   type RpcStub,
   type RpcTransport,
   RpcWireClient,
   serve,
+  SessionError,
+  SessionRpcClientTransport,
   TcpTransport,
   TransportError,
   WasmPeer,
@@ -42,6 +48,130 @@ import {
 } from "../../examples/ping/gen/schema_types.ts";
 
 const EMPTY_RPC_PARAMS = EMPTY_STRUCT_MESSAGE;
+
+for (const kind of ["session client", "server outbound"] as const) {
+  Deno.test(`TCP EOF rejects pending ${kind} calls without deadlines`, async () => {
+    const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+    const addr = listener.addr as Deno.NetAddr;
+    const accepted = listener.accept();
+    const transport = await TcpTransport.connect(addr.hostname, addr.port);
+    const server = new TcpTransport(await accepted);
+    const received = deferred<void>();
+    await server.start(() => received.resolve());
+    const adapter = new NetworkRpcHarnessTransport(transport);
+    const session = new RpcSession(
+      WasmPeer.fromExports(
+        new FakeCapnpWasm({
+          onPushFrame: (frame) => [frame],
+        }).exports,
+      ),
+      adapter,
+    );
+    const sessionClient = new SessionRpcClientTransport(session, adapter, {
+      interfaceId: 0x1234n,
+    });
+    const intercept = new RpcServerCallInterceptTransport(transport);
+    if (kind === "server outbound") await intercept.start(() => {});
+    const serverClient = new RpcServerOutboundClient(intercept);
+    const call = kind === "session client"
+      ? sessionClient.bootstrap()
+      : serverClient.call({ capabilityIndex: 1 }, 0, EMPTY_RPC_PARAMS, {
+        interfaceId: 0x1234n,
+      });
+    const result = Promise.allSettled([call]);
+    try {
+      await withTimeout(received.promise, 1000, "request reaches peer");
+      // Let the successful local send finish registering its Return wait.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (kind === "session client") {
+        assertEquals(sessionClient.pendingReturnCount, 1);
+      }
+      await server.close();
+      const [settled] = await withTimeout(
+        result,
+        1000,
+        `${kind} rejects on EOF`,
+      );
+      assert(
+        settled.status === "rejected" && settled.reason instanceof SessionError,
+      );
+      if (kind === "session client") {
+        assertEquals(sessionClient.pendingReturnCount, 0);
+        assertEquals(sessionClient.expectedReturnCount, 0);
+      }
+    } finally {
+      await sessionClient.close();
+      await intercept.close();
+      await server.close();
+      listener.close();
+      await result;
+    }
+  });
+}
+
+for (const wrapped of [false, true]) {
+  Deno.test(`RpcWireClient rejects pending calls without deadlines on TCP EOF${wrapped ? " through wrappers" : ""}`, async () => {
+    const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+    const addr = listener.addr as Deno.NetAddr;
+    const accepted = listener.accept();
+    const closed = deferred<void>();
+    const transport = await TcpTransport.connect(addr.hostname, addr.port, {
+      onClose: () => closed.resolve(),
+    });
+    const server = new TcpTransport(await accepted);
+    const received = deferred<void>();
+    let frameCount = 0;
+    await server.start(() => {
+      if (++frameCount === 16) received.resolve();
+    });
+    const clientTransport = wrapped
+      ? new MiddlewareTransport(
+        new NetworkRpcHarnessTransport(
+          new RpcServerCallInterceptTransport(transport),
+        ),
+        [],
+      )
+      : transport;
+    const client = new RpcWireClient(clientTransport, { interfaceId: 0x1234n });
+    const results = Promise.allSettled(
+      Array.from(
+        { length: 16 },
+        () => client.call({ capabilityIndex: 1 }, 0, EMPTY_RPC_PARAMS),
+      ),
+    );
+    try {
+      await withTimeout(
+        received.promise,
+        2000,
+        "all pending calls reach TCP peer",
+      );
+      assertEquals(client.stats.pendingReturns, 16);
+      assertEquals(client.stats.defaultTimeoutMs, null);
+      await server.close();
+      await withTimeout(closed.promise, 1000, "TCP observes EOF");
+      assertEquals(transport.stats.closed, true);
+      const settled = await withTimeout(
+        results,
+        1000,
+        "pending calls reject on EOF",
+      );
+      for (const result of settled) {
+        assert(
+          result.status === "rejected",
+          "EOF must reject each pending call",
+        );
+        assert(result.reason instanceof SessionError);
+      }
+      assertEquals(client.stats.pendingReturns, 0);
+      assertEquals(client.stats.closed, true);
+    } finally {
+      await client.close();
+      await server.close();
+      listener.close();
+      await results;
+    }
+  });
+}
 
 function buildSingleSegmentFrame(firstByte: number): Uint8Array {
   const frame = new Uint8Array(16);

@@ -84,6 +84,8 @@ export interface SlotFieldDescriptor<T extends object> {
   name: keyof T & string;
   offset: number;
   type: TypeDescriptor;
+  /** Scalar wire bits XORed with the field's schema default. */
+  defaultMask?: bigint;
   discriminantValue?: number;
 }
 

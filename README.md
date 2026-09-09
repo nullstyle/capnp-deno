@@ -265,6 +265,10 @@ for pending Return waits, local callback exports, next question IDs, and close
 state. `RpcServerBridge.stats` exposes answer-table, promise-pipelining, and
 exported capability pressure for server-side health checks.
 
+See [schema evolution and connection closure](docs/consumer_compatibility.md)
+for older-message defaults, pending-call rejection at EOF, and the optional
+closure subscription for custom transports.
+
 Browser WebTransport clients must connect over `https:` and trust the server
 certificate by hash:
 

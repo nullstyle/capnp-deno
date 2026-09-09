@@ -25,6 +25,7 @@ const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;
 const DEFAULT_MAX_HOST_CALLS_TOTAL = Number.MAX_SAFE_INTEGER;
 
 class PostInboundHookTransport implements RpcTransport {
+  readonly subscribeClose?: RpcTransport["subscribeClose"];
   readonly #inner: RpcTransport;
   readonly #afterInbound: (frame: Uint8Array) => Promise<void>;
   #afterInboundChain: Promise<void> = Promise.resolve();
@@ -36,6 +37,7 @@ class PostInboundHookTransport implements RpcTransport {
     afterInbound: (frame: Uint8Array) => Promise<void>,
   ) {
     this.#inner = inner;
+    this.subscribeClose = inner.subscribeClose?.bind(inner);
     this.#afterInbound = afterInbound;
   }
 

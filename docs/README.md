@@ -7,6 +7,7 @@
 - `docs/diagnostics.md`
 - `docs/streaming.md`
 - `docs/interop.md`
+- [Schema evolution and connection closure](consumer_compatibility.md)
 - `docs/performance.md`
 - `docs/interop_performance_sprint.md`
 - `docs/transport_composition.md`

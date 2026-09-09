@@ -82,7 +82,14 @@ export interface FieldModel {
 export interface FieldSlotModel {
   offset: number;
   type: TypeModel;
+  defaultValue?: FieldDefaultModel;
 }
+
+/** Nonzero scalar bits or nonempty pointer defaults from schema.Value. */
+export type FieldDefaultModel =
+  | { kind: "scalar"; bits: bigint }
+  | { kind: "text"; value: string }
+  | { kind: "data"; value: number[] };
 
 export interface FieldGroupModel {
   typeId: bigint;

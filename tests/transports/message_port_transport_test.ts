@@ -1,6 +1,8 @@
 import {
   MessagePortTransport,
   type RpcObservabilityEvent,
+  RpcWireClient,
+  SessionError,
   TransportError,
 } from "../../src/advanced.ts";
 import {
@@ -19,6 +21,36 @@ function buildFrame(words: number): Uint8Array {
   view.setUint32(4, words, true);
   return frame;
 }
+
+Deno.test("RpcWireClient rejects pending bootstrap on MessagePort transport close", async () => {
+  const channel = new MessageChannel();
+  const received = deferred<void>();
+  channel.port2.onmessage = () => received.resolve();
+  const transport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+  });
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await withTimeout(received.promise, 1000, "bootstrap sent");
+    assertEquals(client.pendingReturnCount, 1);
+    transport.close();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "MessagePort closure rejects bootstrap",
+    );
+    assert(settled.status === "rejected");
+    assert(settled.reason instanceof SessionError);
+    assertEquals(client.stats.closed, true);
+    assertEquals(client.pendingReturnCount, 0);
+  } finally {
+    await client.close();
+    channel.port1.close();
+    channel.port2.close();
+    await result;
+  }
+});
 
 Deno.test("MessagePortTransport sends and receives binary payloads", async () => {
   const channel = new MessageChannel();

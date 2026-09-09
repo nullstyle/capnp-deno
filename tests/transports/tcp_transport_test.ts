@@ -1,4 +1,9 @@
-import { TcpTransport, TransportError } from "../../src/advanced.ts";
+import {
+  RpcWireClient,
+  SessionError,
+  TcpTransport,
+  TransportError,
+} from "../../src/advanced.ts";
 import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 interface FakeConnOptions {
@@ -72,6 +77,91 @@ function createFakeConn(options: FakeConnOptions = {}): {
     getCloseCalls: () => closeCalls,
   };
 }
+
+Deno.test("TcpTransport closure subscriptions replay, unsubscribe, and isolate observers", async () => {
+  const eof = deferred<number | null>();
+  const { conn } = createFakeConn({ read: () => eof.promise });
+  const transport = new TcpTransport(conn, {
+    onClose() {
+      throw new Error("close observer failed");
+    },
+    onError() {
+      throw new Error("error observer failed");
+    },
+  });
+  let removedCalls = 0;
+  const unsubscribe = transport.subscribeClose(() => {
+    removedCalls++;
+  });
+  unsubscribe();
+  unsubscribe();
+  transport.subscribeClose(() => {
+    throw new Error("subscriber failed");
+  });
+  transport.subscribeClose(() =>
+    Promise.reject(new Error("async subscriber failed"))
+  );
+  transport.subscribeClose(() => new Promise<void>(() => {}));
+  transport.subscribeClose(() => transport.close());
+  let notifications = 0;
+  const observed = deferred<void>();
+  transport.subscribeClose(() => {
+    notifications++;
+    observed.resolve();
+  });
+  transport.start(() => {});
+  eof.resolve(null);
+  await withTimeout(
+    observed.promise,
+    1000,
+    "terminal observers do not block each other",
+  );
+  await transport.close();
+  await transport.close();
+  let replayed = 0;
+  transport.subscribeClose(() => {
+    replayed++;
+  });
+  assertEquals(replayed, 1);
+  assertEquals(notifications, 1);
+  assertEquals(removedCalls, 0);
+});
+
+Deno.test("RpcWireClient rejects pending calls when TCP read loop fails", async () => {
+  const read = deferred<number | null>();
+  const sent = deferred<void>();
+  const releaseObserver = deferred<void>();
+  const { conn } = createFakeConn({
+    read: () => read.promise,
+    write(frame) {
+      sent.resolve();
+      return frame.length;
+    },
+  });
+  const transport = new TcpTransport(conn, {
+    onError: () => releaseObserver.promise,
+  });
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await sent.promise;
+    read.reject(new TransportError("terminal read failure"));
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "read failure rejects bootstrap before observer completes",
+    );
+    assert(
+      settled.status === "rejected" && settled.reason instanceof SessionError,
+    );
+    assertEquals(client.pendingReturnCount, 0);
+    assertEquals(transport.stats.closed, true);
+  } finally {
+    releaseObserver.resolve();
+    await client.close();
+    await result;
+  }
+});
 
 async function withPatchedDenoConnect(
   connectImpl: unknown,

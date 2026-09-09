@@ -6,6 +6,8 @@ import {
   createWebTransportCertificateHash,
   createWebTransportCertificateHashOptions,
   getWebTransportRuntimeSupport,
+  RpcWireClient,
+  SessionError,
   TransportError,
   WebTransportTransport,
 } from "../../src/advanced.ts";
@@ -183,6 +185,95 @@ function createFakeBidiStream(
     } as WritableStream<Uint8Array> as WebTransportSendStream,
   };
 }
+
+Deno.test("RpcWireClient rejects pending bootstrap on WebTransport EOF", async () => {
+  const reader = createFakeReaderHarness();
+  const writer = createFakeWriterHarness();
+  const closed = deferred<WebTransportCloseInfo>();
+  const webTransport = {
+    closed: closed.promise,
+    close: () => closed.resolve({ closeCode: 0, reason: "closed" }),
+  } as WebTransport;
+  const transport = new WebTransportTransport(
+    webTransport,
+    createFakeBidiStream(reader.reader, writer.writer),
+  );
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await withTimeout(
+      (async () => {
+        while (writer.writes.length === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      })(),
+      1000,
+      "bootstrap sent",
+    );
+    assertEquals(client.pendingReturnCount, 1);
+    reader.close();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "WebTransport EOF rejects bootstrap",
+    );
+    assert(settled.status === "rejected");
+    assert(settled.reason instanceof SessionError);
+    assertEquals(client.stats.closed, true);
+    assertEquals(client.pendingReturnCount, 0);
+  } finally {
+    await client.close();
+    await transport.close();
+    await result;
+  }
+});
+
+Deno.test("RpcWireClient rejects pending bootstrap on WebTransport read failure", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const sent = deferred<void>();
+  const closed = deferred<WebTransportCloseInfo>();
+  const releaseObserver = deferred<void>();
+  const stream = {
+    readable: new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value;
+      },
+    }),
+    writable: new WritableStream<Uint8Array>({
+      write() {
+        sent.resolve();
+      },
+    }),
+  } as WebTransportBidirectionalStream;
+  const transport = new WebTransportTransport(
+    {
+      closed: closed.promise,
+      close: () => closed.resolve({ closeCode: 0, reason: "closed" }),
+    } as WebTransport,
+    stream,
+    { onError: () => releaseObserver.promise },
+  );
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await sent.promise;
+    controller.error(new TransportError("terminal read failure"));
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "WebTransport failure rejects before observer completes",
+    );
+    assert(
+      settled.status === "rejected" && settled.reason instanceof SessionError,
+    );
+    assertEquals(client.pendingReturnCount, 0);
+    assertEquals(transport.stats.closed, true);
+  } finally {
+    releaseObserver.resolve();
+    await client.close();
+    await result;
+  }
+});
 
 function bufferSourceBytes(source: BufferSource): Uint8Array {
   if (ArrayBuffer.isView(source)) {

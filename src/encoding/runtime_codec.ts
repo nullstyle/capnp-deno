@@ -37,6 +37,7 @@ import type {
 } from "./runtime_model.ts";
 import { MessageBuilder, MessageReader } from "./runtime_message.ts";
 import type { StructRef } from "./runtime_message.ts";
+import { ProtocolError } from "../errors.ts";
 
 /**
  * Encode a struct value as a complete framed Cap'n Proto message with the
@@ -127,6 +128,8 @@ export function encodeStructAt<T extends object>(
     }
 
     const fieldValue = record[field.name];
+    // Zero-initialized scalar storage and null pointers encode schema defaults.
+    if (fieldValue === undefined) continue;
     if (field.kind === "group") {
       encodeStructAt(
         builder,
@@ -144,6 +147,7 @@ export function encodeStructAt<T extends object>(
         field.offset,
         field.type,
         fieldValue,
+        field.defaultMask,
       );
       continue;
     }
@@ -164,10 +168,13 @@ export function decodeStructAt<T extends object>(
   const out = descriptor.createDefault();
   const record = out as Record<string, unknown>;
   const activeDiscriminant = descriptor.union
-    ? reader.readUint16InStruct(
-      structRef,
-      descriptor.union.discriminantOffset * 2,
-    )
+    ? descriptor.union.discriminantOffset * 2 + 2 >
+        structRef.dataWordCount * WORD_BYTES
+      ? 0
+      : reader.readUint16InStruct(
+        structRef,
+        descriptor.union.discriminantOffset * 2,
+      )
     : undefined;
 
   if (descriptor.union && activeDiscriminant !== undefined) {
@@ -192,15 +199,31 @@ export function decodeStructAt<T extends object>(
     }
 
     if (isDataType(field.type)) {
+      const byteOffset = field.type.kind === "bool"
+        ? Math.floor(field.offset / 8)
+        : dataByteOffset(field.type, field.offset);
+      const byteWidth = field.type.kind === "void"
+        ? 0
+        : dataByteOffset(field.type, 1);
+      if (byteOffset + byteWidth > structRef.dataWordCount * WORD_BYTES) {
+        continue;
+      }
       record[field.name] = decodeDataField(
         reader,
         structRef,
         field.offset,
         field.type,
+        field.defaultMask,
       );
       continue;
     }
+    // Older layouts omit newly added slots. Null pointers also select the
+    // schema default; a present malformed pointer must still be resolved.
+    if (field.offset >= structRef.pointerCount) continue;
     const pointerWord = reader.pointerWordIndex(structRef, field.offset);
+    if (
+      reader.readResolvedPointerWord(structRef.segmentId, pointerWord) === 0n
+    ) continue;
     record[field.name] = decodePointerField(
       reader,
       structRef.segmentId,
@@ -217,7 +240,19 @@ export function encodeDataField(
   offset: number,
   type: TypeDescriptor,
   value: unknown,
+  defaultMask = 0n,
 ): void {
+  if (defaultMask !== 0n) {
+    encodeDataWithDefault(
+      builder,
+      structWord,
+      offset,
+      type,
+      value,
+      defaultMask,
+    );
+    return;
+  }
   const base = structWord * WORD_BYTES;
   switch (type.kind) {
     case "void":
@@ -286,7 +321,11 @@ export function decodeDataField(
   structRef: StructRef,
   offset: number,
   type: TypeDescriptor,
+  defaultMask = 0n,
 ): unknown {
+  if (defaultMask !== 0n) {
+    return decodeDataWithDefault(reader, structRef, offset, type, defaultMask);
+  }
   switch (type.kind) {
     case "void":
       return undefined;
@@ -334,6 +373,103 @@ export function decodeDataField(
     default:
       throw new Error("unexpected pointer type in data field: " + type.kind);
   }
+}
+
+// Cap'n Proto stores scalars XORed with their schema default. Work on the
+// unsigned bit representation so signed values, floats and enums all preserve
+// the exact wire mask: https://capnproto.org/encoding.html#default-values
+function encodeDataWithDefault(
+  builder: MessageBuilder,
+  structWord: number,
+  offset: number,
+  type: TypeDescriptor,
+  value: unknown,
+  mask: bigint,
+): void {
+  const base = structWord * WORD_BYTES;
+  if (type.kind === "bool") {
+    builder.setBool(
+      base + Math.floor(offset / 8),
+      offset % 8,
+      asBoolean(value) !== (mask !== 0n),
+    );
+    return;
+  }
+  const width = dataByteOffset(type, 1);
+  const at = base + dataByteOffset(type, offset);
+  let bits: bigint;
+  if (type.kind === "float32" || type.kind === "float64") {
+    const view = new DataView(new ArrayBuffer(8));
+    const numeric = typeof value === "number" ? value : 0;
+    if (type.kind === "float32") view.setFloat32(0, numeric, true);
+    else view.setFloat64(0, numeric, true);
+    bits = view.getBigUint64(0, true);
+  } else {
+    bits = type.kind === "enum"
+      ? BigInt(enumOrdinal(type, value))
+      : type.kind === "int64" || type.kind === "uint64"
+      ? asBigInt(value)
+      : BigInt(asNumber(value));
+  }
+  bits = BigInt.asUintN(width * 8, bits) ^ mask;
+  switch (width) {
+    case 1:
+      builder.writeUint8(at, Number(bits));
+      return;
+    case 2:
+      builder.writeUint16(at, Number(bits));
+      return;
+    case 4:
+      builder.writeUint32(at, Number(bits));
+      return;
+    case 8:
+      builder.writeBigUint64(at, bits);
+      return;
+    default:
+      throw new ProtocolError("invalid scalar default type: " + type.kind);
+  }
+}
+
+function decodeDataWithDefault(
+  reader: MessageReader,
+  ref: StructRef,
+  offset: number,
+  type: TypeDescriptor,
+  mask: bigint,
+): unknown {
+  if (type.kind === "bool") {
+    return reader.readBool(ref, offset) !== (mask !== 0n);
+  }
+  const width = dataByteOffset(type, 1);
+  const at = dataByteOffset(type, offset);
+  let bits: bigint;
+  switch (width) {
+    case 1:
+      bits = BigInt(reader.readUint8InStruct(ref, at));
+      break;
+    case 2:
+      bits = BigInt(reader.readUint16InStruct(ref, at));
+      break;
+    case 4:
+      bits = BigInt(reader.readUint32InStruct(ref, at));
+      break;
+    case 8:
+      bits = reader.readBigUint64InStruct(ref, at);
+      break;
+    default:
+      throw new ProtocolError("invalid scalar default type: " + type.kind);
+  }
+  bits ^= mask;
+  if (type.kind === "enum") return enumValue(type, Number(bits));
+  if (type.kind === "float32" || type.kind === "float64") {
+    const view = new DataView(new ArrayBuffer(8));
+    view.setBigUint64(0, bits, true);
+    return type.kind === "float32"
+      ? view.getFloat32(0, true)
+      : view.getFloat64(0, true);
+  }
+  if (type.kind.startsWith("int")) bits = BigInt.asIntN(width * 8, bits);
+  return width === 8 ? bits : Number(bits);
 }
 
 function listDataWordsForAnyPointerCopy(
@@ -912,7 +1048,7 @@ export function decodeListField(
       throw new Error("expected inline composite list for struct element type");
     }
     const descriptor = elementType.get();
-    const stride = descriptor.dataWordCount + descriptor.pointerCount;
+    const stride = list.dataWordCount + list.pointerCount;
     const values: unknown[] = [];
     const startWord = list.tagWord + 1;
     for (let i = 0; i < list.elementCount; i += 1) {
@@ -921,8 +1057,8 @@ export function decodeListField(
         decodeStructAt(reader, descriptor, {
           segmentId: list.segmentId,
           startWord: elementStart,
-          dataWordCount: descriptor.dataWordCount,
-          pointerCount: descriptor.pointerCount,
+          dataWordCount: list.dataWordCount,
+          pointerCount: list.pointerCount,
         }),
       );
     }

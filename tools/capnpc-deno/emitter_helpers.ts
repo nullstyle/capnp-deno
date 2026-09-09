@@ -5,6 +5,7 @@
 
 import type {
   CodeGeneratorRequestModel,
+  FieldDefaultModel,
   FieldModel,
   NodeModel,
   TypeModel,
@@ -780,7 +781,33 @@ export function typeDescriptorExpression(
 export function defaultValueExpression(
   type: TypeModel,
   ctx: TypeEmitContext,
+  value?: FieldDefaultModel,
 ): string {
+  if (value?.kind === "text") return JSON.stringify(value.value);
+  if (value?.kind === "data") {
+    return `new Uint8Array([${value.value.join(", ")}])`;
+  }
+  if (value?.kind === "scalar" && type.kind !== "enum") {
+    const bits = value.bits;
+    if (type.kind === "bool") return bits === 0n ? "false" : "true";
+    if (type.kind === "int64") return `${BigInt.asIntN(64, bits)}n`;
+    if (type.kind === "uint64") return `${bits}n`;
+    if (type.kind === "float32" || type.kind === "float64") {
+      const view = new DataView(new ArrayBuffer(8));
+      view.setBigUint64(0, bits, true);
+      const number = type.kind === "float32"
+        ? view.getFloat32(0, true)
+        : view.getFloat64(0, true);
+      return Object.is(number, -0) ? "-0" : String(number);
+    }
+    const width = {
+      int8: 8,
+      int16: 16,
+      int32: 32,
+    }[type.kind as "int8" | "int16" | "int32"];
+    return String(width ? BigInt.asIntN(width, bits) : bits);
+  }
+  const ordinal = value?.kind === "scalar" ? value.bits : 0;
   switch (type.kind) {
     case "void":
       return "undefined";
@@ -810,11 +837,11 @@ export function defaultValueExpression(
         if (info.values.length === 0) {
           return `undefined as unknown as ${typeToTs(type, ctx)}`;
         }
-        return `${info.valuesConst}[0]`;
+        return `${info.valuesConst}[${ordinal}]`;
       }
       const entry = ctx.imports.crossFileTypeReference(type.typeId);
       if (entry?.kind === "enum" && entry.info.values.length > 0) {
-        return `${ctx.imports.enumMirror(entry).valuesConst}[0]`;
+        return `${ctx.imports.enumMirror(entry).valuesConst}[${ordinal}]`;
       }
       return `undefined as unknown as ${typeToTs(type, ctx)}`;
     }

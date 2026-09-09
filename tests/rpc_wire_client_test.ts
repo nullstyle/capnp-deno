@@ -17,6 +17,7 @@ import {
   assert,
   assertBytes,
   assertEquals,
+  deferred,
   withTimeout,
 } from "./test_utils.ts";
 
@@ -46,6 +47,195 @@ class MockTransport implements RpcTransport {
     await this.#onFrame(frame);
   }
 }
+
+Deno.test("RpcWireClient unsubscribes after synchronous terminal replay", async () => {
+  let subscriptions = 0;
+  const transport: RpcTransport = {
+    start() {
+      throw new Error("must not start closed transport");
+    },
+    send() {
+      throw new Error("must not send on closed transport");
+    },
+    close() {},
+    subscribeClose(onClose) {
+      subscriptions++;
+      onClose();
+      return () => {
+        subscriptions--;
+      };
+    },
+  };
+  const client = new RpcWireClient(transport);
+  const [result] = await Promise.allSettled([client.bootstrap()]);
+  assert(result.status === "rejected" && result.reason instanceof SessionError);
+  assertEquals(client.stats.closed, true);
+  assertEquals(subscriptions, 0);
+  await client.close();
+});
+
+Deno.test("RpcWireClient removes close subscription when start throws", () => {
+  let subscriptions = 0;
+  const failure = new Error("start failed synchronously");
+  const transport: RpcTransport = {
+    start() {
+      throw failure;
+    },
+    send() {},
+    close() {},
+    subscribeClose() {
+      subscriptions++;
+      return () => {
+        subscriptions--;
+      };
+    },
+  };
+  let actual: unknown;
+  try {
+    new RpcWireClient(transport);
+  } catch (error) {
+    actual = error;
+  }
+  assertEquals(actual, failure);
+  assertEquals(subscriptions, 0);
+});
+
+Deno.test("RpcWireClient rejects closure while transport start is pending", async () => {
+  const releaseStart = deferred<void>();
+  let onClose: (() => void | Promise<void>) | undefined;
+  const transport: RpcTransport = {
+    start: () => releaseStart.promise,
+    send() {
+      throw new Error("closed transport must not send");
+    },
+    close() {},
+    subscribeClose(callback) {
+      onClose = callback;
+      return () => {};
+    },
+  };
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await onClose?.();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "closure rejects before start cleanup",
+    );
+    assert(
+      settled.status === "rejected" && settled.reason instanceof SessionError,
+    );
+  } finally {
+    releaseStart.resolve();
+    await client.close();
+    await result;
+  }
+});
+
+Deno.test("RpcWireClient does not send after closure during request registration", async () => {
+  let onClose: (() => void | Promise<void>) | undefined;
+  let sent = 0;
+  const transport: RpcTransport = {
+    start() {},
+    send() {
+      sent++;
+    },
+    close() {},
+    subscribeClose(callback) {
+      onClose = callback;
+      return () => {};
+    },
+  };
+  const client = new RpcWireClient(transport);
+  const [result] = await Promise.allSettled([client.bootstrap({
+    onQuestionId() {
+      queueMicrotask(() => {
+        void onClose?.();
+      });
+    },
+  })]);
+  assert(result.status === "rejected" && result.reason instanceof SessionError);
+  assertEquals(sent, 0);
+  assertEquals(client.pendingReturnCount, 0);
+  await client.close();
+});
+
+Deno.test("RpcWireClient settles closure while send is pending and unsubscribe throws", async () => {
+  const sent = deferred<void>();
+  const releaseSend = deferred<void>();
+  let notifyClose: (() => void | Promise<void>) | undefined;
+  const transport: RpcTransport = {
+    start() {},
+    send() {
+      sent.resolve();
+      return releaseSend.promise;
+    },
+    close() {},
+    subscribeClose(onClose) {
+      notifyClose = onClose;
+      return () => {
+        throw new Error("observer cleanup failed");
+      };
+    },
+  };
+  const client = new RpcWireClient(transport);
+  const result = Promise.allSettled([client.bootstrap()]);
+  try {
+    await sent.promise;
+    assertEquals(client.pendingReturnCount, 1);
+    await notifyClose?.();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "closure settles before send cleanup",
+    );
+    assert(
+      settled.status === "rejected" && settled.reason instanceof SessionError,
+    );
+    assertEquals(client.pendingReturnCount, 0);
+    assertEquals(client.stats.closed, true);
+  } finally {
+    releaseSend.resolve();
+    await client.close();
+    // A broken unsubscribe must not leave this test waiting during red runs.
+  }
+});
+
+Deno.test("RpcWireClient sends early Finish when abort follows the transport write", async () => {
+  const abort = new AbortController();
+  class AbortingTransport extends MockTransport {
+    override async send(frame: Uint8Array): Promise<void> {
+      await super.send(frame);
+      if (this.sent.length === 1) abort.abort();
+    }
+  }
+  const transport = new AbortingTransport();
+  const client = new RpcWireClient(transport, { interfaceId: 1n });
+  try {
+    const [result] = await Promise.allSettled([client.call(
+      { capabilityIndex: 1 },
+      0,
+      EMPTY_STRUCT_MESSAGE,
+      { signal: abort.signal },
+    )]);
+    assert(
+      result.status === "rejected" && result.reason instanceof SessionError,
+    );
+    assertEquals(
+      transport.sent.length,
+      2,
+      "a written, canceled Call needs Finish",
+    );
+    const call = decodeCallRequestFrame(transport.sent[0]);
+    const finish = decodeFinishFrame(transport.sent[1]);
+    assertEquals(finish.questionId, call.questionId);
+    assertEquals(finish.requireEarlyCancellation, true);
+    assertEquals(client.pendingReturnCount, 0);
+  } finally {
+    await client.close();
+  }
+});
 
 async function waitForSentFrames(
   transport: MockTransport,

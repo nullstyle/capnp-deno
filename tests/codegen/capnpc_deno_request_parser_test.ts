@@ -274,6 +274,23 @@ function locateFirstPersonFieldLayout(
   return locatePersonFieldLayout(segment, personNodeIndex, 0);
 }
 
+function setFieldDefaultKind(
+  segment: Uint8Array,
+  field: { fieldStartWord: number; fieldDataWords: number },
+  tag: number,
+): void {
+  const value = locateStructTargetFromPointer(
+    segment,
+    field.fieldStartWord + field.fieldDataWords + 3,
+  );
+  // Field.slot.defaultValue is a schema.Value with the same discriminant as
+  // schema.Type. Keep mutated types paired with their zero/null default.
+  for (let i = 0; i < value.dataWords + value.pointerCount; i += 1) {
+    setWord(segment, value.startWord + i, 0n);
+  }
+  writeStructU16(segment, value.startWord, 0, tag);
+}
+
 function locateRequestedFileStruct(
   segment: Uint8Array,
   requestedFileIndex: number,
@@ -395,6 +412,22 @@ Deno.test("capnpc-deno request parser rejects list types missing element type pa
   );
 });
 
+Deno.test("capnpc-deno request parser rejects a default value with a mismatched type", async () => {
+  const mutated = await mutateFixture((segment, personNodeIndex) => {
+    const field = locatePersonFieldLayout(segment, personNodeIndex, 0);
+    const type = locateStructTargetFromPointer(
+      segment,
+      field.typePointerWordIndex,
+    );
+    // The fixture's UInt32 default remains unchanged while its type is Bool.
+    writeStructU16(segment, type.startWord, 0, 1);
+  });
+  assertThrows(
+    () => parseCodeGeneratorRequest(mutated),
+    /field id default does not match bool/,
+  );
+});
+
 Deno.test("capnpc-deno request parser handles parseType variants across scalar and reference tags", async () => {
   const scalarAndReferenceCases = [
     { tag: 0, kind: "void" },
@@ -425,6 +458,7 @@ Deno.test("capnpc-deno request parser handles parseType variants across scalar a
         firstField.typePointerWordIndex,
       );
       writeStructU16(segment, typeStruct.startWord, 0, testCase.tag);
+      setFieldDefaultKind(segment, firstField, testCase.tag);
       if ("typeId" in testCase) {
         writeStructU64(segment, typeStruct.startWord, 8, testCase.typeId);
       }
@@ -477,6 +511,8 @@ Deno.test("capnpc-deno request parser handles parseType variants across scalar a
 
     writeStructU16(segment, secondType.startWord, 0, 4); // int32
     writeStructU16(segment, firstType.startWord, 0, 14); // list
+    setFieldDefaultKind(segment, secondField, 4);
+    setFieldDefaultKind(segment, firstField, 14);
     setWord(segment, elementTypePointerWord, rebasedSecondTypePointerWord);
   });
   const parsedList = parseCodeGeneratorRequest(listMutated);

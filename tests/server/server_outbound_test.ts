@@ -8,7 +8,7 @@ import {
   RpcServerOutboundClient,
 } from "../../src/mod.ts";
 import type { RpcTransport } from "../../src/rpc/transports/internal/transport.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 // ---------------------------------------------------------------------------
 // Mock transport
@@ -37,6 +37,45 @@ class MockTransport implements RpcTransport {
     await this.onFrame(frame);
   }
 }
+
+Deno.test("server outbound call rejects terminal closure while send is pending", async () => {
+  const sent = deferred<void>();
+  const releaseSend = deferred<void>();
+  let onClose: (() => void | Promise<void>) | undefined;
+  const transport: RpcTransport = {
+    start() {},
+    send() {
+      sent.resolve();
+      return releaseSend.promise;
+    },
+    close() {},
+    subscribeClose(callback) {
+      onClose = callback;
+      return () => {};
+    },
+  };
+  const intercept = new RpcServerCallInterceptTransport(transport);
+  const client = new RpcServerOutboundClient(intercept);
+  const result = Promise.allSettled([
+    client.call({ capabilityIndex: 1 }, 0, emptyStructMessage(), {
+      interfaceId: 1n,
+    }),
+  ]);
+  try {
+    await sent.promise;
+    await onClose?.();
+    const [settled] = await withTimeout(
+      result,
+      1000,
+      "server outbound rejects before send cleanup",
+    );
+    assert(settled.status === "rejected");
+  } finally {
+    releaseSend.resolve();
+    await intercept.close();
+    await result;
+  }
+});
 
 /** Encode a minimal struct message (empty struct). */
 function emptyStructMessage(): Uint8Array {

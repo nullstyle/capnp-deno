@@ -42,6 +42,10 @@ import {
   type RpcReturnMessage,
 } from "./wire.ts";
 import type { RpcTransport } from "./transports/internal/transport.ts";
+import {
+  subscribeTransportClose,
+  TransportCloseSignal,
+} from "./transports/internal/transport_internal.ts";
 
 interface PendingReturnWaiter {
   settled: boolean;
@@ -85,7 +89,7 @@ export interface RpcWireClientOptions {
  * Operational snapshot for {@link RpcWireClient}.
  */
 export interface RpcWireClientStats {
-  /** Whether {@link RpcWireClient.close} has been called. */
+  /** Whether the client or its underlying transport has closed. */
   readonly closed: boolean;
   /** Number of in-flight Bootstrap/Call questions waiting for Return frames. */
   readonly pendingReturns: number;
@@ -114,6 +118,11 @@ export class RpcWireClient {
   readonly #observability: RpcObservability | undefined;
 
   #closed = false;
+  readonly #closeSignal = new TransportCloseSignal();
+  readonly #whenClosed = new Promise<void>((resolve) => {
+    this.#closeSignal.subscribe(resolve);
+  });
+  #unsubscribeClose: (() => void) | undefined;
   #startError: unknown = null;
   #startPromise: Promise<void>;
   #pendingReturns = new Map<number, PendingReturnWaiter>();
@@ -137,21 +146,38 @@ export class RpcWireClient {
     this.#onUnexpectedFrame = options.onUnexpectedFrame;
     this.#observability = options.observability;
 
-    this.#startPromise = Promise.resolve(
-      this.transport.start((frame) => this.#onFrame(frame)),
-    ).catch((error) => {
-      this.#startError = error;
-      emitObservabilityEvent(this.#observability, {
-        name: "rpc.wire_client.start_error",
-        error,
-      });
-      this.#rejectAllPending(
-        new SessionError("rpc wire client failed to start", {
-          cause: error,
-          metadata: { phase: "transport" },
-        }),
-      );
-    });
+    this.#unsubscribeClose = subscribeTransportClose(
+      this.transport,
+      () => this.#markClosed(),
+    );
+
+    let started: void | Promise<void>;
+    try {
+      started = this.#closed
+        ? undefined
+        : this.transport.start((frame) => this.#onFrame(frame));
+    } catch (error) {
+      this.#unsubscribeClose();
+      this.#unsubscribeClose = undefined;
+      throw error;
+    }
+    this.#startPromise = Promise.race([started, this.#whenClosed]).catch(
+      (error) => {
+        this.#unsubscribeClose?.();
+        this.#unsubscribeClose = undefined;
+        this.#startError = error;
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.wire_client.start_error",
+          error,
+        });
+        this.#rejectAllPending(
+          new SessionError("rpc wire client failed to start", {
+            cause: error,
+            metadata: { phase: "transport" },
+          }),
+        );
+      },
+    );
   }
 
   /**
@@ -378,12 +404,19 @@ export class RpcWireClient {
    * Close the transport and reject any pending waits.
    */
   async close(): Promise<void> {
+    this.#markClosed();
+    await this.transport.close();
+  }
+
+  #markClosed(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#closeSignal.close();
+    this.#unsubscribeClose?.();
+    this.#unsubscribeClose = undefined;
     this.#rejectAllPending(new SessionError("rpc wire client is closed"));
     this.#questionsWithResultCaps.clear();
     this.#localBridge = null;
-    await this.transport.close();
   }
 
   async #onFrame(frame: Uint8Array): Promise<void> {
@@ -477,6 +510,9 @@ export class RpcWireClient {
       throw new SessionError("rpc wire client is closed");
     }
     await this.#startPromise;
+    if (this.#closed) {
+      throw new SessionError("rpc wire client is closed");
+    }
     if (this.#startError !== null) {
       throw new SessionError("rpc wire client failed to start", {
         cause: this.#startError,
@@ -505,10 +541,28 @@ export class RpcWireClient {
     frame: Uint8Array,
     options: RpcClientCallOptions,
   ): Promise<RpcReturnMessage> {
+    if (this.#closed) throw new SessionError("rpc wire client is closed");
     const wait = this.#waitForReturn(questionId, options);
+    // Cancellation can reject before send completes. Keep the rejection
+    // handled while preserving Finish for a successfully written request.
+    void wait.catch(() => {});
+    let stopWaitingForClose: (() => void) | undefined;
+    const closed = new Promise<never>((_, reject) => {
+      stopWaitingForClose = this.#closeSignal.subscribe(() =>
+        reject(new SessionError("rpc wire client is closed"))
+      );
+    });
     let frameSent = false;
     try {
-      await this.transport.send(frame);
+      await Promise.race([
+        Promise.resolve().then(() => {
+          if (this.#closed) throw new SessionError("rpc wire client is closed");
+          return this.transport.send(frame);
+        }),
+        // EOF must reject even while transport write cleanup lags. Ordinary
+        // cancellation waits for send completion so it can send early Finish.
+        closed,
+      ]);
       frameSent = true;
     } catch (error) {
       const pending = this.#pendingReturns.get(questionId);
@@ -523,6 +577,8 @@ export class RpcWireClient {
         questionId,
         frameBytes: frame.byteLength,
       }, "rpc wire client send failed");
+    } finally {
+      stopWaitingForClose?.();
     }
     try {
       return await wait;

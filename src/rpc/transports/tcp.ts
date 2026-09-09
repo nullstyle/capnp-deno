@@ -24,6 +24,7 @@ import {
   notifyTransportClose,
   OutboundFrameQueue,
   type QueuedOutboundFrame,
+  TransportCloseSignal,
 } from "./internal/transport_internal.ts";
 
 /**
@@ -263,6 +264,12 @@ function isPeerDisconnectError(error: unknown): boolean {
  * ```
  */
 export class TcpTransport implements RpcTransport {
+  readonly #closeSignal = new TransportCloseSignal();
+
+  /** @inheritdoc */
+  subscribeClose(onClose: () => void | Promise<void>): () => void {
+    return this.#closeSignal.subscribe(onClose);
+  }
   /** The underlying Deno TCP connection. */
   readonly conn: Deno.Conn;
   /** The options this transport was configured with. */
@@ -414,9 +421,12 @@ export class TcpTransport implements RpcTransport {
     if (this.#closed) throw new TransportError("TcpTransport is closed");
     if (this.#started) throw new TransportError("TcpTransport already started");
     this.#started = true;
-    this.#readLoop = this.runReadLoop(onFrame).catch((error) =>
-      this.handleError(error)
-    );
+    this.#readLoop = this.runReadLoop(onFrame).catch((error) => {
+      this.#markRemoteClosed();
+      void this.handleError(error).catch(() => {
+        // Terminal cleanup must not depend on an error observer succeeding.
+      });
+    });
     emitObservabilityEvent(this.options.observability, {
       name: "rpc.transport.tcp.start",
       attributes: {
@@ -638,6 +648,7 @@ export class TcpTransport implements RpcTransport {
   #notifyClose(): void {
     if (this.#closeNotified) return;
     this.#closeNotified = true;
+    this.#closeSignal.close();
     notifyTransportClose(this.options, "tcp onClose callback failed");
   }
 

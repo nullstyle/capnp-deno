@@ -97,6 +97,8 @@ export interface RpcTransportMiddleware {
  * ```
  */
 export class MiddlewareTransport implements RpcTransport {
+  /** Closure subscription forwarded from the underlying transport, if supported. */
+  readonly subscribeClose?: RpcTransport["subscribeClose"];
   /** The underlying transport being wrapped. */
   readonly inner: RpcTransport;
   /** The middleware stack applied to this transport. */
@@ -107,6 +109,7 @@ export class MiddlewareTransport implements RpcTransport {
     middleware: RpcTransportMiddleware[],
   ) {
     this.inner = inner;
+    this.subscribeClose = inner.subscribeClose?.bind(inner);
     this.middleware = [...middleware];
   }
 
