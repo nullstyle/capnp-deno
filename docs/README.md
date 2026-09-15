@@ -2,6 +2,8 @@
 
 ## Active Guides
 
+- [Modernization sprint and verified baseline](modernization_sprint.md)
+- [capnp-wasm upstream survey](capnp_wasm_delta_survey.md)
 - `docs/getting_started_serde.md`
 - `docs/getting_started_rpc.md`
 - `docs/diagnostics.md`
