@@ -30,6 +30,13 @@ runtime rebuilding, and the four-way native matrix. The final audit then added
 release-tag rejection, expanded copy and native cancellation regressions, and
 recorded measurements; these use the same standing validation workflow.
 
+The expanded cancellation test exposed a fixture synchronization error on Linux:
+C++ defers cancellation cleanup when the legacy Finish workaround bit is set, so
+a following status call can arrive before the handler is destroyed. The fixture
+now waits for actual handler cleanup and exercises both messages in one TCP
+write. Its pending-call, terminal Return, callback Release, and same-capability
+recovery checks remain required.
+
 [capnp-zig validation run 34934160680](https://github.com/nullstyle/capnp-zig/actions/runs/34934160680)
 passed all 25 jobs at the pinned runtime source `0c5e33f`. The compiler archive
 remains pinned to producer source `a5ccaae`; later producer commit `672679a`

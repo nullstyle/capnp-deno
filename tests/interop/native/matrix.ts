@@ -9,7 +9,10 @@ import {
   TcpTransport,
 } from "../../../src/advanced.ts";
 import { assert, assertEquals, withTimeout } from "../../test_utils.ts";
-import { CancellationAudit } from "./cancellation_audit.ts";
+import {
+  BatchedCancellationTransport,
+  CancellationAudit,
+} from "./cancellation_audit.ts";
 import {
   createDoublerServer,
   type Doubler,
@@ -389,7 +392,11 @@ async function denoToCpp(): Promise<void> {
     reader.releaseLock();
     const port = Number(line.trim());
     assert(Number.isInteger(port) && port > 0 && port <= 65535);
-    await consume(await TcpTransport.connect("127.0.0.1", port), true);
+    const transport = new BatchedCancellationTransport(
+      await TcpTransport.connect("127.0.0.1", port),
+    );
+    await consume(transport, true);
+    transport.check();
     await terminated(child);
   } finally {
     await stop(child);

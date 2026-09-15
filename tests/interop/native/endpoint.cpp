@@ -23,6 +23,7 @@ private:
   bool started = false;
   bool active = false;
   bool canceled = false;
+  kj::ForkedPromise<void> cancellationComplete = nullptr;
 
   kj::Promise<void> fail(FailContext) override {
     return KJ_EXCEPTION(FAILED, "InteropExpectedFailure");
@@ -37,14 +38,28 @@ private:
     started = true;
     active = true;
     auto cap = context.getParams().getCap();
-    return kj::Promise<void>(kj::NEVER_DONE).attach(kj::mv(cap), kj::defer([this]() {
+    auto completion = kj::newPromiseAndFulfiller<void>();
+    cancellationComplete = completion.promise.fork();
+    return kj::Promise<void>(kj::NEVER_DONE).attach(kj::mv(cap), kj::defer([this, fulfiller = kj::mv(completion.fulfiller)]() mutable {
       active = false;
       canceled = true;
       if (checks != nullptr) checks->pendingCanceled = true;
+      fulfiller->fulfill();
     }));
   }
   kj::Promise<void> holdStatus(HoldStatusContext context) override {
-    if (context.getParams().getRelease()) KJ_REQUIRE(canceled && !active);
+    if (context.getParams().getRelease()) {
+      KJ_REQUIRE(started);
+      // A legacy Finish defers destruction with kj::evalLast. A status Call
+      // received in the same TCP batch can dispatch first, so wait for actual
+      // hold cleanup instead of treating wire order as a completion barrier.
+      return cancellationComplete.addBranch().then([this, context = kj::mv(context)]() mutable {
+        KJ_REQUIRE(canceled && !active);
+        context.getResults().setStarted(started);
+        context.getResults().setActive(active);
+        context.getResults().setCanceled(canceled);
+      });
+    }
     context.getResults().setStarted(started);
     context.getResults().setActive(active);
     context.getResults().setCanceled(canceled);

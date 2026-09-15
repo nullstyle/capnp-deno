@@ -126,3 +126,84 @@ export class CancellationAudit {
     );
   }
 }
+
+/**
+ * Force the native scheduling edge: enqueue cancellation and the following
+ * status Call together, without changing either frame's bytes or their order.
+ * The outer audit still observes every individual frame.
+ */
+export class BatchedCancellationTransport implements RpcTransport {
+  #holdQuestionId: number | undefined;
+  #finish: Uint8Array | undefined;
+  #batches = 0;
+
+  constructor(readonly transport: RpcTransport) {}
+
+  start(
+    receive: (frame: Uint8Array) => void | Promise<void>,
+  ): void | Promise<void> {
+    return this.transport.start(receive);
+  }
+
+  send(frame: Uint8Array): void | Promise<void> {
+    const tag = decodeRpcMessageTag(frame);
+    if (tag === RPC_MESSAGE_TAG_CALL) {
+      const call = decodeCallRequestFrame(frame);
+      if (
+        call.interfaceId === DoublerInterfaceId &&
+        call.methodId === DoublerMethodOrdinals.hold
+      ) {
+        this.#holdQuestionId = call.questionId;
+      }
+      if (this.#finish) {
+        assertEquals(call.interfaceId, DoublerInterfaceId);
+        assertEquals(call.methodId, DoublerMethodOrdinals.holdStatus);
+        const batch = new Uint8Array(
+          this.#finish.byteLength + frame.byteLength,
+        );
+        batch.set(this.#finish);
+        batch.set(frame, this.#finish.byteLength);
+        this.#finish = undefined;
+        this.#batches++;
+        return this.transport.send(batch);
+      }
+    }
+    if (tag === RPC_MESSAGE_TAG_FINISH) {
+      const finish = decodeFinishFrame(frame);
+      if (finish.questionId === this.#holdQuestionId) {
+        assertEquals(
+          finish.requireEarlyCancellation,
+          true,
+          "exercise the legacy deferred-cancellation scheduling edge",
+        );
+        assertEquals(this.#finish, undefined);
+        // Accept the bytes into this bounded test queue. The next status Call
+        // flushes both frames in one TCP transport write, as packet coalescing can.
+        this.#finish = new Uint8Array(frame);
+        return;
+      }
+    }
+    assertEquals(this.#finish, undefined, "no frame may overtake held Finish");
+    return this.transport.send(frame);
+  }
+
+  close(): void | Promise<void> {
+    return this.transport.close();
+  }
+  subscribeClose(observer: () => void | Promise<void>): () => void {
+    return this.transport.subscribeClose?.(observer) ?? (() => {});
+  }
+
+  check(): void {
+    assertEquals(
+      this.#batches,
+      1,
+      "Finish and status must share one TCP write",
+    );
+    assertEquals(
+      this.#finish,
+      undefined,
+      "buffered Finish must have been sent",
+    );
+  }
+}

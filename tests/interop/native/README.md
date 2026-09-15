@@ -67,6 +67,14 @@ convenience adapter does not pass call context. C++ enables cancellation on
 `hold` using the schema's `allowCancellation` annotation. Both handlers release
 their callback when cancellation reaches them.
 
+The Deno-to-C++ row queues the canceled hold's `Finish` and the following
+`holdStatus` request together in one TCP transport write. A legacy Finish may
+schedule C++ cancellation with `kj::evalLast`, so wire order does not guarantee
+that handler cleanup precedes the next dispatch. `holdStatus(true)` waits for a
+completion promise fulfilled only by destruction of the pending hold, then
+checks its stopped state. The original wire audit and later successful calls
+still run; neither delays nor relaxed cleanup assertions replace this check.
+
 Native Zig's deferred handler API has no cancellation callback. Its
 `holdStatus(true)` verifies that `Finish` retired the pending answer, then
 completes it late and releases the callback. That row verifies client
