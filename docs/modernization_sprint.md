@@ -1,33 +1,45 @@
 # capnp-deno modernization sprint
 
-Survey date: 2026-09-15 UTC. Delivery update: 2026-09-15 UTC. The
-compiler/runtime migration and RPC correctness work are implemented; final
-hosted platform acceptance remains in progress. The historical survey below
+Survey date: 2026-09-15 UTC. Delivery update: 2026-09-15 UTC. The compiler,
+runtime, and RPC migration is implemented on `main`. The historical survey below
 preserves the original findings and counts. Companion evidence:
 [capnp-wasm survey](capnp_wasm_delta_survey.md).
 
 ## Delivery status
 
-| Area                            | Delivered                                                                                                                                         | Remaining acceptance                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| S1 — Compiler host              | Public compiler-host `0.1.0-rc.3`, exact inventory/provenance pins, bounded worker, ordered roots and source-prefix parity                        | Hosted producer browser coverage remains separate from Deno acceptance |
-| S2 — Deno compiler integration  | Verified worker adapter, bounded reachable-file snapshot, read/write-only source CLI, preserved request/stdin/layout modes, staged output         | Hosted native acceptance                                               |
-| S3 — Runtime identity           | Current capnp-zig revision, canonical isolated `wasm-host` rebuild, exact Zig/Binaryen pin, checked-in WASM receipt and rebuild comparison        | Required hosted clean Linux rebuild                                    |
-| S4 — WASM ownership             | Exact-length frees, borrowed error handling, wrapper/serde scratch disposal, shared-instance and failure recovery regressions                     | Required native-platform real ownership runs                           |
-| S5 — Service lifecycle          | Full-lifetime close subscriptions, initialization-race cleanup, exact-once disposal, custom/wrapped/local MessagePort coverage                    | Required native-platform transport runs                                |
-| S6 — Wire and native interop    | Shared framing corpus, independent TS wire/copy corrections, standing native Zig/C++ matrix, bootstrap pipelining and native error-recovery fixes | Hosted Linux native interop lane                                       |
-| S7 — Streaming admission        | Exact encoded parameter-byte admission, one preparation candidate, callback rollback, ordinary-call barriers, separate retained Call-frame budget | Hosted platform validation of the implemented behavior                 |
-| S8 — Consumer and release gates | Shared CI/release validation, five native binary targets, package and executable receipt checks, mandatory browser lane, benchmark comparison     | Actual hosted workflow execution                                       |
+| Area                            | Delivered                                                                                                                             | Acceptance evidence                                                                                                                 |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| S1 — Compiler host              | Public compiler-host `0.1.0-rc.3`, exact inventory/provenance pins, bounded worker, ordered roots and source-prefix parity            | Verified public download, producer package consumers and native/browser compiler parity                                             |
+| S2 — Deno compiler integration  | Bounded reachable-file snapshot, read/write-only source CLI, preserved request/stdin/layout modes, staged output                      | Compiler and CLI regressions, installed/standalone execution on five native targets; cold/warm baseline                             |
+| S3 — Runtime identity           | Current capnp-zig revision, isolated canonical `wasm-host` rebuild, exact Zig/Binaryen pins, WASM provenance receipt                  | Clean hosted Linux rebuild matches checked-in bytes; package consumers use that artifact                                            |
+| S4 — WASM ownership             | Exact-length frees, borrowed error handling, wrapper/serde scratch disposal, shared-instance recovery                                 | Real ownership tests on five native targets, including 2,000-cycle soaks                                                            |
+| S5 — Service lifecycle          | Full-lifetime close subscriptions, initialization-race cleanup, exact-once disposal, custom/wrapped/local MessagePort coverage        | Socket and real-runtime suites on all five targets, mandatory browser WebTransport                                                  |
+| S6 — Wire and native interop    | Framing corpus, TS/WASM copy checks, standing Zig/C++ matrix, bootstrap and cancellation corrections                                  | Four caller/server directions with callbacks, returned capabilities, Finish/Release, cancellation, recovery, and streaming barriers |
+| S7 — Streaming admission        | Exact encoded-byte admission, one preparation candidate, callback rollback, ordinary-call barriers, retained Call-frame budget        | Behavioral regressions, paired throughput baseline, serialized allocation and retention measurements                                |
+| S8 — Consumer and release gates | Shared CI/release validation, exact tag/version gate, five native binary targets, package/executable receipts, browser and benchmarks | Hosted native consumers, binary stdin, installation/tampered receipt rejection, and shared required gates                           |
 
-The package version remains `0.5.0` in `deno.json`. This record does not
-announce a runtime package release. Local results establish the behavior
-exercised here; workflow definitions and successful cross-compilation alone do
-not establish Linux/macOS/Windows release acceptance.
+The package version remains `0.5.0`; no runtime package release is announced.
+The public compiler-host archive is a separately authorized toolchain release.
+
+### Hosted evidence
+
+[capnp-deno validation run 34936521133](https://github.com/nullstyle/capnp-deno/actions/runs/34936521133)
+passed every required lane at `f0846ae`: source verification, all five native
+targets, browser WebTransport, benchmark regression/comparison, clean Linux
+runtime rebuilding, and the four-way native matrix. The final audit then added
+release-tag rejection, expanded copy and native cancellation regressions, and
+recorded measurements; these use the same standing validation workflow.
+
+[capnp-zig validation run 34934160680](https://github.com/nullstyle/capnp-zig/actions/runs/34934160680)
+passed all 25 jobs at the pinned runtime source `0c5e33f`. The compiler archive
+remains pinned to producer source `a5ccaae`; later producer commit `672679a`
+changes only CI installation of Deno outside the project to preserve its
+lockfile.
 
 ### Local evidence after implementation
 
 - Full verification passes formatting, lint, type checking, artifact receipts,
-  RPC generation drift, and **1,138 unit tests**. Compiler acceptance passes
+  RPC generation drift, and **1,177 unit tests**. Compiler acceptance passes
   **24/24**; isolated runtime-package and install/use/uninstall consumers pass.
   The complete fast benchmarks and **10/10** regression checks pass.
 
@@ -45,10 +57,11 @@ not establish Linux/macOS/Windows release acceptance.
   requests produce identical TypeScript output.
 - The runtime ownership tests cover 2,000 peer-wrapper cycles and 2,000 serde
   cycles, including another live shared-module user and memory growth.
-- After the bootstrap fix, the real-WASM suite passed **36/36**, socket
-  integration **32/32**, and browser WebTransport **1/1**. The focused
-  bridge/runtime/bootstrap/input-budget set passed **77/77**. These are local
-  macOS arm64 results.
+- After the bootstrap fix, the real-WASM suite passed **43/43**, socket
+  integration **33/33**, and browser WebTransport **1/1**. The focused
+  callback-grant regressions cover late replies, timeout, failed writes,
+  reference multiplicity, and bounded admission. These are local macOS arm64
+  results.
 - Native Zig ↔ Deno over framed pipes and native C++ ↔ Deno over TCP passed both
   fixture-update and normal drift-check runs. The matrix includes unary calls,
   callbacks, returned capabilities after parent Finish, typed failure and
@@ -59,7 +72,8 @@ not establish Linux/macOS/Windows release acceptance.
   **49.1 µs** byte-bounded for 32 immediate calls on an M5 Max / Deno 2.6.8.
   This is a local bookkeeping-cost comparison, not a network throughput claim.
 - Reusable workflow files pass `actionlint` 1.7.12 (including shellcheck) and
-  formatting. Hosted jobs have not yet supplied platform acceptance evidence.
+  formatting. The exact tag/version gate also has positive and negative CLI
+  checks plus maintained unit regressions.
 
 ### Current responsibilities
 
@@ -78,7 +92,7 @@ permissions, and engine constraints.
 
 The original proposal estimated a three-week sprint with two workstreams and
 22–32 engineering days. That estimate is historical; the sections below record
-what was delivered and what still needs validation.
+what was delivered and the validation scope.
 
 ## Historical survey findings
 
@@ -208,8 +222,9 @@ Worker cancellation uses the verified Deno 2.6.8 engine contract. Each client
 waits beyond the engine termination grace before restarting; unsupported Deno
 versions fail before bounded execution. The producer's package checks also cover
 native request parity, roots/prefixes, imports, embeds, corruption, and external
-consumers. Local Chromium/WebKit checks passed; Firefox hosted acceptance is
-separate and is not claimed by this Deno migration.
+consumers. Producer compiler browser checks cover Chromium, Firefox, and WebKit;
+Deno's application transport browser lane uses Chromium. Producer Studio UI
+checks are separate from compiler acceptance.
 
 ### S2 — Deno compiler/workspace integration
 
@@ -229,10 +244,12 @@ separately identified current 2.0-dev request. Native encode/version fixture
 maintenance stays behind separate verified Python/Wasmtime tasks.
 
 Standalone delivery embeds the verified assets and engine; source compilation
-and compiled delivery share the same pin. Generated-output parity and isolated
-standalone/install checks passed locally. Final compatibility fixture tests,
-isolated runtime-package checks, and hosted platform execution remain the
-release acceptance work.
+and compiled delivery share the same pin. Generated-output parity, compatibility
+fixtures, isolated package consumers, and standalone/install checks pass on all
+five native targets.
+[Cold and warm compiler measurements](benchmarks/compiler_baseline.md) record
+fresh-worker and reused-worker costs, with request digests and explicit timing
+boundaries.
 
 ### S3 — Runtime refresh and provenance
 
@@ -260,6 +277,14 @@ custom/wrapped transports, asynchronous factory races, replay/unsubscribe,
 exact-once disposal, and local MessagePort closure. Remote MessagePort closure
 is not advertised where the platform provides no event.
 
+Replies prepared before bridge closure are suppressed. Retained parameter-cap
+ownership survives handler and middleware exceptions. Both clients keep bounded
+per-question callback records after abort, timeout, or a write that may have
+reached the peer; the first terminal reply settles those grants once. The new
+`maxOutstandingParamCapQuestions` option defaults to 4,096, while cap-free calls
+and control traffic remain available. Explicit Release messages and independent
+references retain their existing semantics. See [Streaming RPC](streaming.md).
+
 ### S6 — Wire and native interoperability
 
 The shared framing corpus is pinned by revision/hash and checked through Deno's
@@ -268,15 +293,32 @@ observed double-far, empty-struct, malformed pointer, UTF-8/NUL, and copy-budget
 gaps. The standing native runner builds source-matched Zig and C++ references
 and checks generated fixture drift.
 
-Native testing exposed two real defects: Zig's generated server incorrectly made
-an ordinary failed call poison later streaming work, and Deno's bridge lacked
-bootstrap answers already produced by WASM. Both are fixed with regressions.
-Deno mirrors the actual bootstrap Return before host dispatch, accounts repeated
-grants/answer holds, and closes on answer-table overflow. Native error tests
-respect the host's public exception-disclosure policy.
+Native testing exposed defects in both implementations. Zig's generated server
+made an ordinary failed call poison later streaming work. Deno lacked bootstrap
+answers already produced by WASM, ignored modern Finish cancellation, omitted
+terminal replies for canceled host calls, and rejected valid native
+`Return(canceled)` messages. Maintained regressions now exercise each
+correction.
 
-The four-way matrix is locally green. Multi-party RPC, native Zig socket
-coverage, and full generic support are outside this matrix's claims.
+Deno mirrors the actual bootstrap Return before host dispatch, accounts repeated
+grants/answer holds, and closes on answer-table overflow. Canceled native calls
+receive one terminal reply and release their callback grant once; a subsequent
+call succeeds on the same connection. Native error tests respect the host's
+public exception-disclosure policy.
+
+The four-way matrix has passed locally and on hosted Linux. Its cancellation
+extension checks actual pending calls, callback cleanup, and recovery; native
+Zig's deferred server does not expose a handler-cancellation callback, so that
+direction checks late-result cleanup instead of claiming cooperative abort.
+Multi-party RPC, native Zig socket coverage, and full generic support remain
+outside this matrix's claims.
+
+Real WASM tests now exercise evolved-field copying, result capability routing
+and Finish cleanup, and rejection of cyclic/amplified/malformed copies without
+settling the call or prematurely releasing parameter grants. The TS reader now
+rejects nonzero-offset double-far struct tags, matching WASM's untyped clone.
+Native typed legacy-list decoding is not exposed through that ABI; historical
+Layout A lists are rejected rather than silently interpreted as structs.
 
 ### S7 — Exact byte admission
 
@@ -294,6 +336,16 @@ abortable even if the parent handler ignores cancellation. Generated ordinary
 methods wait for accepted streaming handlers before running. These contracts and
 their limits are documented in [Streaming RPC](streaming.md).
 
+The
+[streaming allocation measurement](performance.md#generated-stream-buffer-measurements)
+records exactly one final parameter-buffer allocation per call in both modes.
+With the same 1,024-item workload and delayed acknowledgments, a 192-byte window
+reduces peak transport retention from 768 to 192 bytes, plus one 24-byte
+preparation candidate. All retained buffers and byte charges drain to zero. The
+smaller window intentionally reduces concurrency; its throughput is not an
+estimate of bookkeeping overhead. The immediate-ack paired benchmark above
+provides that separate comparison.
+
 ### S8 — Validation before publication
 
 CI and release call one reusable workflow. Each native Linux x86_64/arm64, macOS
@@ -301,27 +353,27 @@ x86_64/arm64, and Windows x86_64 row runs compiler/runtime/package checks,
 compiles its own executable, executes its isolated-consumer checks, and uploads
 that binary plus provenance. Release publication depends on the entire shared
 validation result at the tag's commit and downloads only those tested assets.
+Before those builds, the tag must exactly equal `v` plus the `deno.json`
+version; a mismatch fails before shared validation or asset publication.
 
 Separate required lanes cover a clean Linux runtime rebuild, native interop,
 browser WebTransport, and existing benchmark budgets/comparison. Unit tests are
 not rerun solely to produce a second coverage pass. Successful main runs supply
 benchmark baselines only after comparison succeeds.
 
-Final local compatibility and runtime-package validation, followed by actual
-hosted workflow results, are still required before treating the sprint's full
-release acceptance as complete. No cross-compiled-only artifact is advertised as
-natively tested.
+## Completion and remaining scope
 
-## Remaining completion criteria
+The compiler and runtime consumers are exercised independently with pinned
+artifacts. Required tests fail when those artifacts are absent or invalid.
+Native binaries execute on Linux x86_64/arm64, macOS x86_64/arm64, and Windows
+x86_64; the mandatory browser lane is separate. Scope and engine constraints are
+recorded in [Toolchains and artifact delivery](toolchains.md), including exact
+Deno 2.6.8 compiler support and the Windows WebTransport IPv6 endpoint
+requirement.
 
-1. Finish the compiler/compatibility fixture test rerun and isolated runtime
-   package checks on the final candidate; retain failures as blocking evidence.
-2. Run the shared workflow on the exact candidate across all five native
-   targets, including clean rebuild, native interop, browser and benchmark
-   gates.
-3. Review version/release notes and publish only after the required candidate
-   gates succeed. Keep source, runtime, compiler, and generated changes scoped
-   and preserve existing user workspace changes.
+Review release notes and select a runtime package version before tagging a
+future release. The sprint does not publish that package. The original user
+`mise.toml` addition and `.zcode/` work remain uncommitted.
 
 Follow-on candidates remain cross-file nested type exports, non-null struct/list
 defaults, generic brands, richer reflection/source metadata, and expanded L3/L4
