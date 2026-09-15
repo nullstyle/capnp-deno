@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-run
+#!/usr/bin/env -S deno run --allow-read --allow-write
 
 import {
   applyImplicitPluginDefaults,
@@ -17,8 +17,9 @@ import {
   CodegenIoError,
   CodegenRequestError,
   formatCapnpcDenoError,
-  SchemaCompileError,
 } from "./errors.ts";
+import { compileSchemasToRequest } from "./compiler.ts";
+import { publishGeneratedFiles } from "./workspace_output.ts";
 import { generateTypescriptFiles } from "./emitter.ts";
 import { encodeCodeGeneratorResponse } from "./plugin_response.ts";
 import { parseCodeGeneratorRequest } from "./request_parser.ts";
@@ -28,46 +29,9 @@ async function readRequestFromStdin(): Promise<Uint8Array> {
   return new Uint8Array(body);
 }
 
-async function compileSchemasToRequest(
-  schemas: string[],
-  importPaths: string[],
-): Promise<Uint8Array> {
-  if (schemas.length === 0) {
-    throw new CliUsageError("no schema files were provided");
-  }
-
-  const args = ["compile", "-o-"];
-  for (const importPath of importPaths) {
-    args.push(`-I${importPath}`);
-  }
-  args.push(...schemas);
-
-  const cmd = new Deno.Command("capnp", {
-    args,
-    stdin: "null",
-    stdout: "piped",
-    stderr: "piped",
-  });
-  const output = await cmd.output();
-  if (!output.success) {
-    const stderr = new TextDecoder().decode(output.stderr);
-    throw new SchemaCompileError(`capnp compile failed:\n${stderr.trimEnd()}`);
-  }
-  return output.stdout;
-}
-
 function joinPath(left: string, right: string): string {
   if (left.endsWith("/") || left.endsWith("\\")) return `${left}${right}`;
   return `${left}/${right}`;
-}
-
-function dirnamePath(path: string): string {
-  const slash = path.lastIndexOf("/");
-  const backslash = path.lastIndexOf("\\");
-  const idx = Math.max(slash, backslash);
-  if (idx < 0) return ".";
-  if (idx === 0) return path.slice(0, 1);
-  return path.slice(0, idx);
 }
 
 function uniqueSorted(values: string[]): string[] {
@@ -196,29 +160,9 @@ async function main(): Promise<void> {
     ? await mergeBarrelWithExistingModule(outputFiles, options.outDir)
     : outputFiles;
 
-  try {
-    await Deno.mkdir(options.outDir, { recursive: true });
-  } catch (error) {
-    throw new CodegenIoError(
-      `failed to create output directory ${options.outDir}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-      { cause: error },
-    );
-  }
+  await publishGeneratedFiles(options.outDir, filesToWrite);
   for (const file of filesToWrite) {
     const target = joinPath(options.outDir, file.path);
-    try {
-      await Deno.mkdir(dirnamePath(target), { recursive: true });
-      await Deno.writeTextFile(target, file.contents);
-    } catch (error) {
-      throw new CodegenIoError(
-        `failed to write ${target}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        { cause: error },
-      );
-    }
     if (!options.quiet) {
       console.log(`wrote ${target}`);
     }

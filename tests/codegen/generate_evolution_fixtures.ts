@@ -1,21 +1,50 @@
-// Regenerate with: mise exec -- deno run --allow-run=capnp --allow-write=tests/fixtures/codegen_requests tests/codegen/generate_evolution_fixtures.ts
-// These native requests/messages are checked in so ordinary tests need no CLI.
+// Generate current-toolchain evidence with: deno task fixtures:codegen [output.json]
+// The default output is ignored; the checked-in 1.5.0 fixture stays historical.
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL("../../", import.meta.url));
+if (Deno.args.length > 1) {
+  throw new Error("usage: generate_evolution_fixtures.ts [output.json]");
+}
+const output = resolve(
+  Deno.args[0] ?? ".capnp-cache/fixtures/evolution_defaults.json",
+);
 
 async function capnp(args: string[], input?: string): Promise<Uint8Array> {
-  const child = new Deno.Command("capnp", {
-    args,
+  const child = new Deno.Command("python3", {
+    args: [
+      fileURLToPath(
+        new URL("../../vendor/capnp-zig/tools/capnp_tool.py", import.meta.url),
+      ),
+      "compiler",
+      "--",
+      ...args,
+    ],
+    cwd: root,
     stdin: input === undefined ? "null" : "piped",
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  if (input !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(input));
-    await writer.close();
+  const timeout = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch { /* exited */ }
+  }, 30000);
+  try {
+    if (input !== undefined) {
+      const writer = child.stdin.getWriter();
+      await writer.write(new TextEncoder().encode(input));
+      await writer.close();
+    }
+    const result = await child.output();
+    if (!result.success) {
+      throw new Error(new TextDecoder().decode(result.stderr));
+    }
+    return result.stdout;
+  } finally {
+    clearTimeout(timeout);
   }
-  const result = await child.output();
-  if (!result.success) throw new Error(new TextDecoder().decode(result.stderr));
-  return result.stdout;
 }
 
 function base64(value: Uint8Array): string {
@@ -59,7 +88,9 @@ for (const [name, [type, value]] of Object.entries(cases)) {
   );
 }
 const compiler = new TextDecoder().decode(await capnp(["--version"])).trim();
+await Deno.mkdir(dirname(output), { recursive: true });
 await Deno.writeTextFile(
-  "tests/fixtures/codegen_requests/evolution_defaults.json",
+  output,
   JSON.stringify({ compiler, requests, messages }, null, 2) + "\n",
 );
+console.log(`Wrote ${compiler} fixture evidence to ${output}`);

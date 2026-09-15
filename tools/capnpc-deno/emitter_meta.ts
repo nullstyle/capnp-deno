@@ -3,10 +3,7 @@
  */
 
 import type { NodeModel, RequestedFileModel } from "./model.ts";
-import {
-  collectLocalInterfaces,
-  formatBigint,
-} from "./emitter_helpers.ts";
+import { collectLocalInterfaces, formatBigint } from "./emitter_helpers.ts";
 
 export function emitMetaModule(
   requested: RequestedFileModel,
@@ -20,12 +17,15 @@ export function emitMetaModule(
 
   const prefix = `${fileNode.displayName}:`;
   const localNodes = [...nodeById.values()].filter((node) =>
-    node.displayName === fileNode.displayName || node.displayName.startsWith(prefix)
+    node.displayName === fileNode.displayName ||
+    node.displayName.startsWith(prefix)
   ).sort((left, right) => left.displayName.localeCompare(right.displayName));
   const interfaces = collectLocalInterfaces(fileNode, nodeById);
 
   out.push(`export const schemaFileId = ${formatBigint(fileNode.id)};`);
-  out.push(`export const schemaFilename = ${JSON.stringify(requested.filename)};`);
+  out.push(
+    `export const schemaFilename = ${JSON.stringify(requested.filename)};`,
+  );
   out.push("");
   out.push("export const schemaImports = [");
   for (const item of requested.imports) {
@@ -51,7 +51,9 @@ export function emitMetaModule(
   for (const info of interfaces) {
     const methods = info.node.interfaceNode?.methods
       .slice()
-      .sort((a, b) => (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)) ??
+      .sort((a, b) =>
+        (a.codeOrder - b.codeOrder) || a.name.localeCompare(b.name)
+      ) ??
       [];
     for (const method of methods) {
       out.push("  {");
@@ -59,8 +61,12 @@ export function emitMetaModule(
       out.push(`    interfaceName: ${JSON.stringify(info.typeName)},`);
       out.push(`    methodName: ${JSON.stringify(method.name)},`);
       out.push(`    codeOrder: ${method.codeOrder},`);
-      out.push(`    paramStructTypeId: ${formatBigint(method.paramStructTypeId)},`);
-      out.push(`    resultStructTypeId: ${formatBigint(method.resultStructTypeId)},`);
+      out.push(
+        `    paramStructTypeId: ${formatBigint(method.paramStructTypeId)},`,
+      );
+      out.push(
+        `    resultStructTypeId: ${formatBigint(method.resultStructTypeId)},`,
+      );
       out.push("  },");
     }
   }

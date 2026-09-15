@@ -37,7 +37,7 @@ test-real:
     deno task test:real
 
 build-wasm:
-    mise x -- env CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
+    mise x -- deno task build:wasm
 
 smoke-real:
     deno task smoke:real
@@ -75,7 +75,7 @@ verify:
     deno task verify
 
 verify-real:
-    mise x -- env CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task verify:real
+    mise x -- deno task verify:real
 
 ci-fast:
     just verify
@@ -92,13 +92,22 @@ ci:
     just ci-integration
 
 release-check:
+    deno task compiler:fetch
     just verify
+    deno task test:compiler
+    deno task codegen:compile
+    deno task check:compiler-binary
+    deno task check:compiler-install
+    deno task check:package
     just test-codegen
     just test-codegen-e2e
     just test-integration
-    just build-wasm
+    deno task check:wasm-rebuild
     just smoke-real
     just test-real
+    mise exec -- deno task test:native-interop
+    mise run test:browser-webtransport
+    just perf-check
     just publish-dry-run
 
 # List CI workflow jobs as seen by `act`
@@ -109,9 +118,7 @@ act-list:
 
 # Excludes benchmark regression job by default since host/container timing is not comparable to CI baseline.
 act-ci event="pull_request":
-    act {{ event }} -j verify
-    act {{ event }} -j integration
-    act {{ event }} -j real-wasm
+    act {{ event }} -j validate
 
 # Run a single CI job locally with `act` (example: `just act-ci-job verify`)
 act-ci-job job event="pull_request":
@@ -129,7 +136,7 @@ regen-rpc-fixtures:
     deno fmt tests/fixtures/rpc_frames.ts
 
 regen-rpc-ts:
-    ./scripts/generate_rpc_schema_ts.sh
+    deno task codegen:rpc
 
 codegen-schema schema out="generated":
     deno task codegen generate --schema {{ schema }} --out {{ out }}
@@ -153,7 +160,7 @@ build-codegen-binary-target target out:
     deno task codegen:compile {{ target }} {{ out }}
 
 codegen-plugin schema out="generated" import_path=".":
-    capnp compile -I {{ import_path }} -odeno:{{ out }} {{ schema }}
+    deno task codegen generate -I "{{ import_path }}" --out "{{ out }}" --schema "{{ schema }}"
 
 codegen-plugin-local schema out="generated" import_path=".":
-    capnp compile -I {{ import_path }} -o ./scripts/capnpc-deno:{{ out }} {{ schema }}
+    deno task codegen generate -I "{{ import_path }}" --out "{{ out }}" --schema "{{ schema }}"

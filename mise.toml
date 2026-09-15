@@ -6,6 +6,7 @@ node = "lts"
 "npm:esbuild" = "0.28.1"
 "npm:playwright" = "1.61.1"
 zig = "0.17.0-dev.1683+5ceec001b"
+wasmtime = "48.0.1"
 
 [tasks."browser-webtransport:install"]
 description = "Install Playwright Chromium for the optional browser WebTransport e2e"

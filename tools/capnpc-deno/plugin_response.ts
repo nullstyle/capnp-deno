@@ -50,7 +50,9 @@ function normalizeId(id: PluginResponseFile["id"]): bigint {
     return id;
   }
   if (!Number.isInteger(id) || id < 0 || id > Number.MAX_SAFE_INTEGER) {
-    throw new Error(`response file id must be a non-negative safe integer: ${id}`);
+    throw new Error(
+      `response file id must be a non-negative safe integer: ${id}`,
+    );
   }
   return BigInt(id);
 }
@@ -77,7 +79,9 @@ class MessageBuilder {
 
   allocWords(count: number): number {
     if (!Number.isInteger(count) || count < 0) {
-      throw new Error(`allocWords requires non-negative integer, got: ${count}`);
+      throw new Error(
+        `allocWords requires non-negative integer, got: ${count}`,
+      );
     }
     const start = this.words;
     this.words += count;
@@ -154,10 +158,18 @@ class MessageBuilder {
   }
 
   private view(): DataView {
-    return new DataView(this.bytes.buffer, this.bytes.byteOffset, this.bytes.byteLength);
+    return new DataView(
+      this.bytes.buffer,
+      this.bytes.byteOffset,
+      this.bytes.byteLength,
+    );
   }
 
-  private requireWordRange(wordIndex: number, count: number, context: string): void {
+  private requireWordRange(
+    wordIndex: number,
+    count: number,
+    context: string,
+  ): void {
     if (wordIndex < 0 || count < 0 || wordIndex + count > this.words) {
       throw new Error(
         `${context} out of range: word=${wordIndex} count=${count} words=${this.words}`,

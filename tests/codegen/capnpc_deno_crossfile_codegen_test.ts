@@ -264,7 +264,7 @@ Deno.test("crossfile: imported interfaces get typed stubs and token-based encode
   // time so mutually-importing schema files cannot hit module-init TDZ).
   assert(
     consumer.includes(
-      "watcher: exportCapabilityFromTransport(transport, Watcher$Base, value)",
+      "watcher: exportCapabilityFromTransport(transport, Watcher$Base, value, pendingExports)",
     ),
     "expected client params to export capabilities via the imported token",
   );

@@ -2,6 +2,7 @@ coverage
 bench/results.json
 bench/previous/
 dist/
+.capnp-cache/
 
 # Zig build artifacts
 .zig-cache/

@@ -1,7 +1,6 @@
 // End-to-end coverage for the capnpc-deno CLI write path: runs the real
-// tools/capnpc-deno/main.ts as a subprocess (which shells out to the capnp
-// compiler), so it needs the integration-tier permissions granted by
-// `deno task test:codegen-e2e` plus a `capnp` binary on PATH.
+// tools/capnpc-deno/main.ts as a subprocess. The child compiler needs no process
+// or network permission; only the test harness spawns Deno processes.
 
 import { assert } from "../test_utils.ts";
 
@@ -47,7 +46,7 @@ async function runCodegenCli(args: string[], cwd: string): Promise<void> {
       "run",
       "--allow-read",
       `--allow-write=${cwd}`,
-      "--allow-run=capnp",
+      "--no-prompt",
       CLI_MAIN.href,
       "generate",
       "--no-config",

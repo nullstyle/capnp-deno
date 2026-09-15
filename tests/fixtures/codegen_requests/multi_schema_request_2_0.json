@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "compilerVersion": "2.0-dev",
+  "requestSha256": "6857e6cd3c23db3222939864830344fd31366b98178de166b090fc075bdf7b21",
+  "requestBytes": 3928,
+  "schemas": [
+    "tests/fixtures/schemas/person_codegen.capnp",
+    "tests/fixtures/schemas/union_group_codegen.capnp"
+  ],
+  "compilerToolchain": {
+    "schemaVersion": 1,
+    "denoVersion": "2.6.8",
+    "version": "0.1.0-rc.3",
+    "sourceCommit": "a5ccaae128665914d3878d83908bd5ddbece58ea",
+    "sourceSha256": "ff2220550ecbe2624dd4719a4858b069ca43436e9954c69224e255b77517c0a4",
+    "compilerRevision": "851c45bb39c34c3f20f9d9ebe9f34a7e39109b6f",
+    "archive": {
+      "url": "https://github.com/nullstyle/slcp-zig/releases/download/capnp-wasm-compiler-host-v0.1.0-rc.3/capnp-wasm-compiler-host-0.1.0-rc.3.tgz",
+      "sha256": "ca8dfa0033e417e1db0522f2d1c28ccfeda4d42c18ae160de3a26d8a763521ec",
+      "bytes": 945229
+    },
+    "manifestSha256": "322fa3148ec3cb7e31454b910a5e8d831a3bf1ec2635b5a8c5794c10a66077ce",
+    "compilerSha256": "5429b7277b18b6e3f65430068ac41ac327ef8dd359603955f16ec576e0c3a14a",
+    "includeSha256": "97c87a6cabc07b477f763c816e2a402678e628bffee885bda9d1616b33b44aec"
+  }
+}

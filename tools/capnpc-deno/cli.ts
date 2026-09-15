@@ -56,7 +56,7 @@ Usage:
 
 Options:
   --out <dir>            Output directory (default: ${DEFAULT_OUT_DIR})
-  --schema <file>        Compile one schema with capnp (repeatable)
+  --schema <file>        Compile one schema with pinned capnp-wasm (repeatable)
   --src <dir>            Recursively discover *.capnp files (repeatable)
   --request-bin <file>   Read binary CodeGeneratorRequest from file
   -I <dir>               Import path to pass to capnp compile (repeatable)
@@ -362,10 +362,15 @@ export function parseCliConfigToml(source: string): CliFileConfig {
 
 export async function discoverSchemaFiles(
   srcDirs: string[],
+  maxEntries = 4096,
 ): Promise<string[]> {
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+    throw new CliUsageError("schema discovery maxEntries must be positive");
+  }
   const files = new Set<string>();
+  const budget = { remaining: maxEntries };
   for (const srcDir of srcDirs) {
-    await walkSchemaDir(srcDir, files);
+    await walkSchemaDir(srcDir, files, budget);
   }
   return [...files].sort();
 }
@@ -1322,12 +1327,26 @@ function joinPath(left: string, right: string): string {
   return `${left}/${right}`;
 }
 
-async function walkSchemaDir(srcDir: string, out: Set<string>): Promise<void> {
+async function walkSchemaDir(
+  srcDir: string,
+  out: Set<string>,
+  budget: { remaining: number },
+): Promise<void> {
   const queue = [srcDir];
   while (queue.length > 0) {
     const current = queue.pop()!;
+    if (--budget.remaining < 0) {
+      throw new CliUsageError(
+        "schema discovery entry limit exceeded; choose a narrower --src directory",
+      );
+    }
     const entries: Deno.DirEntry[] = [];
     for await (const entry of Deno.readDir(current)) {
+      if (--budget.remaining < 0) {
+        throw new CliUsageError(
+          "schema discovery entry limit exceeded; choose a narrower --src directory",
+        );
+      }
       entries.push(entry);
     }
     entries.sort((left, right) => left.name.localeCompare(right.name));
