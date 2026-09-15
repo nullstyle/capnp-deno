@@ -10,10 +10,15 @@ import {
   MASK_29,
   MASK_30,
   signed30,
-  TEXT_DECODER,
   TEXT_ENCODER,
   WORD_BYTES,
 } from "./runtime_model.ts";
+import { ProtocolError } from "../errors.ts";
+
+const STRICT_TEXT_DECODER = new TextDecoder("utf-8", {
+  fatal: true,
+  ignoreBOM: true,
+});
 
 /**
  * Incremental single-segment Cap'n Proto message builder.
@@ -132,7 +137,11 @@ export class MessageBuilder {
     dataWordCount: number,
     pointerCount: number,
   ): void {
-    const offset = targetWord - (pointerWord + 1);
+    // Zero with offset zero is null. Empty structs use the canonical -1
+    // offset so their presence survives even when no content words exist.
+    const offset = dataWordCount === 0 && pointerCount === 0
+      ? -1
+      : targetWord - (pointerWord + 1);
     let word = 0n;
     word |= encodeSigned30(offset) << 2n;
     word |= BigInt(dataWordCount & 0xffff) << 32n;
@@ -259,6 +268,8 @@ export interface ResolvedPointer {
   segmentId: number;
   pointerWord: number;
   word: bigint;
+  /** Explicit target of a double-far landing tag; a zero tag is a present struct. */
+  contentWord?: number;
 }
 
 /**
@@ -327,7 +338,7 @@ export class MessageReader {
   readStructPointer(segmentId: number, pointerWord: number): StructRef | null {
     const resolved = this.resolvePointer(segmentId, pointerWord);
     const word = resolved.word;
-    if (word === 0n) return null;
+    if (word === 0n && resolved.contentWord === undefined) return null;
     const kind = Number(word & 0x3n);
     if (kind !== 0) {
       throw new Error("expected struct pointer, got kind " + kind);
@@ -335,7 +346,8 @@ export class MessageReader {
     const offsetWords = signed30((word >> 2n) & MASK_30);
     const dataWordCount = Number((word >> 32n) & 0xffffn);
     const pointerCount = Number((word >> 48n) & 0xffffn);
-    const targetWord = resolved.pointerWord + 1 + offsetWords;
+    const targetWord = resolved.contentWord ??
+      (resolved.pointerWord + 1 + offsetWords);
     this.requireWordRange(
       resolved.segmentId,
       targetWord,
@@ -353,7 +365,7 @@ export class MessageReader {
   readListPointer(segmentId: number, pointerWord: number): ListRef | null {
     const resolved = this.resolvePointer(segmentId, pointerWord);
     const word = resolved.word;
-    if (word === 0n) return null;
+    if (word === 0n && resolved.contentWord === undefined) return null;
     const kind = Number(word & 0x3n);
     if (kind !== 1) {
       throw new Error("expected list pointer, got kind " + kind);
@@ -537,11 +549,16 @@ export class MessageReader {
       list.startWord * WORD_BYTES,
       list.elementCount,
     );
-    if (bytes.byteLength === 0) return "";
-    const withoutNul = bytes[bytes.byteLength - 1] === 0
-      ? bytes.subarray(0, bytes.byteLength - 1)
-      : bytes;
-    return TEXT_DECODER.decode(withoutNul);
+    if (bytes.byteLength === 0 || bytes[bytes.byteLength - 1] !== 0) {
+      throw new ProtocolError("Text pointer must include a trailing NUL byte");
+    }
+    try {
+      return STRICT_TEXT_DECODER.decode(
+        bytes.subarray(0, bytes.byteLength - 1),
+      );
+    } catch (cause) {
+      throw new ProtocolError("Text pointer contains invalid UTF-8", { cause });
+    }
   }
 
   readDataPointer(segmentId: number, pointerWord: number): Uint8Array | null {
@@ -617,6 +634,7 @@ export class MessageReader {
       return {
         segmentId: pad0SegmentId,
         pointerWord: pad0Offset - 1,
+        contentWord: pad0Offset,
         word: this.readWord(landingSegmentId, landingPadWord + 1),
       };
     }

@@ -23,7 +23,11 @@ import {
  * many bytes can be buffered before a complete frame is assembled.
  */
 export interface CapnpFrameFramerOptions extends CapnpFrameLimitsOptions {
-  /** Maximum bytes that can be buffered while waiting for a complete frame. */
+  /**
+   * Maximum undrained bytes, checked before copying an inbound chunk. Defaults
+   * to 64 MiB or maxFrameBytes, whichever is larger. Set Infinity explicitly
+   * for the former unbounded batching behavior; individual frame limits remain.
+   */
   maxBufferedBytes?: number;
 }
 
@@ -53,7 +57,19 @@ export class CapnpFrameFramer {
   #expectedTotal: number | null = null;
 
   constructor(options: CapnpFrameFramerOptions = {}) {
-    this.options = options;
+    const maxBufferedBytes = options.maxBufferedBytes ?? Math.max(
+      DEFAULT_MAX_FRAME_BYTES,
+      options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
+    );
+    if (
+      maxBufferedBytes !== Infinity &&
+      (!Number.isSafeInteger(maxBufferedBytes) || maxBufferedBytes < 0)
+    ) {
+      throw new ProtocolError(
+        "maxBufferedBytes must be a non-negative safe integer or Infinity",
+      );
+    }
+    this.options = { ...options, maxBufferedBytes };
   }
 
   push(data: Uint8Array): void {
@@ -63,7 +79,10 @@ export class CapnpFrameFramer {
     this.assertBufferedBytes(needed);
     if (needed > this.#buffer.byteLength) {
       const next = new Uint8Array(
-        Math.max(needed, this.#buffer.byteLength * 2),
+        Math.min(
+          this.options.maxBufferedBytes!,
+          Math.max(needed, this.#buffer.byteLength * 2),
+        ),
       );
       next.set(this.#buffer.subarray(0, this.#length), 0);
       this.#buffer = next;

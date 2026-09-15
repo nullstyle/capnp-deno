@@ -88,6 +88,8 @@ export {
   encodeStructMessage,
 } from "./runtime_codec.ts";
 
+export type { AnyPointerCopyOptions } from "./runtime_codec.ts";
+
 // runtime_caps: capability table collection/remapping ----------------------
 export {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,

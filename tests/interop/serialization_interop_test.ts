@@ -240,10 +240,18 @@ const canonicalCases: CanonicalCase<object>[] = [
     hex: "0000000003000000000000000000020003000000070000000300000009000000",
   },
   {
-    name: "PingParams.empty",
+    name: "PingParams.empty legacy null root",
     codec: PingParamsCodec,
     value: {} satisfies PingParams,
     hex: "00000000010000000000000000000000",
+    expectEncode: false,
+  },
+  {
+    // Native capnp 1.5 and 2.0 use offset -1 for a present empty struct.
+    name: "PingParams.empty",
+    codec: PingParamsCodec,
+    value: {} satisfies PingParams,
+    hex: "0000000001000000fcffffff00000000",
   },
 ];
 

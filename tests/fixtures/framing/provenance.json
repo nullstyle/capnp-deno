@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/nullstyle/capnp-zig",
+  "revision": "c30abbbdde561931f3f179884f24d1309c5599ae",
+  "path": "tests/fixtures/framing/framing_fixtures.json",
+  "sha256": "53a4a2f3026ae959d1b01761d6893cb77514345200849571065a2ebd0231caae",
+  "firstPublishedTag": "v0.16.0",
+  "caseCount": 11
+}

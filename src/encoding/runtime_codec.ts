@@ -513,195 +513,206 @@ function copyWordsForAnyPointer(
   }
 }
 
-function deepCopyAnyPointerSubPointer(
-  reader: MessageReader,
-  srcSegmentId: number,
-  srcPointerWord: number,
-  builder: MessageBuilder,
-  dstPointerWord: number,
-): void {
-  const word = reader.readWord(srcSegmentId, srcPointerWord);
-  const kind = Number(word & 0x3n);
-  if (word === 0n) {
-    builder.writeWord(dstPointerWord, 0n);
-    return;
-  }
-  if (kind === 2) {
-    const resolved = reader.readResolvedPointer(srcSegmentId, srcPointerWord);
-    deepCopyAnyPointerPointer(
-      reader,
-      resolved.segmentId,
-      resolved.pointerWord,
-      resolved.word,
-      builder,
-      dstPointerWord,
-    );
-    return;
-  }
-  deepCopyAnyPointerPointer(
-    reader,
-    srcSegmentId,
-    srcPointerWord,
-    word,
-    builder,
-    dstPointerWord,
-  );
+/** Limits on expanded wire copying, including repeated references to shared targets. */
+export interface AnyPointerCopyOptions {
+  /** Pointer visits, copied words, and logical list elements. Default: 8 Mi units. */
+  maxWork?: number;
+  /** Copied segment words including its root pointer. Default: 8 Mi words. */
+  maxOutputWords?: number;
+  /** Maximum nested pointer depth. Default: 64. */
+  maxDepth?: number;
 }
 
-function deepCopyAnyPointerPointer(
+class AnyPointerCopyBudget {
+  work: number;
+  outputWords: number;
+  readonly maxDepth: number;
+
+  constructor(options: AnyPointerCopyOptions) {
+    this.work = options.maxWork ?? 8 * 1024 * 1024;
+    this.outputWords = options.maxOutputWords ?? 8 * 1024 * 1024;
+    this.maxDepth = options.maxDepth ?? 64;
+    for (
+      const [name, value] of Object.entries({
+        maxWork: this.work,
+        maxOutputWords: this.outputWords,
+        maxDepth: this.maxDepth,
+      })
+    ) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new ProtocolError(
+          `AnyPointer copy ${name} must be a non-negative safe integer`,
+        );
+      }
+    }
+    this.chargeOutput(1); // Every copied message owns its root slot.
+  }
+
+  chargeWork(amount: number): void {
+    if (amount > this.work) {
+      throw new ProtocolError("AnyPointer copy work limit exceeded");
+    }
+    this.work -= amount;
+  }
+
+  chargeOutput(amount: number): void {
+    if (amount > this.outputWords) {
+      throw new ProtocolError("AnyPointer copy output word limit exceeded");
+    }
+    this.outputWords -= amount;
+  }
+}
+
+function deepCopyAnyPointer(
   reader: MessageReader,
   srcSegmentId: number,
   srcPointerWord: number,
-  pointerWord: bigint,
   builder: MessageBuilder,
   dstPointerWord: number,
+  budget: AnyPointerCopyBudget,
+  depth: number,
 ): void {
-  if (pointerWord === 0n) {
+  if (depth > budget.maxDepth) {
+    throw new ProtocolError("AnyPointer copy nesting depth limit exceeded");
+  }
+  budget.chargeWork(1);
+  const resolved = reader.readResolvedPointer(srcSegmentId, srcPointerWord);
+  if (resolved.word === 0n && resolved.contentWord === undefined) {
     builder.writeWord(dstPointerWord, 0n);
     return;
   }
-
-  const kind = Number(pointerWord & 0x3n);
+  const kind = Number(resolved.word & 3n);
   if (kind === 3) {
-    builder.writeWord(dstPointerWord, pointerWord);
+    // These indices remain in the caller's capability-table domain. A wire
+    // copy never acquires leases or transfers capabilities between tables.
+    builder.writeWord(dstPointerWord, resolved.word);
     return;
   }
-  if (kind === 2) {
-    throw new Error("deep anyPointer copy received unresolved far pointer");
-  }
-
   if (kind === 0) {
-    const offsetWords = signed30((pointerWord >> 2n) & MASK_30);
-    const dataWordCount = Number((pointerWord >> 32n) & 0xffffn);
-    const pointerCount = Number((pointerWord >> 48n) & 0xffffn);
-    const srcStartWord = srcPointerWord + 1 + offsetWords;
-    const totalWords = dataWordCount + pointerCount;
-    const dstStartWord = builder.allocWords(totalWords);
-    const dstOffset = dstStartWord - (dstPointerWord + 1);
-    const rebased = (pointerWord & ~POINTER_OFFSET_MASK) |
-      (encodeSigned30(dstOffset) << 2n);
-    builder.writeWord(dstPointerWord, rebased);
-
-    if (dataWordCount > 0) {
-      copyWordsForAnyPointer(
-        reader,
-        srcSegmentId,
-        srcStartWord,
-        dataWordCount,
-        builder,
-        dstStartWord,
-      );
-    }
-
-    for (let i = 0; i < pointerCount; i += 1) {
-      deepCopyAnyPointerSubPointer(
-        reader,
-        srcSegmentId,
-        srcStartWord + dataWordCount + i,
-        builder,
-        dstStartWord + dataWordCount + i,
-      );
-    }
-    return;
-  }
-
-  const offsetWords = signed30((pointerWord >> 2n) & MASK_30);
-  const elementSize = Number((pointerWord >> 32n) & 0x7n);
-  const elementCount = Number((pointerWord >> 35n) & 0x1fff_ffffn);
-  const srcListStartWord = srcPointerWord + 1 + offsetWords;
-
-  if (elementSize === 7) {
-    const tagWord = reader.readWord(srcSegmentId, srcListStartWord);
-    const tagKind = Number(tagWord & 0x3n);
-    if (tagKind !== 0) {
-      throw new Error(
-        "invalid inline composite tag kind for anyPointer copy: " + tagKind,
-      );
-    }
-    const tagElementCount = Number((tagWord >> 2n) & MASK_30);
-    const tagDataWordCount = Number((tagWord >> 32n) & 0xffffn);
-    const tagPointerCount = Number((tagWord >> 48n) & 0xffffn);
-    const stride = tagDataWordCount + tagPointerCount;
-    const wordsInElements = tagElementCount * stride;
-
-    const dstListStartWord = builder.allocWords(1 + wordsInElements);
-    const dstOffset = dstListStartWord - (dstPointerWord + 1);
-    const rebased = 1n |
-      (encodeSigned30(dstOffset) << 2n) |
-      (BigInt(elementSize) << 32n) |
-      (BigInt(elementCount) << 35n);
-    builder.writeWord(dstPointerWord, rebased);
-    builder.writeWord(dstListStartWord, tagWord);
-
-    for (let i = 0; i < tagElementCount; i += 1) {
-      const srcElementStart = srcListStartWord + 1 + (i * stride);
-      const dstElementStart = dstListStartWord + 1 + (i * stride);
-
-      if (tagDataWordCount > 0) {
-        copyWordsForAnyPointer(
-          reader,
-          srcSegmentId,
-          srcElementStart,
-          tagDataWordCount,
-          builder,
-          dstElementStart,
-        );
-      }
-
-      for (let j = 0; j < tagPointerCount; j += 1) {
-        deepCopyAnyPointerSubPointer(
-          reader,
-          srcSegmentId,
-          srcElementStart + tagDataWordCount + j,
-          builder,
-          dstElementStart + tagDataWordCount + j,
-        );
-      }
-    }
-    return;
-  }
-
-  if (elementSize === 6) {
-    const dstListStartWord = builder.allocWords(elementCount);
-    const dstOffset = dstListStartWord - (dstPointerWord + 1);
-    const rebased = 1n |
-      (encodeSigned30(dstOffset) << 2n) |
-      (BigInt(elementSize) << 32n) |
-      (BigInt(elementCount) << 35n);
-    builder.writeWord(dstPointerWord, rebased);
-
-    for (let i = 0; i < elementCount; i += 1) {
-      deepCopyAnyPointerSubPointer(
-        reader,
-        srcSegmentId,
-        srcListStartWord + i,
-        builder,
-        dstListStartWord + i,
-      );
-    }
-    return;
-  }
-
-  const dataWords = listDataWordsForAnyPointerCopy(elementSize, elementCount);
-  const dstListStartWord = builder.allocWords(dataWords);
-  const dstOffset = dstListStartWord - (dstPointerWord + 1);
-  const rebased = 1n |
-    (encodeSigned30(dstOffset) << 2n) |
-    (BigInt(elementSize) << 32n) |
-    (BigInt(elementCount) << 35n);
-  builder.writeWord(dstPointerWord, rebased);
-  if (dataWords > 0) {
+    const ref = reader.readStructPointer(srcSegmentId, srcPointerWord)!;
+    budget.chargeWork(ref.dataWordCount);
+    budget.chargeOutput(ref.dataWordCount + ref.pointerCount);
+    const start = builder.allocWords(ref.dataWordCount + ref.pointerCount);
+    builder.setStructPointer(
+      dstPointerWord,
+      start,
+      ref.dataWordCount,
+      ref.pointerCount,
+    );
     copyWordsForAnyPointer(
       reader,
-      srcSegmentId,
-      srcListStartWord,
-      dataWords,
+      ref.segmentId,
+      ref.startWord,
+      ref.dataWordCount,
       builder,
-      dstListStartWord,
+      start,
+    );
+    for (let i = 0; i < ref.pointerCount; i++) {
+      deepCopyAnyPointer(
+        reader,
+        ref.segmentId,
+        ref.startWord + ref.dataWordCount + i,
+        builder,
+        start + ref.dataWordCount + i,
+        budget,
+        depth + 1,
+      );
+    }
+    return;
+  }
+  if (kind !== 1) {
+    throw new ProtocolError("AnyPointer copy received unresolved far pointer");
+  }
+  // Resolve and bounds-check the full declared payload before allocating.
+  const list = reader.readListPointer(srcSegmentId, srcPointerWord)!;
+  budget.chargeWork(list.elementCount);
+  if (list.kind === "inlineComposite") {
+    budget.chargeWork(list.wordsInElements);
+    budget.chargeOutput(1 + list.wordsInElements);
+    const start = builder.allocWords(1 + list.wordsInElements);
+    builder.setListPointer(dstPointerWord, start, 7, list.wordsInElements);
+    copyWordsForAnyPointer(
+      reader,
+      list.segmentId,
+      list.tagWord,
+      1 + list.wordsInElements,
+      builder,
+      start,
+    );
+    const stride = list.dataWordCount + list.pointerCount;
+    if (list.pointerCount !== 0) {
+      for (let i = 0; i < list.elementCount; i++) {
+        for (let j = 0; j < list.pointerCount; j++) {
+          const offset = 1 + i * stride + list.dataWordCount + j;
+          deepCopyAnyPointer(
+            reader,
+            list.segmentId,
+            list.tagWord + offset,
+            builder,
+            start + offset,
+            budget,
+            depth + 1,
+          );
+        }
+      }
+    }
+    return;
+  }
+  const words = listDataWordsForAnyPointerCopy(
+    list.elementSize,
+    list.elementCount,
+  );
+  budget.chargeWork(words);
+  budget.chargeOutput(words);
+  const start = builder.allocWords(words);
+  builder.setListPointer(
+    dstPointerWord,
+    start,
+    list.elementSize,
+    list.elementCount,
+  );
+  if (list.elementSize === 6) {
+    for (let i = 0; i < list.elementCount; i++) {
+      deepCopyAnyPointer(
+        reader,
+        list.segmentId,
+        list.startWord + i,
+        builder,
+        start + i,
+        budget,
+        depth + 1,
+      );
+    }
+  } else {
+    copyWordsForAnyPointer(
+      reader,
+      list.segmentId,
+      list.startWord,
+      words,
+      builder,
+      start,
     );
   }
 }
 
+/**
+ * Copy a complete wire message into a builder pointer with bounded expansion.
+ * The source is validated/copied before destination allocation, so malformed
+ * input and copy-limit failures leave the destination pointer unchanged.
+ * Capability indices stay in the source table's domain; this does not remap
+ * or retain capabilities. Options bound the temporary copied segment, not the
+ * caller's complete builder or total temporary backing memory.
+ *
+ * @param builder - Destination builder.
+ * @param pointerWord - Destination pointer slot.
+ * @param message - Framed source whose root should be copied.
+ * @param options - Expanded copy work, output, and depth ceilings.
+ * @returns Nothing.
+ * @example
+ * ```ts
+ * encodeAnyPointerMessageIntoBuilder(builder, pointerSlot, payload, { maxOutputWords: 8192 });
+ * ```
+ */
 export function encodeAnyPointerMessageIntoBuilder(
   builder: {
     allocWords(count: number): number;
@@ -709,11 +720,13 @@ export function encodeAnyPointerMessageIntoBuilder(
   },
   pointerWord: number,
   message: Uint8Array,
+  options: AnyPointerCopyOptions = {},
 ): void {
   const flatMessage = decodeAnyPointerMessageFromReader(
     new MessageReader(message),
     0,
     0,
+    options,
   );
   const flatSegment = flatMessage.subarray(8);
   const segmentWordCount = Math.floor(flatSegment.byteLength / WORD_BYTES);
@@ -748,21 +761,30 @@ export function encodeAnyPointerMessageIntoBuilder(
   );
 }
 
+/**
+ * Deep-copy a pointer into an independent, single-segment framed message.
+ * Expanded references are charged separately. Capabilities retain their table
+ * indices; the caller still owns their reference/lease lifetime.
+ *
+ * @param reader - Source message reader.
+ * @param segmentId - Segment containing the source pointer.
+ * @param pointerWord - Word offset of that pointer.
+ * @param options - Work, output-word, and nesting limits.
+ * @returns Independently owned framed bytes.
+ * @example
+ * ```ts
+ * const copy = decodeAnyPointerMessageFromReader(reader, 0, 0, { maxDepth: 32 });
+ * ```
+ */
 export function decodeAnyPointerMessageFromReader(
   reader: MessageReader,
   segmentId: number,
   pointerWord: number,
+  options: AnyPointerCopyOptions = {},
 ): Uint8Array {
-  const resolved = reader.readResolvedPointer(segmentId, pointerWord);
+  const budget = new AnyPointerCopyBudget(options);
   const builder = new MessageBuilder();
-  deepCopyAnyPointerPointer(
-    reader,
-    resolved.segmentId,
-    resolved.pointerWord,
-    resolved.word,
-    builder,
-    0,
-  );
+  deepCopyAnyPointer(reader, segmentId, pointerWord, builder, 0, budget, 0);
   return builder.toMessageBytes();
 }
 
@@ -889,7 +911,9 @@ export function decodePointerField(
     }
     case "anyPointer": {
       const resolved = reader.readResolvedPointer(segmentId, pointerWord);
-      if (resolved.word === 0n) return { kind: "null" } as AnyPointerValue;
+      if (resolved.word === 0n && resolved.contentWord === undefined) {
+        return { kind: "null" } as AnyPointerValue;
+      }
       const kind = Number(resolved.word & 0x3n);
       if (kind === 3) {
         const cap = decodeCapabilityPointerWord(resolved.word);
