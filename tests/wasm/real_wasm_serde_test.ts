@@ -13,7 +13,7 @@ Deno.test("real wasm Person serde roundtrip", async () => {
   });
 
   try {
-    const serde = WasmSerde.fromInstance(instance, {
+    using serde = WasmSerde.fromInstance(instance, {
       expectedVersion: 1,
       requireVersionExport: true,
     });
@@ -53,7 +53,7 @@ Deno.test("real wasm Person serde surfaces invalid json", async () => {
   });
 
   try {
-    const serde = WasmSerde.fromInstance(instance, {
+    using serde = WasmSerde.fromInstance(instance, {
       expectedVersion: 1,
       requireVersionExport: true,
     });

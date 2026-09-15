@@ -38,14 +38,17 @@ export class WasmPeer {
   /** The opaque WASM peer handle. */
   readonly handle: number;
   #closed = false;
+  readonly #ownsAbi: boolean;
 
-  private constructor(abi: WasmAbi, handle: number) {
+  private constructor(abi: WasmAbi, handle: number, ownsAbi = false) {
     this.abi = abi;
     this.handle = handle;
+    this.#ownsAbi = ownsAbi;
   }
 
   /**
-   * Creates a new WasmPeer from an existing {@link WasmAbi} instance.
+   * Creates a new WasmPeer borrowing an existing {@link WasmAbi} instance.
+   * The caller closes the ABI after all peers created through it are closed.
    *
    * @param abi - The WASM ABI wrapper to use.
    * @returns A new WasmPeer with a freshly allocated peer handle.
@@ -57,7 +60,9 @@ export class WasmPeer {
   }
 
   /**
-   * Creates a new WasmPeer from raw WASM exports.
+   * Creates a new WasmPeer owning its own ABI wrapper and scratch storage.
+   * Closing it leaves other wrappers on these exports usable. If other peers
+   * borrow its ABI, scratch is released after those peers also close.
    *
    * @param exports - The typed WASM export bindings.
    * @param options - ABI version negotiation options.
@@ -68,7 +73,13 @@ export class WasmPeer {
     exports: CapnpWasmExports,
     options: WasmAbiOptions = {},
   ): WasmPeer {
-    return WasmPeer.create(new WasmAbi(exports, options));
+    const abi = new WasmAbi(exports, options);
+    try {
+      return new WasmPeer(abi, abi.createPeer(), true);
+    } catch (error) {
+      abi.close();
+      throw error;
+    }
   }
 
   /**
@@ -150,7 +161,11 @@ export class WasmPeer {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.abi.freePeer(this.handle);
+    try {
+      this.abi.freePeer(this.handle);
+    } finally {
+      if (this.#ownsAbi) this.abi.closeWhenUnused();
+    }
   }
 
   /** Implements the `Disposable` protocol for use with the `using` declaration. */

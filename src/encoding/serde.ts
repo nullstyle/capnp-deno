@@ -103,7 +103,7 @@ export interface JsonSerdeCodecLookupOptions<T> {
  * ```
  */
 export class WasmSerde {
-  /** The underlying WASM ABI used for memory management. */
+  /** Owned ABI wrapper; dispose the serde wrapper instead of closing this directly. */
   readonly abi: WasmAbi;
   /** The raw WASM instance exports for direct access to serde functions. */
   readonly rawExports: Record<string, unknown>;
@@ -118,7 +118,8 @@ export class WasmSerde {
   #cachedView: DataView | null = null;
 
   /** Persistent 8-byte scratch buffer in WASM memory for out_ptr/out_len pairs. */
-  private scratchPairPtr: number;
+  private scratchPairPtr = 0;
+  #closed = false;
 
   private constructor(
     abi: WasmAbi,
@@ -127,7 +128,12 @@ export class WasmSerde {
     this.abi = abi;
     this.rawExports = rawExports;
     // Pre-allocate the 8-byte pair buffer once instead of per-call.
-    this.scratchPairPtr = this.alloc(8);
+    try {
+      this.scratchPairPtr = this.alloc(8);
+    } catch (error) {
+      abi.close();
+      throw error;
+    }
   }
 
   /**
@@ -303,7 +309,61 @@ export class WasmSerde {
     });
   }
 
+  /** Whether this serde wrapper has released its owned storage. */
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  /**
+   * Release this wrapper's scratch and ABI wrapper. Other module users remain
+   * usable; this never calls module-global shutdown. Codecs created from this
+   * wrapper become unusable. Peers borrowing its ABI may finish before ABI
+   * scratch is released. Repeated calls are harmless.
+   *
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * const serde = WasmSerde.fromInstance(instance);
+   * const codec = serde.createJsonCodecFor<Person>({ key: "example_person" });
+   * codec.encode({ name: "Ada", age: 37, email: "" });
+   * serde.close();
+   * ```
+   */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const ptr = this.scratchPairPtr;
+    this.scratchPairPtr = 0;
+    try {
+      this.abi.freeOutBuffer(ptr, 8);
+    } finally {
+      this.abi.closeWhenUnused();
+      this.#cachedBuffer = null;
+      this.#cachedBytes = null;
+      this.#cachedView = null;
+    }
+  }
+
+  /**
+   * Release owned scratch when leaving a `using` scope.
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * using serde = WasmSerde.fromInstance(instance);
+   * ```
+   */
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  private assertOpen(): void {
+    if (this.#closed || this.abi.closed) {
+      throw new WasmAbiError("WasmSerde is closed");
+    }
+  }
+
   private resolveSerdeExport(name: string): SerdeExportFn {
+    this.assertOpen();
     const value = this.rawExports[name];
     if (typeof value !== "function") {
       throw new WasmAbiError(`missing wasm serde export: ${name}`);

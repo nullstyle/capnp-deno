@@ -14,6 +14,13 @@ import { AbiError, type CapnpErrorOptions } from "../errors.ts";
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 
+// Wrappers can have different export objects for the same module instance.
+// Memory identity lets explicit shutdown protect those other live wrappers.
+const MODULE_LIFETIMES = new WeakMap<
+  WebAssembly.Memory,
+  { wrappers: number }
+>();
+
 /**
  * Typed interface describing the raw exports from a Cap'n Proto WASM module.
  *
@@ -577,6 +584,10 @@ export class WasmAbi {
   readonly capabilities: WasmAbiCapabilities;
   #errorTakeScratchPtr: number | null = null;
   #hostCallScratchPtr: number | null = null;
+  #closed = false;
+  #closeRequested = false;
+  readonly #peers = new Set<number>();
+  readonly #moduleLifetime: { wrappers: number };
 
   // Cached views over WASM linear memory. Invalidated when the underlying
   // ArrayBuffer detaches (which happens on WebAssembly.Memory.grow()).
@@ -594,9 +605,18 @@ export class WasmAbi {
   constructor(exports: CapnpWasmExports, options: WasmAbiOptions = {}) {
     this.exports = exports;
     this.capabilities = detectCapabilities(exports);
-    this.initErrorTakeScratch();
-    this.initHostCallScratch();
+    this.#moduleLifetime = MODULE_LIFETIMES.get(exports.memory) ??
+      { wrappers: 0 };
+    MODULE_LIFETIMES.set(exports.memory, this.#moduleLifetime);
     this.checkVersion(options);
+    try {
+      this.initErrorTakeScratch();
+      this.initHostCallScratch();
+    } catch (error) {
+      this.releaseScratch();
+      throw error;
+    }
+    this.#moduleLifetime.wrappers += 1;
   }
 
   /**
@@ -606,11 +626,14 @@ export class WasmAbi {
    * @throws {WasmAbiError} If peer creation fails.
    */
   createPeer(): number {
+    this.assertOpen();
+    if (this.#closeRequested) throw new WasmAbiError("WasmAbi is closing");
     this.clearError();
     const handle = this.exports.capnp_peer_new();
     if (handle === 0) {
       this.throwLastError("capnp_peer_new failed");
     }
+    this.#peers.add(handle);
     return handle;
   }
 
@@ -620,8 +643,11 @@ export class WasmAbi {
    * @param handle - The peer handle returned by {@link createPeer}.
    */
   freePeer(handle: number): void {
+    this.assertOpen();
     if (handle === 0) return;
     this.exports.capnp_peer_free(handle);
+    this.#peers.delete(handle);
+    if (this.#closeRequested && this.#peers.size === 0) this.close();
   }
 
   /**
@@ -1006,20 +1032,38 @@ export class WasmAbi {
   }
 
   clearError(): void {
+    this.assertOpen();
     this.exports.capnp_clear_error();
   }
 
+  /**
+   * Release a general owned ABI output, using its exact returned length.
+   * Borrowed error/outbound buffers and peer-owned host-call frames require
+   * their documented lifetime operations instead.
+   *
+   * @param ptr - Original allocation base, or zero.
+   * @param len - Exact returned byte length, including zero.
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * abi.freeOutBuffer(outputPointer, outputLength);
+   * ```
+   */
   freeOutBuffer(ptr: number, len: number): void {
+    this.assertOpen();
     if (ptr === 0) return;
-    const wanted = len === 0 ? 1 : len;
+    this.clearError();
     if (this.capabilities.hasBufFree) {
-      this.exports.capnp_buf_free!(ptr, wanted);
-      return;
+      this.exports.capnp_buf_free!(ptr, len);
+    } else {
+      this.exports.capnp_free(ptr, len);
     }
-    this.exports.capnp_free(ptr, wanted);
+    const error = this.takeLastError();
+    if (error) throw error;
   }
 
   takeLastError(): WasmAbiError | null {
+    this.assertOpen();
     const taken = this.takeLastErrorViaExport();
     if (taken) return taken;
     return this.readLastErrorFallback();
@@ -1048,16 +1092,117 @@ export class WasmAbi {
     return ((this.capabilities.featureFlags >> BigInt(bit)) & 1n) === 1n;
   }
 
+  /** Whether this wrapper's scratch storage has been released. */
+  get closed(): boolean {
+    return this.#closed;
+  }
+
   /**
-   * Shuts down the WASM module, releasing any global state.
+   * Release this wrapper's scratch allocations without shutting down the module.
+   * Close peers created through this wrapper first. Other wrappers sharing the
+   * same module remain usable. Repeated calls are harmless.
    *
-   * This is a no-op if the WASM module does not export `capnp_shutdown`.
-   * All peers should be freed before calling this method.
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * const abi = new WasmAbi(exports);
+   * const peer = WasmPeer.create(abi);
+   * peer.close();
+   * abi.close();
+   * ```
+   */
+  close(): void {
+    if (this.#closed) return;
+    if (this.#peers.size > 0) {
+      throw new WasmAbiError(
+        "close WASM peers before closing their ABI wrapper",
+      );
+    }
+    const error = this.releaseScratch();
+    this.#closed = true;
+    this.#moduleLifetime.wrappers -= 1;
+    this.#cachedBuffer = null;
+    this.#cachedBytes = null;
+    this.#cachedView = null;
+    if (error) throw error;
+  }
+
+  /**
+   * Close when the last existing peer is freed, refusing creation of new peers.
+   * Factory-owned peers and serde wrappers use this to preserve peers borrowing
+   * their ABI. Existing peers remain usable until freed; no global shutdown runs.
+   *
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * abi.closeWhenUnused();
+   * peer.close(); // Releases the remaining peer and then ABI scratch.
+   * ```
+   */
+  closeWhenUnused(): void {
+    if (this.#closed) return;
+    this.#closeRequested = true;
+    if (this.#peers.size === 0) this.close();
+  }
+
+  /**
+   * Release wrapper-owned scratch when leaving a `using` scope.
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * using abi = new WasmAbi(exports);
+   * using peer = WasmPeer.create(abi);
+   * ```
+   */
+  [Symbol.dispose](): void {
+    this.close();
+  }
+
+  /**
+   * Explicitly shut down module-global state and close this wrapper.
+   * Refuses while this wrapper has peers or another ABI wrapper shares the
+   * module. Callers must also release any peers/buffers created through raw
+   * exports. Without `capnp_shutdown`, only this wrapper is closed.
+   *
+   * @returns Nothing.
+   * @example
+   * ```ts
+   * peer.close();
+   * abi.shutdown();
+   * ```
    */
   shutdown(): void {
-    if (this.capabilities.hasShutdown) {
-      this.exports.capnp_shutdown!();
+    this.assertOpen();
+    if (this.#moduleLifetime.wrappers !== 1) {
+      throw new WasmAbiError(
+        "close other WASM ABI wrappers before module shutdown",
+      );
     }
+    this.close();
+    this.exports.capnp_shutdown?.();
+  }
+
+  private assertOpen(): void {
+    if (this.#closed) throw new WasmAbiError("WasmAbi is closed");
+  }
+
+  private releaseScratch(): WasmAbiError | null {
+    const allocations = [
+      [this.#hostCallScratchPtr, HOST_CALL_SCRATCH_SIZE],
+      [this.#errorTakeScratchPtr, 12],
+    ] as const;
+    this.#hostCallScratchPtr = null;
+    this.#errorTakeScratchPtr = null;
+    let firstError: WasmAbiError | null = null;
+    for (const [ptr, len] of allocations) {
+      if (ptr === null) continue;
+      this.exports.capnp_clear_error();
+      this.exports.capnp_free(ptr, len);
+      // The error scratch may itself have just been freed.
+      firstError ??= this.readLastErrorFallback();
+    }
+    this.exports.capnp_clear_error();
+    return firstError;
   }
 
   private checkVersion(options: WasmAbiOptions): void {
@@ -1229,8 +1374,9 @@ export class WasmAbi {
     const code = this.readU32(scratch);
     const ptr = this.readU32(scratch + 4);
     const len = this.readU32(scratch + 8);
+    // Error text is borrowed static storage. Copy it before another export
+    // overwrites it; freeing it would itself create ERROR_INVALID_FREE.
     const text = this.decodeUtf8(ptr, len);
-    this.freeOutBuffer(ptr, len);
     const message = text.length > 0 ? text : `WASM error code ${code}`;
     return new WasmAbiError(message, code, {
       metadata: { errorType: extractWasmErrorType(message, code) },

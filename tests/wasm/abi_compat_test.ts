@@ -99,7 +99,7 @@ Deno.test("WasmAbi rejects partial capability export pairs", () => {
   );
 });
 
-Deno.test("WasmAbi uses capnp_error_take and frees taken error buffers", () => {
+Deno.test("WasmAbi copies capnp_error_take borrowed text without freeing it", () => {
   const freed: Array<{ ptr: number; len: number }> = [];
   let takeCalls = 0;
   const fake = new FakeCapnpWasm({
@@ -129,9 +129,7 @@ Deno.test("WasmAbi uses capnp_error_take and frees taken error buffers", () => {
     /taken via capnp_error_take/,
   );
   assertEquals(takeCalls, 1);
-  assertEquals(freed.length, 1);
-  assert(freed[0].ptr > 0, "taken message pointer should be non-zero");
-  assert(freed[0].len > 0, "taken message length should be non-zero");
+  assertEquals(freed.length, 0);
 });
 
 Deno.test("WasmAbi host-call and lifecycle wrappers route through optional exports", () => {
