@@ -161,7 +161,9 @@ jobs:
       - name: Require the browser WebTransport end-to-end test
         env:
           CAPNP_DENO_BROWSER_E2E: "1"
-        run: mise run test:browser-webtransport
+        # Browser tools and Chromium are installed above. Running the repository
+        # mise task also installs unrelated native compiler/maintenance tools.
+        run: deno task test:browser-webtransport
 
   bench:
     name: Benchmark regression checks
