@@ -139,6 +139,41 @@ compile-to-request API. Use `compiler:maintenance:fetch` and `fixtures:codegen`
 for those fixtures. Keep these permissions and dependencies in maintenance
 tasks. Do not add them to source generation or runtime loading.
 
+## Deno WebTransport limitations
+
+The pinned Deno 2.6.8 engine has two relevant native WebTransport limitations:
+
+- On Windows, its default QUIC client binds an IPv6 socket without enabling
+  dual-stack operation. IPv4 destinations fail at UDP send with Windows error
+  10049 (`AddrNotAvailable`), before the handshake or RPC dispatch. This was
+  observed in the
+  [Windows integration run](https://github.com/nullstyle/capnp-deno/actions/runs/34935825494/job/104273526233).
+  The cause is visible in the
+  [default client endpoint](https://github.com/denoland/deno/blob/v2.6.8/ext/net/03_quic.js#L459-L463)
+  and
+  [socket creation](https://github.com/denoland/deno/blob/v2.6.8/ext/net/quic.rs#L258-L267);
+  Windows requires explicitly disabling
+  [IPV6_V6ONLY](https://learn.microsoft.com/en-us/windows/win32/winsock/dual-stack-sockets)
+  for IPv4 traffic on that socket. All Windows WebTransport integration cases
+  therefore bind `::1` and connect to `localhost`. Deno 2.6.8 rejects bracketed
+  IPv6 URL literals as TLS server names, so `https://[::1]` is not equivalent in
+  that engine. Linux/macOS integration and the browser gate retain IPv4.
+- A failed handshake can produce an unhandled rejection from Deno's internal
+  [datagram receive task](https://github.com/denoland/deno/blob/v2.6.8/ext/web/webtransport.js#L696-L701),
+  even when the caller handles both `ready` and `closed`. A raw WebTransport
+  connection to a bound UDP socket that drops packets reproduces this without
+  capnp-deno: `ready` rejects after about 10 seconds, followed by an independent
+  unhandled `Error: timed out`. Closing before the handshake finishes also
+  [throws](https://github.com/denoland/deno/blob/v2.6.8/ext/web/webtransport.js#L322-L333).
+  The library does not suppress process-wide rejections or change client URLs.
+
+Deno 2.9.6's source
+[catches the failed datagram initialization](https://github.com/denoland/deno/blob/v2.9.6/ext/web/webtransport.js#L699-L705),
+but still uses the same
+[socket binding](https://github.com/denoland/deno/blob/v2.9.6/ext/net/quic.rs#L283-L290).
+These source observations do not establish newer-engine Windows acceptance and
+do not change the compiler's separately verified Deno 2.6.8 requirement.
+
 ## Validation and publication
 
 [The reusable validation workflow](../.github/workflows/validation.yml) is

@@ -461,12 +461,22 @@ type WebTransportLoopbackListenOptions = Omit<
   "hostname" | "port" | "cert" | "key"
 >;
 
+// Deno 2.6.8's default QUIC client socket is IPv6-only on Windows. Bind IPv6
+// explicitly there; use localhost in the URL because that engine passes the
+// brackets from an IPv6 literal through to TLS. See docs/toolchains.md.
+const WEBTRANSPORT_LOOPBACK_HOST = Deno.build.os === "windows"
+  ? "::1"
+  : "127.0.0.1";
+const WEBTRANSPORT_LOOPBACK_URL_HOST = Deno.build.os === "windows"
+  ? "localhost"
+  : "127.0.0.1";
+
 function listenWebTransportLoopback(
   options: WebTransportLoopbackListenOptions = {},
 ): WebTransportTransportListener {
   const { path = "/rpc", ...rest } = options;
   return WebTransportTransport.listen({
-    hostname: "127.0.0.1",
+    hostname: WEBTRANSPORT_LOOPBACK_HOST,
     port: 0,
     path,
     cert: TEST_WEBTRANSPORT_CERT_PEM,
@@ -479,7 +489,7 @@ function webTransportLoopbackUrl(
   listener: WebTransportTransportListener,
   path = "/rpc",
 ): string {
-  return `https://127.0.0.1:${listener.addr.port}${path}`;
+  return `https://${WEBTRANSPORT_LOOPBACK_URL_HOST}:${listener.addr.port}${path}`;
 }
 
 const WEBTRANSPORT_RUNTIME_AVAILABLE =
@@ -1376,6 +1386,90 @@ Deno.test("connect/serve disposes generated streaming service handles", async ()
   }
 
   assertEquals(handle.closed, true);
+});
+
+Deno.test({
+  name: "native WebTransport loopback handshake and raw stream echo",
+  ignore: !WEBTRANSPORT_RUNTIME_AVAILABLE,
+  fn: async () => {
+    const endpoint = new Deno.QuicEndpoint({
+      hostname: WEBTRANSPORT_LOOPBACK_HOST,
+      port: 0,
+    });
+    const listener = endpoint.listen({
+      cert: TEST_WEBTRANSPORT_CERT_PEM,
+      key: TEST_WEBTRANSPORT_KEY_PEM,
+      alpnProtocols: ["h3"],
+    });
+    let acceptedSession: WebTransport | null = null;
+    const accepted = (async () => {
+      const conn = await listener.accept();
+      assertEquals(conn.remoteAddr.hostname, WEBTRANSPORT_LOOPBACK_HOST);
+      const session = await Deno.upgradeWebTransport(conn);
+      acceptedSession = session;
+      void session.closed.catch(() => {});
+      const streams = session.incomingBidirectionalStreams.getReader();
+      try {
+        const { value: stream } = await streams.read();
+        assert(stream !== undefined, "expected a raw WebTransport stream");
+        const reader = stream.readable.getReader();
+        const writer = stream.writable.getWriter();
+        try {
+          const { value } = await reader.read();
+          assert(value !== undefined, "expected raw request bytes");
+          await writer.write(value);
+        } finally {
+          reader.releaseLock();
+          writer.releaseLock();
+        }
+      } finally {
+        streams.releaseLock();
+      }
+    })();
+    // Cleanup below also observes this job if the client's handshake fails.
+    void accepted.catch(() => {});
+    let client: WebTransport | null = null;
+    try {
+      client = new WebTransport(
+        `https://${WEBTRANSPORT_LOOPBACK_URL_HOST}:${endpoint.addr.port}/rpc`,
+        createWebTransportConnectOptions().webTransport,
+      );
+      void client.closed.catch(() => {});
+      await withTimeout(client.ready, 2_000, "raw WebTransport handshake");
+      const stream = await withTimeout(
+        client.createBidirectionalStream(),
+        2_000,
+        "raw WebTransport open stream",
+      );
+      const writer = stream.writable.getWriter();
+      const reader = stream.readable.getReader();
+      try {
+        await writer.write(new Uint8Array([42]));
+        const { value } = await withTimeout(
+          reader.read(),
+          2_000,
+          "raw WebTransport echo",
+        );
+        assertBytes(value ?? new Uint8Array(), [42]);
+        await writer.close();
+      } finally {
+        writer.releaseLock();
+        reader.releaseLock();
+      }
+      await withTimeout(accepted, 2_000, "raw WebTransport server completion");
+    } finally {
+      try {
+        client?.close();
+      } catch {
+        // Deno 2.6.8 cannot close a WebTransport before its handshake finishes.
+      }
+      // Assignment occurs in the separately running server task.
+      (acceptedSession as WebTransport | null)?.close();
+      listener.stop();
+      endpoint.close();
+      await accepted.catch(() => {});
+    }
+  },
 });
 
 Deno.test({
