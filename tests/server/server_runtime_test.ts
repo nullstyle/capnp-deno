@@ -760,7 +760,12 @@ Deno.test("RpcServerRuntime.createWithRoot supports custom root index and ref co
     assertEquals(extra.capabilityIndex, 8);
 
     assertEquals(runtime.bridge.releaseCapability(7, 1), true);
-    assertEquals(runtime.bridge.releaseCapability(7, 1), false);
+    assertEquals(runtime.bridge.releaseCapability(7, 1), true);
+    assertEquals(runtime.bridge.stats.answerHeldCapabilityReferences, 1);
+    await runtime.bridge.handleFrame(
+      encodeFinishFrame({ questionId: 2, releaseResultCaps: false }),
+    );
+    assertEquals(runtime.bridge.hasCapability(7), false);
   } finally {
     await runtime.close();
   }

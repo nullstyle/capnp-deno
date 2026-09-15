@@ -16,9 +16,13 @@ import { RpcSession, type RpcSessionOptions } from "../session/session.ts";
 import type { RpcTransport } from "../transports/internal/transport.ts";
 import type { WasmPeer } from "../../wasm/peer.ts";
 import {
+  decodeBootstrapRequestFrame,
+  decodeReturnFrame,
   decodeRpcMessageTag,
+  RPC_MESSAGE_TAG_BOOTSTRAP,
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RETURN,
 } from "../wire.ts";
 
 const DEFAULT_MAX_HOST_CALLS_PER_INBOUND_FRAME = 64;
@@ -27,14 +31,17 @@ const DEFAULT_MAX_HOST_CALLS_TOTAL = Number.MAX_SAFE_INTEGER;
 class PostInboundHookTransport implements RpcTransport {
   readonly subscribeClose?: RpcTransport["subscribeClose"];
   readonly #inner: RpcTransport;
-  readonly #afterInbound: (frame: Uint8Array) => Promise<void>;
+  readonly #afterInbound: (
+    frame: Uint8Array,
+    outbound: Uint8Array[],
+  ) => Promise<void>;
   #afterInboundChain: Promise<void> = Promise.resolve();
   #afterInboundError: unknown = null;
   #deferredOutboundFrames: Uint8Array[] | null = null;
 
   constructor(
     inner: RpcTransport,
-    afterInbound: (frame: Uint8Array) => Promise<void>,
+    afterInbound: (frame: Uint8Array, outbound: Uint8Array[]) => Promise<void>,
   ) {
     this.#inner = inner;
     this.subscribeClose = inner.subscribeClose?.bind(inner);
@@ -55,7 +62,7 @@ class PostInboundHookTransport implements RpcTransport {
         .then(async () => {
           if (this.#afterInboundError !== null) return;
           await onFramePromise;
-          await this.#afterInbound(frame);
+          await this.#afterInbound(frame, deferred);
           for (const deferredFrame of deferred) {
             await this.#inner.send(deferredFrame);
           }
@@ -369,7 +376,7 @@ export class RpcServerRuntime {
 
     const hooked = new PostInboundHookTransport(
       interceptor,
-      (frame) => this.#afterInboundFrame(frame),
+      (frame, outbound) => this.#afterInboundFrame(frame, outbound),
     );
     this.#postInboundHookTransport = hooked;
     this.bridge.setAsyncHostCallDispatch(
@@ -591,14 +598,42 @@ export class RpcServerRuntime {
     return handled;
   }
 
-  async #afterInboundFrame(frame: Uint8Array): Promise<void> {
+  async #afterInboundFrame(
+    frame: Uint8Array,
+    outbound: Uint8Array[],
+  ): Promise<void> {
+    let inboundTag: number | undefined;
     try {
-      const tag = decodeRpcMessageTag(frame);
+      inboundTag = decodeRpcMessageTag(frame);
+    } catch {
+      // Parsing remains the WASM peer's responsibility; fake host tests may
+      // also use non-wire trigger frames solely to exercise the host pump.
+    }
+    if (inboundTag === RPC_MESSAGE_TAG_BOOTSTRAP) {
+      const questionId = decodeBootstrapRequestFrame(frame).questionId;
+      for (const response of outbound) {
+        if (
+          decodeRpcMessageTag(response) !== RPC_MESSAGE_TAG_RETURN ||
+          decodeReturnFrame(response).answerId !== questionId
+        ) continue;
+        try {
+          this.bridge.observeBootstrapResponse(response);
+        } catch (error) {
+          // The peer has answered, but the host cannot keep that answer.
+          // Close before publishing a success that cannot route pipelines.
+          this.bridge.close();
+          await this.session.close();
+          throw error;
+        }
+      }
+    }
+    try {
       // The WASM peer consumes lifecycle frames for its own tables, but the
       // bridge's dispatch registry tracks answers and exported capabilities
       // in parallel, so Finish and Release must reach it as well.
       if (
-        tag === RPC_MESSAGE_TAG_FINISH || tag === RPC_MESSAGE_TAG_RELEASE
+        inboundTag === RPC_MESSAGE_TAG_FINISH ||
+        inboundTag === RPC_MESSAGE_TAG_RELEASE
       ) {
         await this.bridge.handleFrame(frame);
       }

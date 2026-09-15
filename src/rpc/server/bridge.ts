@@ -45,6 +45,7 @@ import {
   type RpcCapDescriptor,
   type RpcFinishRequest,
   type RpcPromisedAnswerOp,
+  type RpcReturnMessage,
 } from "../wire.ts";
 
 /** A pointer to a capability identified by its export table index. */
@@ -464,6 +465,8 @@ interface RegisteredDispatch {
    * it one-for-one.
    */
   refCount: number;
+  /** The initial out-of-band bootstrap grant has been observed. */
+  bootstrapGrantClaimed: boolean;
   /**
    * Number of retained (unfinished) answers whose results reference this
    * capability. Answers hold their result capabilities until Finish or
@@ -781,6 +784,7 @@ export class RpcServerBridge {
     this.#dispatchByCapability.set(capabilityIndex, {
       dispatch,
       refCount: referenceCount,
+      bootstrapGrantClaimed: false,
       answerHoldCount: 0,
     });
     emitObservabilityEvent(this.#observability, {
@@ -1082,13 +1086,27 @@ export class RpcServerBridge {
           },
         );
       }
-      const result = await this.#onBootstrap({
-        questionId: bootstrap.questionId,
-      });
-      return encodeBootstrapResponseFrame({
-        answerId: bootstrap.questionId,
-        capabilityIndex: result.capabilityIndex,
-      });
+      const registration = this.#registerAnswerEntry(bootstrap.questionId, 0);
+      if ("errorFrame" in registration) return registration.errorFrame;
+      try {
+        const result = await this.#onBootstrap({
+          questionId: bootstrap.questionId,
+        });
+        const response = encodeBootstrapResponseFrame({
+          answerId: bootstrap.questionId,
+          capabilityIndex: result.capabilityIndex,
+        });
+        this.#completeBootstrapAnswer(
+          registration.entry,
+          registration.resolveEntry,
+          decodeReturnFrame(response),
+        );
+        return response;
+      } catch (error) {
+        this.#answerTable.delete(bootstrap.questionId);
+        registration.resolveEntry({ kind: "exception", reason: String(error) });
+        throw error;
+      }
     }
 
     if (tag !== RPC_MESSAGE_TAG_CALL) {
@@ -1110,6 +1128,59 @@ export class RpcServerBridge {
       currentFrame.byteLength,
       middlewareState,
     );
+  }
+
+  /**
+   * Mirror a bootstrap Return produced by the WASM peer before dispatching
+   * host calls targeting its promised answer. The frame is not sent again.
+   * @param frame - The actual Return frame for an inbound bootstrap question.
+   * @returns Nothing; throws if the answer cannot be retained within limits.
+   * @example
+   * ```ts
+   * bridge.observeBootstrapResponse(bootstrapReturnFrame);
+   * ```
+   */
+  observeBootstrapResponse(frame: Uint8Array): void {
+    const response = decodeReturnFrame(frame);
+    const registration = this.#registerAnswerEntry(response.answerId, 0);
+    if ("errorFrame" in registration) {
+      const failure = decodeReturnFrame(registration.errorFrame);
+      throw new ProtocolError(
+        failure.kind === "exception"
+          ? failure.reason
+          : "cannot retain bootstrap answer",
+      );
+    }
+    this.#completeBootstrapAnswer(
+      registration.entry,
+      registration.resolveEntry,
+      response,
+    );
+  }
+
+  #completeBootstrapAnswer(
+    entry: AnswerTableEntry,
+    resolveEntry: (outcome: RpcDispatchOutcome) => void,
+    response: RpcReturnMessage,
+  ): void {
+    const outcome: RpcDispatchOutcome = response.kind === "exception"
+      ? { kind: "exception", reason: response.reason }
+      : {
+        kind: "results",
+        response: {
+          content: response.contentBytes,
+          capTable: response.capTable,
+        },
+      };
+    (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
+    resolveEntry(outcome);
+    if (this.#answerTable.get(response.answerId) !== entry || entry.finished) {
+      return;
+    }
+    if (response.kind === "results") {
+      this.#trackReturnedCapabilities(entry, response.capTable, true);
+    }
+    this.#scheduleEviction(response.answerId, entry);
   }
 
   async pumpWasmHostCalls(
@@ -1145,7 +1216,10 @@ export class RpcServerBridge {
     inputFrameBytes: number,
     middlewareState?: Map<string, unknown>,
   ): Promise<Uint8Array | null> {
-    const registration = this.#registerAnswerEntry(call, inputFrameBytes);
+    const registration = this.#registerAnswerEntry(
+      call.questionId,
+      inputFrameBytes,
+    );
     if ("errorFrame" in registration) return registration.errorFrame;
 
     const completion = this.#completeCall(
@@ -1158,7 +1232,7 @@ export class RpcServerBridge {
     return await completion;
   }
 
-  #registerAnswerEntry(call: RpcCallRequest, inputFrameBytes: number):
+  #registerAnswerEntry(questionId: number, inputFrameBytes: number):
     | {
       entry: AnswerTableEntry;
       resolveEntry: (outcome: RpcDispatchOutcome) => void;
@@ -1167,17 +1241,17 @@ export class RpcServerBridge {
     if (this.#closed) {
       return {
         errorFrame: encodeReturnExceptionFrame({
-          answerId: call.questionId,
+          answerId: questionId,
           reason: "rpc server bridge is closed",
         }),
       };
     }
-    if (this.#answerTable.has(call.questionId)) {
+    if (this.#answerTable.has(questionId)) {
       return {
         errorFrame: encodeReturnExceptionFrame({
-          answerId: call.questionId,
+          answerId: questionId,
           reason:
-            `duplicate questionId ${call.questionId}: question is already in progress`,
+            `duplicate questionId ${questionId}: question is already in progress`,
         }),
       };
     }
@@ -1189,7 +1263,7 @@ export class RpcServerBridge {
     ) {
       return {
         errorFrame: encodeReturnExceptionFrame({
-          answerId: call.questionId,
+          answerId: questionId,
           reason:
             `answer table is full (${this.#maxAnswerTableSize} entries); cannot accept new questions`,
         }),
@@ -1204,7 +1278,7 @@ export class RpcServerBridge {
       this.#rejectedInputFrames++;
       return {
         errorFrame: encodeReturnExceptionFrame({
-          answerId: call.questionId,
+          answerId: questionId,
           reason:
             `input frame byte budget exceeded (${this.#maxRetainedInputFrameBytes} bytes)`,
         }),
@@ -1223,7 +1297,7 @@ export class RpcServerBridge {
       pipelineRefCount: 0,
       evictionAttempts: 0,
     };
-    this.#answerTable.set(call.questionId, entry);
+    this.#answerTable.set(questionId, entry);
     this.#retainedInputFrameBytes += inputFrameBytes;
     return { entry, resolveEntry };
   }
@@ -1389,6 +1463,7 @@ export class RpcServerBridge {
   #trackReturnedCapabilities(
     entry: AnswerTableEntry,
     capTable: RpcCapDescriptor[] | undefined,
+    bootstrap = false,
   ): void {
     if (!capTable || capTable.length === 0) return;
     let held: number[] | undefined;
@@ -1396,7 +1471,15 @@ export class RpcServerBridge {
       if (descriptor.tag !== CAP_DESCRIPTOR_TAG_SENDER_HOSTED) continue;
       const registered = this.#dispatchByCapability.get(descriptor.id);
       if (!registered) continue;
-      registered.refCount += 1;
+      // Registrations pre-grant the first bootstrap reference. Mirroring
+      // that answer adds its hold, while later bootstraps grant new refs.
+      if (
+        !bootstrap || registered.bootstrapGrantClaimed ||
+        registered.refCount === 0
+      ) {
+        registered.refCount += 1;
+      }
+      if (bootstrap) registered.bootstrapGrantClaimed = true;
       registered.answerHoldCount += 1;
       (held ??= []).push(descriptor.id);
     }
@@ -1481,7 +1564,7 @@ export class RpcServerBridge {
     }
 
     const registration = this.#registerAnswerEntry(
-      call,
+      call.questionId,
       hostCall.frame.byteLength,
     );
     if ("errorFrame" in registration) {

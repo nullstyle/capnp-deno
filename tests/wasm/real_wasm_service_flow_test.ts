@@ -1,15 +1,22 @@
 import {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  decodeReturnFrame,
+  encodeBootstrapRequestFrame,
+  encodeCallRequestFrame,
+  encodeFinishFrame,
+  encodeReleaseFrame,
   InMemoryRpcHarnessTransport,
   instantiatePeer,
   ProtocolError,
+  RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
   RpcServerBridge,
   RpcServerRuntime,
+  type RpcTransport,
   SessionRpcClientTransport,
   type WasmPeer,
 } from "../../src/advanced.ts";
 import { Pinger, type Ponger } from "../../examples/ping/gen/schema_types.ts";
-import { assert, assertEquals, withTimeout } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 const wasmPath = new URL("../../generated/capnp_deno.wasm", import.meta.url);
 const INTERFACE_ID = 0x1234n;
@@ -462,4 +469,151 @@ Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
     assertEquals(success + injectedFailures, 120);
     assertEquals(runtime.totalHostCallsPumped, 120);
   });
+});
+
+Deno.test("real wasm service flow: pipelined bootstrap calls preserve answer holds through Release and Finish", async () => {
+  const { peer } = await instantiatePeer(wasmPath);
+  let onFrame!: (frame: Uint8Array) => void | Promise<void>;
+  const callResult = deferred<Uint8Array>();
+  const sent: Uint8Array[] = [];
+  const transport: RpcTransport = {
+    start(callback) {
+      onFrame = callback;
+    },
+    send(frame) {
+      sent.push(frame);
+      if (decodeReturnFrame(frame).answerId === 1) callResult.resolve(frame);
+    },
+    close() {},
+  };
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: INTERFACE_ID,
+    dispatch(_method, params) {
+      return encodeSingleU32StructMessage(
+        decodeSingleU32StructMessage(params) + 1,
+      );
+    },
+  }, { capabilityIndex: 0 });
+  const runtime = new RpcServerRuntime(peer, transport, bridge);
+  try {
+    await runtime.start();
+    await onFrame(encodeBootstrapRequestFrame({ questionId: 0 }));
+    await runtime.flush();
+    assertEquals(
+      bridge.stats.totalCapabilityReferences,
+      1,
+      "first bootstrap uses the initial grant",
+    );
+    await onFrame(encodeBootstrapRequestFrame({ questionId: 2 }));
+    await runtime.flush();
+    assertEquals(
+      bridge.stats.totalCapabilityReferences,
+      2,
+      "a repeated bootstrap grants another reference",
+    );
+    // Keep the promised-answer target even if a Return arrives meanwhile;
+    // native clients may pipeline before their bootstrap promise resolves.
+    await onFrame(encodeCallRequestFrame({
+      questionId: 1,
+      interfaceId: INTERFACE_ID,
+      methodId: 0,
+      target: {
+        tag: RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+        promisedAnswer: { questionId: 0 },
+      },
+      paramsContent: encodeSingleU32StructMessage(41),
+    }));
+    const response = decodeReturnFrame(
+      await withTimeout(callResult.promise, 500, "pipelined bootstrap return"),
+    );
+    assert(
+      response.kind === "results",
+      response.kind === "exception" ? response.reason : "expected results",
+    );
+    assertEquals(decodeSingleU32StructMessage(response.contentBytes), 42);
+    assertEquals(
+      sent.filter((frame) => decodeReturnFrame(frame).answerId === 0).length,
+      1,
+      "bootstrap response must be sent only once",
+    );
+    assertEquals(
+      bridge.stats.totalCapabilityReferences,
+      2,
+      "each bootstrap grant must be counted exactly once",
+    );
+    assertEquals(bridge.stats.answerHeldCapabilityReferences, 2);
+    await onFrame(encodeReleaseFrame({ id: 0, referenceCount: 1 }));
+    await runtime.flush();
+    assertEquals(bridge.stats.totalCapabilityReferences, 1);
+    await onFrame(
+      encodeFinishFrame({ questionId: 2, releaseResultCaps: true }),
+    );
+    await runtime.flush();
+    assertEquals(bridge.stats.totalCapabilityReferences, 0);
+    assertEquals(
+      bridge.stats.exportedCapabilities,
+      1,
+      "unfinished bootstrap answer holds its capability",
+    );
+    await onFrame(
+      encodeFinishFrame({ questionId: 1, releaseResultCaps: false }),
+    );
+    await onFrame(
+      encodeFinishFrame({ questionId: 0, releaseResultCaps: false }),
+    );
+    await runtime.flush();
+    assertEquals(bridge.stats.answerTableEntries, 0);
+    assertEquals(bridge.stats.exportedCapabilities, 0);
+  } finally {
+    await runtime.close();
+  }
+});
+
+Deno.test("real wasm service flow: bootstrap answer overflow closes before publishing an unroutable grant", async () => {
+  const { peer } = await instantiatePeer(wasmPath);
+  let onFrame!: (frame: Uint8Array) => void | Promise<void>;
+  const sent: Uint8Array[] = [];
+  let closed = false;
+  const transport: RpcTransport = {
+    start(callback) {
+      onFrame = callback;
+    },
+    send(frame) {
+      sent.push(frame);
+    },
+    close() {
+      closed = true;
+    },
+  };
+  const bridge = new RpcServerBridge({ maxAnswerTableSize: 1 });
+  bridge.exportCapability({
+    interfaceId: INTERFACE_ID,
+    dispatch: () => encodeSingleU32StructMessage(0),
+  }, { capabilityIndex: 0 });
+  const runtime = new RpcServerRuntime(peer, transport, bridge);
+  try {
+    await runtime.start();
+    await onFrame(encodeBootstrapRequestFrame({ questionId: 0 }));
+    await runtime.flush();
+    assertEquals(bridge.stats.answerTableEntries, 1);
+    await onFrame(encodeBootstrapRequestFrame({ questionId: 1 }));
+    let failure: unknown;
+    try {
+      await withTimeout(runtime.flush(), 500, "bootstrap overflow closure");
+    } catch (error) {
+      failure = error;
+    }
+    assert(
+      failure instanceof ProtocolError &&
+        /answer table is full/.test(failure.message),
+    );
+    assertEquals(closed, true);
+    assertEquals(runtime.session.closed, true);
+    assertEquals(sent.length, 1, "overflow response must not be published");
+    assertEquals(bridge.stats.answerTableEntries, 0);
+    assertEquals(bridge.stats.exportedCapabilities, 0);
+  } finally {
+    await runtime.close();
+  }
 });
