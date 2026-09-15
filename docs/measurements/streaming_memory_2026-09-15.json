@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-09-15T06:32:24.840Z",
+  "environment": {
+    "deno": "2.6.8",
+    "v8": "14.5.201.2-rusty",
+    "typescript": "5.9.2",
+    "target": "aarch64-apple-darwin"
+  },
+  "sources": {
+    "bench/streaming_memory.ts": "01ca8c150334afdec2df1fc3cad25231e013d1785acbf0dd7ae0611ab4c62502",
+    "examples/streaming/gen/schema_types.ts": "53ffe7fdd388dd252641ef5752db55f3c5d4ab301250721035012d96f792003c",
+    "src/rpc/session/streaming.ts": "52034709f18bd87d9492b6cb32663fc21a699b79ff24fcfa3d162580f32120ec",
+    "src/encoding/runtime_codec.ts": "e049a36f4f6418d4dbc8c00e9c9419424d00005898f348ab553cddae327e51e0",
+    "src/encoding/runtime_message.ts": "39f1fd6b5b2b5d83ef4a9747d456ee4369b246d46a8d502f303f9dde96aeee4a"
+  },
+  "config": {
+    "calls": 1024,
+    "samplesPerMode": 3,
+    "warmupCallsPerMode": 64,
+    "maxInFlight": 32,
+    "parameterMessageBytes": 24,
+    "maxInFlightBytes": 192,
+    "acknowledgementDelayMs": 2,
+    "sampleTimeoutMs": 10000
+  },
+  "definitions": {
+    "allocation": "Final MessageBuilder.toMessageBytes allocations counted by an isolated-process wrapper restored after each sample, plus distinct exact-size ArrayBuffers at transport.call; not internal builder growth or total V8 allocations.",
+    "encodedRetention": "Generated onEncodedParams notification through matching transport.finish; includes encoded candidates waiting for byte admission.",
+    "transportRetention": "Actual Uint8Array references held by this delayed-ack transport from call through Finish.",
+    "senderPeaks": "Public sender stats observed at encode, send, transport call, acknowledgment, Finish, and final flush; count-only inFlightBytes remains unmetered (zero).",
+    "throughput": "Generated serialize/decode/stream admission and timer-delayed acknowledgments on one local event loop; not network or native WASM throughput."
+  },
+  "summary": [
+    {
+      "mode": "count_only",
+      "medianElapsedMs": 109.927833,
+      "medianCallsPerSecond": 9315.202274568624,
+      "peakEncodedToFinishBytes": 768,
+      "peakTransportRetainedBytes": 768,
+      "peakSenderPendingEncodedBytes": 0
+    },
+    {
+      "mode": "byte_bounded",
+      "medianElapsedMs": 441.05641700000024,
+      "medianCallsPerSecond": 2321.6984506542153,
+      "peakEncodedToFinishBytes": 216,
+      "peakTransportRetainedBytes": 192,
+      "peakSenderPendingEncodedBytes": 24
+    }
+  ],
+  "samples": [
+    {
+      "mode": "count_only",
+      "calls": 1024,
+      "elapsedMs": 109.927833,
+      "callsPerSecond": 9315.202274568624,
+      "parameterBytesPerSecond": 223564.854589647,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 32,
+        "encodedToFinishBytes": 768,
+        "transportRetainedBuffers": 32,
+        "transportRetainedBytes": 768,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 32,
+        "senderInFlightBytes": 0,
+        "senderPendingEncodedBytes": 0
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    },
+    {
+      "mode": "byte_bounded",
+      "calls": 1024,
+      "elapsedMs": 453.6365420000001,
+      "callsPerSecond": 2257.3137417135144,
+      "parameterBytesPerSecond": 54175.52980112434,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 9,
+        "encodedToFinishBytes": 216,
+        "transportRetainedBuffers": 8,
+        "transportRetainedBytes": 192,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 9,
+        "senderInFlightBytes": 192,
+        "senderPendingEncodedBytes": 24
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    },
+    {
+      "mode": "byte_bounded",
+      "calls": 1024,
+      "elapsedMs": 435.942,
+      "callsPerSecond": 2348.936326392043,
+      "parameterBytesPerSecond": 56374.47183340903,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 9,
+        "encodedToFinishBytes": 216,
+        "transportRetainedBuffers": 8,
+        "transportRetainedBytes": 192,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 9,
+        "senderInFlightBytes": 192,
+        "senderPendingEncodedBytes": 24
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    },
+    {
+      "mode": "count_only",
+      "calls": 1024,
+      "elapsedMs": 111.79237499999999,
+      "callsPerSecond": 9159.83760073082,
+      "parameterBytesPerSecond": 219836.10241753966,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 32,
+        "encodedToFinishBytes": 768,
+        "transportRetainedBuffers": 32,
+        "transportRetainedBytes": 768,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 32,
+        "senderInFlightBytes": 0,
+        "senderPendingEncodedBytes": 0
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    },
+    {
+      "mode": "count_only",
+      "calls": 1024,
+      "elapsedMs": 106.58229099999994,
+      "callsPerSecond": 9607.599821625157,
+      "parameterBytesPerSecond": 230582.39571900378,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 32,
+        "encodedToFinishBytes": 768,
+        "transportRetainedBuffers": 32,
+        "transportRetainedBytes": 768,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 32,
+        "senderInFlightBytes": 0,
+        "senderPendingEncodedBytes": 0
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    },
+    {
+      "mode": "byte_bounded",
+      "calls": 1024,
+      "elapsedMs": 441.05641700000024,
+      "callsPerSecond": 2321.6984506542153,
+      "parameterBytesPerSecond": 55720.762815701164,
+      "encodedMessages": 1024,
+      "encodedMessageBytes": 24576,
+      "serializedOutputAllocations": 1024,
+      "serializedOutputAllocationBytes": 24576,
+      "distinctTransportArrayBuffers": 1024,
+      "distinctTransportArrayBufferBytes": 24576,
+      "peaks": {
+        "encodedToFinishBuffers": 9,
+        "encodedToFinishBytes": 216,
+        "transportRetainedBuffers": 8,
+        "transportRetainedBytes": 192,
+        "encodedBeforeTransportBuffers": 1,
+        "encodedBeforeTransportBytes": 24,
+        "senderInFlight": 9,
+        "senderInFlightBytes": 192,
+        "senderPendingEncodedBytes": 24
+      },
+      "remainingAfterFlush": {
+        "buffers": 0,
+        "bytes": 0,
+        "calls": 0,
+        "admittedBytes": 0,
+        "pendingEncodedBytes": 0
+      }
+    }
+  ]
+}

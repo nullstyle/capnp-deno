@@ -77,7 +77,10 @@
     "compiler:maintenance:fetch": "python3 vendor/capnp-zig/tools/bootstrap_capnp.py",
     "fixtures:codegen": "deno run --allow-read --allow-write --allow-run=python3 tests/codegen/generate_evolution_fixtures.ts",
     "test:compiler": "deno test --allow-read --allow-write --allow-run=deno tests/codegen/compiler_artifact_test.ts tests/codegen/compiler_workspace_test.ts tests/codegen/compiler_integration_test.ts",
-    "check:compiler-install": "deno run --allow-read --allow-write --allow-env --allow-run=deno scripts/check_compiler_install.ts"
+    "check:compiler-install": "deno run --allow-read --allow-write --allow-env --allow-run=deno scripts/check_compiler_install.ts",
+    "bench:compiler": "deno run --no-prompt --allow-read bench/compiler_bench.ts",
+    "check:release-version": "deno run --allow-read=deno.json scripts/check_release_version.ts",
+    "bench:stream-memory": "deno run --allow-read bench/streaming_memory.ts"
   },
   "lint": {
     "exclude": [

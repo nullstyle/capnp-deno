@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-09-15T06:29:24.659Z",
+  "environment": {
+    "deno": "2.6.8",
+    "v8": "14.5.201.2-rusty",
+    "typescript": "5.9.2",
+    "target": "aarch64-apple-darwin",
+    "arch": "aarch64",
+    "os": "darwin",
+    "vendor": "apple",
+    "standalone": false
+  },
+  "compiler": {
+    "schemaVersion": 1,
+    "denoVersion": "2.6.8",
+    "version": "0.1.0-rc.3",
+    "sourceCommit": "a5ccaae128665914d3878d83908bd5ddbece58ea",
+    "sourceSha256": "ff2220550ecbe2624dd4719a4858b069ca43436e9954c69224e255b77517c0a4",
+    "compilerRevision": "851c45bb39c34c3f20f9d9ebe9f34a7e39109b6f",
+    "archive": {
+      "url": "https://github.com/nullstyle/slcp-zig/releases/download/capnp-wasm-compiler-host-v0.1.0-rc.3/capnp-wasm-compiler-host-0.1.0-rc.3.tgz",
+      "sha256": "ca8dfa0033e417e1db0522f2d1c28ccfeda4d42c18ae160de3a26d8a763521ec",
+      "bytes": 945229
+    },
+    "manifestSha256": "322fa3148ec3cb7e31454b910a5e8d831a3bf1ec2635b5a8c5794c10a66077ce",
+    "compilerSha256": "5429b7277b18b6e3f65430068ac41ac327ef8dd359603955f16ec576e0c3a14a",
+    "includeSha256": "97c87a6cabc07b477f763c816e2a402678e628bffee885bda9d1616b33b44aec"
+  },
+  "measurement": {
+    "unit": "milliseconds",
+    "coldSamples": 5,
+    "warmSamples": 25,
+    "deadlineMs": 120000,
+    "cold": "Fresh compiler client and worker per sample: full package verification, asset reads, worker initialization, workspace snapshot, and first compile-to-request.",
+    "warm": "Same client and worker after one untimed compile: workspace snapshot and compile-to-request on every sample.",
+    "excluded": "Deno process/module startup, artifact download, request digest verification, worker disposal, TypeScript emission, formatting, and output writes. OS file caches and V8 process caches are not flushed.",
+    "p95": "Nearest-rank sample percentile; cold p95 is the maximum of five observations."
+  },
+  "results": [
+    {
+      "name": "ping",
+      "schema": "examples/ping/schema.capnp",
+      "schemaSha256": "bd0dc26252277c8b29398eb00537619a18f789fbc317d7d1bc3a47b74f59e6c0",
+      "requestBytes": 2032,
+      "requestSha256": "e20b2904bc61916221953a8322d498bce6f85cc1c116fef93571539bcbc178c9",
+      "initializeMs": {
+        "samples": [
+          23.025916000000002,
+          19.166000000000004,
+          19.216375,
+          19.689542000000003,
+          18.837916000000007
+        ],
+        "min": 18.837916000000007,
+        "median": 19.216375,
+        "p95": 23.025916000000002,
+        "max": 23.025916000000002
+      },
+      "firstCompileMs": {
+        "samples": [
+          14.285792,
+          13.514124999999993,
+          14.608208000000005,
+          13.846417000000002,
+          13.504624999999976
+        ],
+        "min": 13.504624999999976,
+        "median": 13.846417000000002,
+        "p95": 14.608208000000005,
+        "max": 14.608208000000005
+      },
+      "coldTotalMs": {
+        "samples": [
+          37.311708,
+          32.680125,
+          33.824583000000004,
+          33.535959000000005,
+          32.34254099999998
+        ],
+        "min": 32.34254099999998,
+        "median": 33.535959000000005,
+        "p95": 37.311708,
+        "max": 37.311708
+      },
+      "warmCompileMs": {
+        "samples": [
+          1.5315410000000043,
+          0.9852499999999793,
+          0.9168750000000045,
+          0.8010419999999954,
+          0.8117090000000076,
+          1.9635829999999999,
+          0.8804999999999836,
+          0.8024589999999989,
+          0.6640830000000051,
+          0.5790829999999971,
+          0.6297910000000115,
+          0.692292000000009,
+          1.1742500000000007,
+          1.3871660000000077,
+          0.6754579999999919,
+          0.5551250000000039,
+          0.5842920000000049,
+          0.5391250000000127,
+          0.9566250000000025,
+          1.9549169999999947,
+          0.7560840000000155,
+          0.732625000000013,
+          1.391333000000003,
+          0.6924160000000086,
+          0.6204999999999927
+        ],
+        "min": 0.5391250000000127,
+        "median": 0.8010419999999954,
+        "p95": 1.9549169999999947,
+        "max": 1.9635829999999999
+      }
+    },
+    {
+      "name": "rpc_protocol",
+      "schema": "vendor/capnp-zig/src/rpc/capnp/rpc.capnp",
+      "schemaSha256": "2ecc3049d4f7f2d48a3a368dbb9ef4b97b31c1365996d615bd19c267983a1931",
+      "requestBytes": 82840,
+      "requestSha256": "e366e8dfadc68aeb81dfc5a2477c7cbda561788c3e897be0f0b2e2352796ce20",
+      "initializeMs": {
+        "samples": [
+          15.876666,
+          20.386791000000017,
+          15.824957999999981,
+          14.830332999999996,
+          15.221374999999966
+        ],
+        "min": 14.830332999999996,
+        "median": 15.824957999999981,
+        "p95": 20.386791000000017,
+        "max": 20.386791000000017
+      },
+      "firstCompileMs": {
+        "samples": [
+          23.82195900000002,
+          18.395541999999978,
+          16.447917000000018,
+          16.658124999999984,
+          16.490792
+        ],
+        "min": 16.447917000000018,
+        "median": 16.658124999999984,
+        "p95": 23.82195900000002,
+        "max": 23.82195900000002
+      },
+      "coldTotalMs": {
+        "samples": [
+          39.69862500000002,
+          38.782332999999994,
+          32.272875,
+          31.48845799999998,
+          31.712166999999965
+        ],
+        "min": 31.48845799999998,
+        "median": 32.272875,
+        "p95": 39.69862500000002,
+        "max": 39.69862500000002
+      },
+      "warmCompileMs": {
+        "samples": [
+          3.7737919999999576,
+          3.2630000000000337,
+          2.678291999999999,
+          2.6333339999999907,
+          3.6425419999999917,
+          2.288166999999987,
+          2.3591670000000136,
+          2.5821670000000267,
+          2.819541000000015,
+          2.1595419999999876,
+          2.6779999999999973,
+          2.2789999999999964,
+          2.7367499999999723,
+          2.1770839999999794,
+          1.985040999999967,
+          2.362082999999984,
+          2.5324999999999704,
+          2.268624999999986,
+          2.6337919999999713,
+          2.0162090000000035,
+          1.8708750000000123,
+          2.002791000000002,
+          2.0790420000000154,
+          2.1551660000000084,
+          2.40625
+        ],
+        "min": 1.8708750000000123,
+        "median": 2.362082999999984,
+        "p95": 3.6425419999999917,
+        "max": 3.7737919999999576
+      }
+    }
+  ]
+}
