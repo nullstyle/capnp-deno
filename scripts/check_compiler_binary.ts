@@ -13,17 +13,18 @@ const source = resolve(
       Deno.build.os === "windows" ? "capnpc-deno.exe" : "capnpc-deno",
     ),
 );
+const pin = await readCompilerPin();
 const bytes = await Deno.readFile(source);
 const receipt = JSON.parse(
   await Deno.readTextFile(`${source}.provenance.json`),
 );
 if (
   receipt.format !== 1 || receipt.target !== Deno.build.target ||
+  receipt.denoVersion !== pin.denoVersion ||
   receipt.artifact.filename !== basename(source) ||
   receipt.artifact.bytes !== bytes.length ||
   receipt.artifact.sha256 !== await sha256(bytes) ||
-  JSON.stringify(receipt.compilerToolchain) !==
-    JSON.stringify(await readCompilerPin())
+  JSON.stringify(receipt.compilerToolchain) !== JSON.stringify(pin)
 ) {
   throw new Error(
     "compiler binary receipt does not match this host or pinned toolchain",

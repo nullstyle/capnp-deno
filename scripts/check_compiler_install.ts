@@ -16,11 +16,13 @@ const binary = join(
   "bin",
   Deno.build.os === "windows" ? "capnpc-deno.exe" : "capnpc-deno",
 );
+const receiptPath = `${binary}.provenance.json`;
 
 async function run(
   label: string,
   args: string[],
   timeoutMs: number,
+  expected: "success" | "failure" = "success",
 ): Promise<void> {
   const child = new Deno.Command(Deno.execPath(), {
     args: ["run", "--no-prompt", ...args],
@@ -42,9 +44,14 @@ async function run(
   );
   try {
     const status = await child.status;
-    if (!status.success || timedOut) {
+    if (
+      timedOut || status.signal !== null ||
+      (expected === "success" ? !status.success : status.code === 0)
+    ) {
       throw new Error(
-        `${label} ${timedOut ? "timed out" : `exited ${status.code}`}`,
+        `${label} ${
+          timedOut ? "timed out" : `exited ${status.code}; expected ${expected}`
+        }`,
       );
     }
   } finally {
@@ -77,14 +84,29 @@ try {
     // The shared acceptance check validates the installed receipt, then runs a
     // relocated copy with an empty PATH/cache and binary stdin. Its temporary
     // executable path is selected internally, so it needs subprocess access.
-    await run("Installed compiler acceptance", [
+    const checkerArgs = [
       "--allow-read",
       "--allow-write",
       "--allow-env",
       "--allow-run",
       checker,
       binary,
-    ], 90_000);
+    ];
+    const originalReceipt = await Deno.readFile(receiptPath);
+    try {
+      const tampered = JSON.parse(new TextDecoder().decode(originalReceipt));
+      tampered.denoVersion = "0.0.0-corrupted";
+      await Deno.writeTextFile(receiptPath, JSON.stringify(tampered));
+      await run(
+        "Tampered compiler receipt rejection",
+        checkerArgs,
+        90_000,
+        "failure",
+      );
+    } finally {
+      await Deno.writeFile(receiptPath, originalReceipt);
+    }
+    await run("Installed compiler acceptance", checkerArgs, 90_000);
   } finally {
     // Exercise the real uninstall path even if installation or acceptance fails.
     await run("Compiler uninstallation", [
@@ -97,12 +119,12 @@ try {
       installRoot,
     ], 30_000);
     await assertAbsent(binary);
-    await assertAbsent(`${binary}.provenance.json`);
+    await assertAbsent(receiptPath);
   }
 } finally {
   await Deno.remove(temporary, { recursive: true });
 }
 
 console.log(
-  "Installed compiler: path with spaces, receipt, empty PATH/cache, imports, embed, binary stdin, and uninstall passed",
+  "Installed compiler: path with spaces, tampered receipt rejection, valid receipt, empty PATH/cache, imports, embed, binary stdin, and uninstall passed",
 );
