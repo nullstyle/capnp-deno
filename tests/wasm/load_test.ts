@@ -16,6 +16,27 @@ interface WasmPatches {
   readFile?: (path: string | URL) => Promise<Uint8Array>;
 }
 
+Deno.test("instantiatePeer treats Windows drive and UNC paths as local files", async () => {
+  const paths = [
+    "C:\\Program Files\\capnp\\runtime.wasm",
+    "D:/with spaces/runtime.wasm",
+    "\\\\server\\share\\runtime.wasm",
+  ];
+  const reads: string[] = [];
+  await withPatchedGlobals({
+    readFile: (path) => {
+      reads.push(String(path));
+      return Promise.resolve(new Uint8Array([0]));
+    },
+    fetch: () => Promise.reject(new Error("local path must not use fetch")),
+    compile: () => Promise.resolve({} as WebAssembly.Module),
+    instantiate: () => Promise.resolve(createFakeInstantiatedSource().instance),
+  }, async () => {
+    for (const path of paths) (await instantiatePeer(path)).peer.close();
+  });
+  assertEquals(JSON.stringify(reads), JSON.stringify(paths));
+});
+
 function createFakeInstantiatedSource(): WebAssembly.WebAssemblyInstantiatedSource {
   const fake = new FakeCapnpWasm();
   return {

@@ -44,6 +44,8 @@ function toArrayBuffer(source: BufferSource): ArrayBuffer {
 }
 
 function isLikelyUrlString(value: string): boolean {
+  // Drive letters are native paths, including drive-relative forms (C:foo).
+  if (/^[a-zA-Z]:/.test(value)) return false;
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value);
 }
 
