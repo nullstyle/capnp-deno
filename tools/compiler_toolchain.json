@@ -6,7 +6,7 @@
   "sourceSha256": "ff2220550ecbe2624dd4719a4858b069ca43436e9954c69224e255b77517c0a4",
   "compilerRevision": "851c45bb39c34c3f20f9d9ebe9f34a7e39109b6f",
   "archive": {
-    "url": "https://github.com/nullstyle/slcp-zig/releases/download/capnp-wasm-compiler-host-v0.1.0-rc.3/capnp-wasm-compiler-host-0.1.0-rc.3.tgz",
+    "url": "https://github.com/nullstyle/capnpc-wasm/releases/download/capnp-wasm-compiler-host-v0.1.0-rc.3/capnp-wasm-compiler-host-0.1.0-rc.3.tgz",
     "sha256": "ca8dfa0033e417e1db0522f2d1c28ccfeda4d42c18ae160de3a26d8a763521ec",
     "bytes": 945229
   },

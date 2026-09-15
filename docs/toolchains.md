@@ -51,8 +51,9 @@ mise exec -- deno task codegen generate --schema schema/example.capnp --out gene
 `compiler:fetch` is the network step. It downloads the public archive identified
 by the pin and verifies package membership, manifest, provenance, compiler, and
 standard includes. Changed, missing, or unexpected files fail verification. The
-producer checkout may remain private; consumers and CI fetch the pinned public
-compiler-host release without private repository credentials.
+public [capnpc-wasm repository](https://github.com/nullstyle/capnpc-wasm) hosts
+both the producer source and compiler-host releases. Consumers and CI fetch the
+pinned archive without repository credentials.
 
 After acquisition, normal source codegen uses only `--allow-read --allow-write`.
 It does not invoke PATH `capnp`, Wasmtime, Python, or Zig, and does not require
