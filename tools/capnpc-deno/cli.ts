@@ -639,21 +639,28 @@ function createAbsoluteSourceReconstructor(
 // otherwise mirror their full path. Rooting them at their common ancestor
 // directory flattens the shared prefix while preserving the relative structure
 // between sibling schemas (so distinct dirs never collide and nesting under a
-// shared parent is kept). POSIX ("/"-rooted) paths only; drive-letter absolutes
-// fall through to the basename fallback in deriveSchemaRelativePath.
+// shared parent is kept). Drive paths can share an ancestor only on the same
+// volume; distinct volumes retain their drive component in the fallback path.
 function absoluteSchemaLayoutRoots(schemas: string[]): string[] {
   const dirs = schemas
     .map(normalizePath)
-    .filter((path) => path.startsWith("/"))
+    .filter(isAbsolutePath)
     .map(dirnamePath);
   if (dirs.length === 0) return [];
-  return [commonAbsoluteAncestorDir(dirs)];
+  const common = commonAbsoluteAncestorDir(dirs);
+  return common === null ? [] : [common];
 }
 
-function commonAbsoluteAncestorDir(dirs: string[]): string {
+function commonAbsoluteAncestorDir(dirs: string[]): string | null {
+  const filesystemRoot = (path: string): string =>
+    path.match(/^[A-Za-z]:\//)?.[0] ?? "/";
+  const root = filesystemRoot(dirs[0]);
+  if (dirs.some((dir) => filesystemRoot(dir) !== root)) return null;
   let common: string[] | null = null;
   for (const dir of dirs) {
-    const segments = dir.split("/").filter((segment) => segment.length > 0);
+    const segments = dir.slice(root.length).split("/").filter((segment) =>
+      segment.length > 0
+    );
     if (common === null) {
       common = segments;
       continue;
@@ -668,7 +675,7 @@ function commonAbsoluteAncestorDir(dirs: string[]): string {
     }
     common = common.slice(0, index);
   }
-  return `/${(common ?? []).join("/")}`;
+  return root + (common ?? []).join("/");
 }
 
 function normalizeRelativeSegments(value: string): string {
@@ -1183,13 +1190,11 @@ function deriveSchemaRelativePath(
 
   for (const root of normalizedRoots) {
     if (sourceIsAbsolute !== isAbsolutePath(root)) continue;
-    const isFilesystemRoot = root === "/";
-    const prefix = isFilesystemRoot ? "/" : `${root}/`;
+    const isFilesystemRoot = root === "/" || /^[A-Za-z]:\/$/.test(root);
+    const prefix = isFilesystemRoot ? root : `${root}/`;
     if (source !== root && !source.startsWith(prefix)) continue;
     if (source === root) return null;
-    const relative = isFilesystemRoot
-      ? source.slice(1)
-      : source.slice(root.length + 1);
+    const relative = source.slice(prefix.length);
     return normalizeRelativePath(relative, {
       allowParentTraversal: false,
       context: "schema source filename",
@@ -1197,6 +1202,7 @@ function deriveSchemaRelativePath(
   }
 
   if (sourceIsAbsolute) {
+    if (/^[A-Za-z]:\//.test(source)) return source[0] + source.slice(2);
     return basenamePath(source);
   }
   return normalizeRelativePath(source, {
@@ -1271,12 +1277,15 @@ function escapeRegExpLiteral(value: string): string {
 }
 
 function normalizePath(value: string): string {
-  return value.replaceAll("\\", "/");
+  return value.replaceAll("\\", "/").replace(
+    /^[A-Za-z]:\//,
+    (drive) => drive.toUpperCase(),
+  );
 }
 
 function trimTrailingSlash(value: string): string {
   let out = value;
-  while (out.endsWith("/") && out !== "/") {
+  while (out.endsWith("/") && out !== "/" && !/^[A-Za-z]:\/$/.test(out)) {
     out = out.slice(0, -1);
   }
   return out;
@@ -1319,6 +1328,9 @@ function dirnamePath(path: string): string {
   const idx = normalized.lastIndexOf("/");
   if (idx < 0) return ".";
   if (idx === 0) return "/";
+  if (idx === 2 && /^[A-Za-z]:\//.test(normalized)) {
+    return normalized.slice(0, 3);
+  }
   return normalized.slice(0, idx);
 }
 

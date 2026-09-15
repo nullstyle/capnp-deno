@@ -97,6 +97,8 @@ jobs:
     timeout-minutes: 90
     env:
       CAPNPC_ZIG_BUILD_TIMEOUT_SECONDS: "1800"
+      CC: clang-18
+      CXX: clang++-18
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -113,6 +115,14 @@ jobs:
           github_token: ${{ github.token }}
       - name: Fetch and verify the pinned compiler package
         run: deno task compiler:fetch
+      - name: Install and probe the C++23 reference toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 g++-14
+          # Match the tested Clang/libstdc++ pair in capnp-zig's native oracle lane.
+          printf '#include <print>\nint main() { std::println("C++23 ready"); }\n' > "$RUNNER_TEMP/capnp-cxx23.cpp"
+          "$CXX" -std=c++23 "$RUNNER_TEMP/capnp-cxx23.cpp" -o "$RUNNER_TEMP/capnp-cxx23"
+          "$RUNNER_TEMP/capnp-cxx23"
       # Do not restore Zig build outputs: this job proves a clean source rebuild.
       - name: Rebuild and compare the runtime with its checked-in artifact
         run: deno task check:wasm-rebuild

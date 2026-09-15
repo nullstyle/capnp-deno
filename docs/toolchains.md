@@ -128,8 +128,10 @@ revision advances, host behavior changes, and artifact receipts.
 Normal codegen does not require an official native `capnp` executable. The
 optional local `test:native-interop` task builds source-matched Zig and C++
 reference peers from the pinned vendor tree; it is a required Linux validation
-lane in CI. It needs Zig, CMake, and a native C++ compiler. Its C++ compiler,
-generator, headers, and libraries come from the same source revision.
+lane in CI. It needs Zig, CMake, and a C++23 compiler and standard library. The
+Ubuntu lane probes Clang 18 with GCC 14’s standard library, matching the
+capnp-zig native oracle lane. Its C++ compiler, generator, headers, and
+libraries come from the same source revision.
 
 Maintenance-only fixture encoding/version operations use the verified
 Python/Wasmtime driver because they are outside the compiler host's

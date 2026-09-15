@@ -1025,6 +1025,49 @@ Deno.test("capnpc-deno CLI keeps distinct absolute --schema siblings from collid
   assertHasPath(output, "b/x_types.ts");
 });
 
+for (const prefix of ["C:/project/", "C:/"]) {
+  Deno.test(`capnpc-deno CLI roots Windows drive siblings beneath ${prefix}`, () => {
+    const sources = [`${prefix}a/schema.capnp`, `${prefix}b/schema.capnp`];
+    for (const layout of ["schema", "flat"] as const) {
+      const output = finalizeGeneratedFiles(
+        sources.map((sourceFilename) => ({
+          path: "schema_types.ts",
+          sourceFilename,
+          contents: "// fixture",
+        })),
+        {
+          layout,
+          srcDirs: [],
+          emitBarrel: false,
+          schemas: sources.map((path) => path.replaceAll("/", "\\")),
+        },
+      );
+      assertHasPath(
+        output,
+        layout === "schema" ? "a/schema_types.ts" : "a_schema_types.ts",
+      );
+      assertHasPath(
+        output,
+        layout === "schema" ? "b/schema_types.ts" : "b_schema_types.ts",
+      );
+    }
+  });
+}
+
+Deno.test("capnpc-deno CLI keeps schemas on distinct Windows volumes separate", () => {
+  const sources = ["C:/project/schema.capnp", "D:/project/schema.capnp"];
+  const output = finalizeGeneratedFiles(
+    sources.map((sourceFilename) => ({
+      path: "schema_types.ts",
+      sourceFilename,
+      contents: "// fixture",
+    })),
+    { layout: "schema", srcDirs: [], emitBarrel: false, schemas: sources },
+  );
+  assertHasPath(output, "C/project/schema_types.ts");
+  assertHasPath(output, "D/project/schema_types.ts");
+});
+
 Deno.test("capnpc-deno CLI keeps mirroring relative --schema inputs", () => {
   const output = finalizeGeneratedFiles(
     [typesFileFor("schemas/person_codegen.capnp")],
