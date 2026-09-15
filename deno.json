@@ -43,7 +43,7 @@
     "fmt": "deno fmt src tests bench examples docs scripts tools deno.json README.md AGENTS.md",
     "lint": "deno lint",
     "check": "deno check src/*.ts src/encoding/*.ts src/wasm/*.ts src/observability/*.ts src/rpc/*.ts src/rpc/server/*.ts src/rpc/session/*.ts src/rpc/wire/*.ts src/rpc/transports/*.ts tools/*.ts tools/capnpc-deno/*.ts scripts/*.ts tests/*.ts tests/**/*_test.ts bench/*.ts examples/*/*.ts examples/*/gen/*.ts",
-    "check:generated": "deno check tests/fixtures/generated/typegate_fixture_capnp.ts tests/fixtures/generated/typegate_fixture_rpc.ts tests/fixtures/generated/interop_matrix/mod.ts tests/fixtures/generated/crossfile/base_types.ts tests/fixtures/generated/crossfile/base_meta.ts tests/fixtures/generated/crossfile/consumer_types.ts tests/fixtures/generated/crossfile/consumer_meta.ts tests/fixtures/generated/crossfile/nested/deep_types.ts tests/fixtures/generated/crossfile/nested/deep_meta.ts",
+    "check:generated": "deno check tests/fixtures/generated/typegate_fixture_capnp.ts tests/fixtures/generated/typegate_fixture_rpc.ts tests/fixtures/generated/interop_matrix/mod.ts tests/fixtures/generated/crossfile/base_types.ts tests/fixtures/generated/crossfile/base_meta.ts tests/fixtures/generated/crossfile/consumer_types.ts tests/fixtures/generated/crossfile/consumer_meta.ts tests/fixtures/generated/crossfile/nested/deep_types.ts tests/fixtures/generated/crossfile/nested/deep_meta.ts src/rpc/gen/capnp/mod.ts",
     "check:rpc-schema-sync": "deno run --allow-read --allow-write --allow-run=deno scripts/rpc_schema.ts --check",
     "check:tools": "deno check tools/*.ts tools/capnpc-deno/*.ts scripts/*.ts",
     "codegen": "deno run --allow-read --allow-write tools/capnpc-deno/main.ts",

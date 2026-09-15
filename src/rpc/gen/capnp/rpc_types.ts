@@ -10,12 +10,12 @@ export type {
   RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
   RpcFinishOptions,
-  RpcServerDispatch,
+  RpcGeneratedServerDispatch as RpcServerDispatch,
   RpcServerDispatchResult,
   RpcServerRegistry,
   RpcServiceToken,
   RpcStub,
-} from "../../server/rpc_runtime.ts";
+} from "../../../rpc.ts";
 import type {
   AnyPointerValue,
   CapabilityPointer,
@@ -32,18 +32,18 @@ import type {
   RpcClientTransport,
   RpcDebugSchemaMethod,
   RpcExportCapabilityOptions,
-  RpcServerDispatch,
+  RpcGeneratedServerDispatch as RpcServerDispatch,
   RpcServerDispatchResult,
   RpcServerRegistry,
   RpcServiceToken,
   RpcStub,
-} from "../../server/rpc_runtime.ts";
+} from "../../../rpc.ts";
 import {
   annotateCapnpError,
   createRpcServiceToken,
   ProtocolError,
   SessionError,
-} from "../../server/rpc_runtime.ts";
+} from "../../../rpc.ts";
 import {
   decodeStructMessage,
   decodeStructMessageWithCaps,

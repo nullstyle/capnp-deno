@@ -68,11 +68,7 @@ try {
     await Deno.writeTextFile(
       path,
       source.replaceAll('"@nullstyle/capnp/encoding"', '"../../../encoding.ts"')
-        .replaceAll('"@nullstyle/capnp/rpc"', '"../../server/rpc_runtime.ts"')
-        .replaceAll(
-          "RpcGeneratedServerDispatch as RpcServerDispatch",
-          "RpcServerDispatch",
-        ),
+        .replaceAll('"@nullstyle/capnp/rpc"', '"../../../rpc.ts"'),
     );
   }
   await run(["fmt", out]);
