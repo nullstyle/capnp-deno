@@ -9,8 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  check-release-version:
+    name: Verify release tag matches package version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Reject a tag that would mislabel the package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: deno run --allow-read=deno.json scripts/check_release_version.ts "$RELEASE_TAG"
+
   # The local workflow and every checkout resolve to this tag's exact commit.
   validate:
+    needs: check-release-version
     uses: ./.github/workflows/validation.yml
 
   github-release:
