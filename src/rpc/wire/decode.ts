@@ -418,7 +418,7 @@ export function decodeReleaseFrame(frame: Uint8Array): RpcReleaseRequest {
  * Decodes a Cap'n Proto RPC Return frame.
  *
  * @param frame - The raw frame bytes.
- * @returns The decoded return message (either results or exception).
+ * @returns The decoded results, exception, or canceled return message.
  * @throws {ProtocolError} If the frame is not a valid return message.
  */
 export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
@@ -441,6 +441,17 @@ export function decodeReturnFrame(frame: Uint8Array): RpcReturnMessage {
   const answerId = readU32InStruct(table, ret, RETURN_ANSWER_ID_BYTE_OFFSET);
   const tag = readU16InStruct(table, ret, RETURN_TAG_BYTE_OFFSET);
   const returnFlags = decodeReturnFlags(table, ret);
+
+  // Return.canceled is discriminant 2 in the Cap'n Proto RPC schema. A
+  // canceled local waiter may already be gone when this terminal reply arrives.
+  if (tag === 2) {
+    return {
+      kind: "canceled",
+      answerId,
+      reason: "rpc call canceled",
+      ...returnFlags,
+    };
+  }
 
   if (tag === RETURN_TAG_EXCEPTION) {
     const ex = decodeStructPointer(

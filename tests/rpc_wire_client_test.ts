@@ -20,6 +20,29 @@ import {
   deferred,
   withTimeout,
 } from "./test_utils.ts";
+import {
+  decodeStructPointer,
+  pointerWordIndex,
+  segmentsFromFrame,
+} from "../src/rpc/wire.ts";
+import { RETURN_TAG_BYTE_OFFSET } from "../src/rpc/gen/capnp/rpc_wire_constants.ts";
+
+function canceledReturn(answerId: number): Uint8Array {
+  const frame = encodeReturnResultsFrame({ answerId });
+  const segments = segmentsFromFrame(frame);
+  const message = decodeStructPointer(segments, {
+    segmentId: 0,
+    wordIndex: 0,
+  })!;
+  const response = decodeStructPointer(segments, pointerWordIndex(message, 0))!;
+  // Native C++ Return.canceled has discriminant 2 and no payload.
+  segments.views[response.segmentId].setUint16(
+    response.startWord * 8 + RETURN_TAG_BYTE_OFFSET,
+    2,
+    true,
+  );
+  return frame;
+}
 
 class MockTransport implements RpcTransport {
   #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
@@ -462,6 +485,55 @@ Deno.test("RpcWireClient sends early-cancel finish when a pending call aborts", 
   assertEquals(finish.requireEarlyCancellation, true);
 
   await client.close();
+});
+
+Deno.test("RpcWireClient absorbs native Return canceled without poisoning another pending call", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport, { interfaceId: 0x1234n });
+  const controller = new AbortController();
+  try {
+    const first = client.callRaw(
+      { capabilityIndex: 9 },
+      0,
+      EMPTY_STRUCT_MESSAGE,
+      { signal: controller.signal },
+    ).catch((error) => error);
+    await waitForSentFrames(transport, 1);
+    controller.abort();
+    assert(await first instanceof SessionError);
+    const second = client.callRaw(
+      { capabilityIndex: 9 },
+      1,
+      EMPTY_STRUCT_MESSAGE,
+    );
+    const result = second.then(() => null, (error) => error);
+    await waitForSentFrames(transport, 3);
+    await transport.emitInbound(canceledReturn(1));
+    await transport.emitInbound(encodeReturnResultsFrame({ answerId: 2 }));
+    assertEquals(await result, null);
+    assertEquals(client.stats.pendingReturns, 0);
+  } finally {
+    await client.close();
+  }
+});
+
+Deno.test("RpcWireClient rejects an unsolicited canceled Return only for its pending call", async () => {
+  const transport = new MockTransport();
+  const client = new RpcWireClient(transport, { interfaceId: 0x1234n });
+  try {
+    const pending = client.callRaw(
+      { capabilityIndex: 9 },
+      0,
+      EMPTY_STRUCT_MESSAGE,
+    ).catch((error) => error);
+    await waitForSentFrames(transport, 1);
+    await transport.emitInbound(canceledReturn(1));
+    const error = await pending;
+    assert(error instanceof ProtocolError && /canceled/.test(error.message));
+    assertEquals(client.stats.closed, false);
+  } finally {
+    await client.close();
+  }
 });
 
 Deno.test("RpcWireClient callRaw requires interfaceId when no default exists", async () => {

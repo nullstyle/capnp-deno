@@ -2546,3 +2546,125 @@ Deno.test("RpcServerBridge answer eviction ends holds without dropping wire refe
   );
   assertEquals(bridge.hasCapability(childIndex), false);
 });
+
+Deno.test("RpcServerBridge never emits host results after close at a completion boundary", async () => {
+  // Sweep adjacent microtasks: close can land before dispatch resolves, after
+  // the Return is built, or after the host consumed it.
+  for (let depth = 1; depth <= 6; depth++) {
+    let closed = false;
+    let used = false;
+    let postCloseEmissions = 0;
+    const bridge = new RpcServerBridge();
+    bridge.setAsyncHostCallDispatch(true);
+    bridge.exportCapability({
+      interfaceId: 1n,
+      dispatch() {
+        const closeLater = (steps: number): void => {
+          if (steps === 0) {
+            closed = true;
+            bridge.close();
+          } else queueMicrotask(() => closeLater(steps - 1));
+        };
+        closeLater(depth);
+        return encodeSingleU32StructMessage(42);
+      },
+    }, { capabilityIndex: 0 });
+    const emitted = () => {
+      if (closed) postCloseEmissions++;
+    };
+    await bridge.pumpWasmHostCalls({
+      handle: 1,
+      abi: {
+        popHostCall() {
+          if (used) return null;
+          used = true;
+          return {
+            questionId: 1,
+            interfaceId: 1n,
+            methodId: 0,
+            frame: encodeCallRequestFrame({
+              questionId: 1,
+              targetImportedCap: 0,
+              interfaceId: 1n,
+              methodId: 0,
+            }),
+          };
+        },
+        respondHostCallReturnFrame: emitted,
+        respondHostCallResults: emitted,
+        respondHostCallException: emitted,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(
+      postCloseEmissions,
+      0,
+      `completion microtask boundary ${depth}`,
+    );
+    bridge.close();
+  }
+});
+
+Deno.test("RpcServerBridge preserves retained parameter ownership when a handler throws", async () => {
+  const bridge = new RpcServerBridge();
+  bridge.exportCapability({
+    interfaceId: 1n,
+    dispatch(_method, _params, ctx) {
+      ctx.retainParamCaps!();
+      throw new Error("failed after retaining input");
+    },
+  }, { capabilityIndex: 0 });
+  try {
+    const response = await bridge.handleFrame(
+      encodeCallRequestFrame({
+        questionId: 1,
+        targetImportedCap: 0,
+        interfaceId: 1n,
+        methodId: 0,
+        paramsCapTable: [{ tag: 1, id: 77 }],
+      }),
+    );
+    assert(response !== null);
+    const result = decodeReturnFrame(response);
+    assertEquals(result.kind, "exception");
+    assertEquals(result.releaseParamCaps, false);
+  } finally {
+    bridge.close();
+  }
+});
+
+Deno.test("RpcServerBridge preserves explicit parameter ownership when response middleware throws", async () => {
+  for (const releaseParamCaps of [false, true]) {
+    const bridge = new RpcServerBridge({
+      middleware: [{
+        onResponse() {
+          throw new Error("response middleware failed");
+        },
+      }],
+    });
+    bridge.exportCapability({
+      interfaceId: 1n,
+      dispatch(_method, _params, ctx) {
+        ctx.retainParamCaps!();
+        return { content: encodeSingleU32StructMessage(42), releaseParamCaps };
+      },
+    }, { capabilityIndex: 0 });
+    try {
+      const response = await bridge.handleFrame(
+        encodeCallRequestFrame({
+          questionId: 1,
+          targetImportedCap: 0,
+          interfaceId: 1n,
+          methodId: 0,
+          paramsCapTable: [{ tag: 1, id: 77 }],
+        }),
+      );
+      assert(response !== null);
+      const result = decodeReturnFrame(response);
+      assertEquals(result.kind, "exception");
+      assertEquals(result.releaseParamCaps, releaseParamCaps);
+    } finally {
+      bridge.close();
+    }
+  }
+});

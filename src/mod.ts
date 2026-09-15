@@ -114,6 +114,7 @@ export {
   type RpcPromisedAnswerOp,
   type RpcPromisedAnswerTarget,
   type RpcReleaseRequest,
+  type RpcReturnCanceled,
   type RpcReturnException,
   type RpcReturnExceptionFrameRequest,
   type RpcReturnMessage,

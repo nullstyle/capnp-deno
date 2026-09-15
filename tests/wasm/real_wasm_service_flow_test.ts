@@ -1,6 +1,8 @@
 import {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  decodeReleaseFrame,
   decodeReturnFrame,
+  decodeRpcMessageTag,
   encodeBootstrapRequestFrame,
   encodeCallRequestFrame,
   encodeFinishFrame,
@@ -9,6 +11,8 @@ import {
   instantiatePeer,
   ProtocolError,
   RPC_CALL_TARGET_TAG_PROMISED_ANSWER,
+  RPC_MESSAGE_TAG_RELEASE,
+  RPC_MESSAGE_TAG_RETURN,
   RpcServerBridge,
   RpcServerRuntime,
   type RpcTransport,
@@ -470,6 +474,100 @@ Deno.test("real wasm service flow: guarded soak/fault loop", async () => {
     assertEquals(runtime.totalHostCallsPumped, 120);
   });
 });
+
+for (const throwsAfterAbort of [false, true]) {
+  Deno.test(`real wasm service flow: canceled pending host call sends a terminal Return after ${throwsAfterAbort ? "throw" : "return"}`, async () => {
+    const { peer } = await instantiatePeer(wasmPath);
+    let receive!: (frame: Uint8Array) => void | Promise<void>;
+    const started = deferred<void>();
+    const stopped = deferred<void>();
+    const terminal = deferred<Uint8Array>();
+    let terminalCount = 0;
+    let releasedReferences = 0;
+    const transport: RpcTransport = {
+      start(callback) {
+        receive = callback;
+      },
+      send(frame) {
+        const tag = decodeRpcMessageTag(frame);
+        if (tag === RPC_MESSAGE_TAG_RELEASE) {
+          const release = decodeReleaseFrame(frame);
+          assertEquals(release.id, 77);
+          releasedReferences += release.referenceCount;
+        }
+        if (
+          tag === RPC_MESSAGE_TAG_RETURN &&
+          decodeReturnFrame(frame).answerId === 1
+        ) {
+          terminalCount++;
+          terminal.resolve(frame);
+        }
+      },
+      close() {},
+    };
+    const bridge = new RpcServerBridge();
+    bridge.exportCapability({
+      interfaceId: INTERFACE_ID,
+      async dispatch(_method, _params, ctx) {
+        ctx.retainParamCaps!();
+        ctx.signal.addEventListener("abort", () => stopped.resolve(), {
+          once: true,
+        });
+        started.resolve();
+        await stopped.promise;
+        await ctx.outboundClient!.release!({
+          capabilityIndex: ctx.paramsCapTable[0].id,
+        }, 1);
+        if (throwsAfterAbort) {
+          throw new Error("handler aborted after releasing input");
+        }
+        return encodeSingleU32StructMessage(99);
+      },
+    }, { capabilityIndex: 0 });
+    const runtime = new RpcServerRuntime(peer, transport, bridge);
+    try {
+      await runtime.start();
+      await receive(encodeBootstrapRequestFrame({ questionId: 0 }));
+      await receive(encodeCallRequestFrame({
+        questionId: 1,
+        interfaceId: INTERFACE_ID,
+        methodId: 0,
+        targetImportedCap: 0,
+        paramsContent: encodeU32AndCapPointerStructMessage(0, 0),
+        paramsCapTable: [{ tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED, id: 77 }],
+      }));
+      await withTimeout(started.promise, 500, "pending host call started");
+      assertEquals(terminalCount, 0);
+      await receive(
+        encodeFinishFrame({ questionId: 1, requireEarlyCancellation: false }),
+      );
+      await withTimeout(stopped.promise, 500, "pending host call stopped");
+      const response = decodeReturnFrame(
+        await withTimeout(
+          terminal.promise,
+          500,
+          "canceled host call terminal Return",
+        ),
+      );
+      assertEquals(response.kind, "exception");
+      assertEquals(response.releaseParamCaps, false);
+      assertEquals(response.noFinishNeeded, true);
+      await runtime.flush();
+      assertEquals(terminalCount, 1);
+      assertEquals(
+        releasedReferences,
+        1,
+        "retained input capability is released exactly once",
+      );
+      assertEquals(bridge.stats.retainedInputFrameBytes, 0);
+      await receive(encodeFinishFrame({ questionId: 0 }));
+      assertEquals(bridge.answerTableSize, 0);
+    } finally {
+      stopped.resolve();
+      await runtime.close();
+    }
+  });
+}
 
 Deno.test("real wasm service flow: pipelined bootstrap calls preserve answer holds through Release and Finish", async () => {
   const { peer } = await instantiatePeer(wasmPath);

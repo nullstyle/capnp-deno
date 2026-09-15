@@ -9,7 +9,7 @@ import {
   type RpcObservabilityEvent,
   RpcServerBridge,
 } from "../../src/advanced.ts";
-import { assert, assertEquals, deferred } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;
 
@@ -344,6 +344,71 @@ Deno.test("server core: early finish emits cancellation observability event", as
     cancelEvent.attributes?.["rpc.require_early_cancellation"],
     true,
   );
+});
+
+Deno.test("server core: modern Finish cancels a delivered pending call without the legacy workaround flag", async () => {
+  const bridge = new RpcServerBridge();
+  const started = deferred<AbortSignal>();
+  const stopped = deferred<void>();
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) => {
+      started.resolve(ctx.signal);
+      ctx.signal.addEventListener("abort", () => stopped.resolve(), {
+        once: true,
+      });
+      return stopped.promise.then(() => encodeSingleU32StructMessage(9));
+    },
+  }, { capabilityIndex: 0 });
+  const result = bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 12,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  }));
+  const signal = await started.promise;
+  try {
+    await bridge.handleFrame(encodeFinishFrame({
+      questionId: 12,
+      requireEarlyCancellation: false,
+    }));
+    assertEquals(
+      signal.aborted,
+      true,
+      "modern native peers send the workaround flag as false",
+    );
+    assertEquals(
+      await withTimeout(result, 500, "canceled handler cleanup"),
+      null,
+    );
+    assertEquals(bridge.answerTableSize, 0);
+  } finally {
+    stopped.resolve();
+    await result;
+    bridge.close();
+  }
+});
+
+Deno.test("server core: normal Finish does not abort a completed handler", async () => {
+  const bridge = new RpcServerBridge();
+  let signal: AbortSignal | undefined;
+  bridge.exportCapability({
+    interfaceId: 0x1234n,
+    dispatch: (_methodId, _params, ctx) => {
+      signal = ctx.signal;
+      return encodeSingleU32StructMessage(9);
+    },
+  }, { capabilityIndex: 0 });
+  await bridge.handleFrame(encodeCallRequestFrame({
+    questionId: 13,
+    interfaceId: 0x1234n,
+    methodId: 0,
+    targetImportedCap: 0,
+  }));
+  await bridge.handleFrame(encodeFinishFrame({ questionId: 13 }));
+  assertEquals(signal?.aborted, false);
+  assertEquals(bridge.answerTableSize, 0);
+  bridge.close();
 });
 
 // ---------------------------------------------------------------------------

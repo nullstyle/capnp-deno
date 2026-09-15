@@ -102,6 +102,7 @@ export type {
   RpcPromisedAnswerOp,
   RpcPromisedAnswerTarget,
   RpcReleaseRequest,
+  RpcReturnCanceled,
   RpcReturnException,
   RpcReturnExceptionFrameRequest,
   RpcReturnMessage,

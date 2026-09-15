@@ -478,7 +478,7 @@ interface RegisteredDispatch {
 
 type RpcDispatchOutcome =
   | { kind: "results"; response: RpcCallResponse }
-  | { kind: "exception"; reason: string };
+  | { kind: "exception"; reason: string; releaseParamCaps?: boolean };
 
 /**
  * An entry in the answer table, tracking an in-flight or completed question.
@@ -1028,9 +1028,12 @@ export class RpcServerBridge {
       if (entry) {
         entry.finished = true;
         if (
-          finish.requireEarlyCancellation &&
+          entry.outcome === undefined &&
           !entry.abortController.signal.aborted
         ) {
+          // Both modern and legacy Finish messages retire pending calls. The
+          // wire flag only requests an old pre-delivery compatibility workaround;
+          // it does not opt a delivered handler in or out of cancellation.
           entry.abortController.abort(
             new SessionError("rpc call canceled by finish", {
               metadata: {
@@ -1044,7 +1047,7 @@ export class RpcServerBridge {
             name: "rpc.server.call_cancel",
             attributes: {
               "rpc.question_id": finish.questionId,
-              "rpc.require_early_cancellation": true,
+              "rpc.require_early_cancellation": finish.requireEarlyCancellation,
             },
           });
         }
@@ -1146,7 +1149,7 @@ export class RpcServerBridge {
     if ("errorFrame" in registration) {
       const failure = decodeReturnFrame(registration.errorFrame);
       throw new ProtocolError(
-        failure.kind === "exception"
+        failure.kind !== "results"
           ? failure.reason
           : "cannot retain bootstrap answer",
       );
@@ -1163,7 +1166,7 @@ export class RpcServerBridge {
     resolveEntry: (outcome: RpcDispatchOutcome) => void,
     response: RpcReturnMessage,
   ): void {
-    const outcome: RpcDispatchOutcome = response.kind === "exception"
+    const outcome: RpcDispatchOutcome = response.kind !== "results"
       ? { kind: "exception", reason: response.reason }
       : {
         kind: "results",
@@ -1331,6 +1334,7 @@ export class RpcServerBridge {
         return encodeReturnExceptionFrame({
           answerId: call.questionId,
           reason: outcome.reason,
+          releaseParamCaps: outcome.releaseParamCaps,
         });
       }
 
@@ -1581,8 +1585,27 @@ export class RpcServerBridge {
 
     const respond = async (): Promise<void> => {
       const responseFrame = await completion;
+      if (this.#closed) return;
       if (responseFrame) {
         this.#respondWasmHostCallFrame(wasmHost, call, responseFrame);
+      } else if (registration.entry.finished) {
+        // Finish releases the answer, but every accepted Call still needs a
+        // terminal Return so a native caller can retire its canceled question.
+        // Discard application results/caps while preserving explicit ownership
+        // of retained input capabilities. No further Finish is needed.
+        const outcome = registration.entry.outcome;
+        this.#respondWasmHostCallFrame(
+          wasmHost,
+          call,
+          encodeReturnExceptionFrame({
+            answerId: call.questionId,
+            reason: "rpc call canceled",
+            releaseParamCaps: outcome?.kind === "results"
+              ? outcome.response.releaseParamCaps
+              : outcome?.releaseParamCaps,
+            noFinishNeeded: true,
+          }),
+        );
       }
     };
 
@@ -1688,7 +1711,7 @@ export class RpcServerBridge {
     }
 
     const response = decodeReturnFrame(responseFrame);
-    if (response.kind === "exception") {
+    if (response.kind !== "results") {
       wasmHost.abi.respondHostCallException(
         wasmHost.handle,
         call.questionId,
@@ -1888,6 +1911,7 @@ export class RpcServerBridge {
     };
 
     let retainParamCapsRequested = false;
+    let releaseParamCaps: boolean | undefined;
     const ctx: RpcCallContext = {
       target: call.target,
       capability: { capabilityIndex },
@@ -1910,6 +1934,7 @@ export class RpcServerBridge {
         }),
       retainParamCaps: () => {
         retainParamCapsRequested = true;
+        releaseParamCaps = false;
       },
     };
 
@@ -1947,10 +1972,15 @@ export class RpcServerBridge {
         response = { ...response, releaseParamCaps: false };
       }
 
+      // Carry the last ownership decision through failures as well: neither a
+      // handler exception nor a middleware exception spends a retained cap.
+      releaseParamCaps = response.releaseParamCaps;
+
       // Run onResponse middleware chain.
       for (const mw of this.#middleware) {
         if (mw.onResponse) {
           response = await mw.onResponse(response, mwCtx);
+          releaseParamCaps = response.releaseParamCaps;
         }
       }
 
@@ -1998,7 +2028,7 @@ export class RpcServerBridge {
         error: annotated,
       });
       const reason = annotated.message;
-      return { kind: "exception", reason };
+      return { kind: "exception", reason, releaseParamCaps };
     }
   }
 }

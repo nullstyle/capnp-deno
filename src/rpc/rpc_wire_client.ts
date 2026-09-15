@@ -27,6 +27,7 @@ import {
   type RpcServerDispatch,
 } from "./server/bridge.ts";
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   decodeReturnFrame,
   decodeRpcMessageTag,
   encodeBootstrapRequestFrame,
@@ -39,6 +40,7 @@ import {
   RPC_MESSAGE_TAG_FINISH,
   RPC_MESSAGE_TAG_RELEASE,
   RPC_MESSAGE_TAG_RETURN,
+  type RpcCapDescriptor,
   type RpcReturnMessage,
 } from "./wire.ts";
 import type { RpcTransport } from "./transports/internal/transport.ts";
@@ -72,6 +74,13 @@ export interface RpcWireClientOptions {
    * omitted.
    */
   defaultTimeoutMs?: number;
+  /**
+   * Maximum cap-bearing questions awaiting a terminal Return, including
+   * canceled waiters. Defaults to 4096; must be a positive integer. At the
+   * limit, new param-cap calls and callback exports are rejected until a
+   * terminal Return frees a slot. Existing grants are never evicted.
+   */
+  maxOutstandingParamCapQuestions?: number;
   /**
    * Optional callback for inbound non-Return frames observed by this client.
    */
@@ -114,6 +123,7 @@ export class RpcWireClient {
   readonly #interfaceId: bigint | undefined;
   #nextQuestionId: number;
   readonly #defaultTimeoutMs: number | undefined;
+  readonly #maxOutstandingParamCapQuestions: number;
   readonly #onUnexpectedFrame: RpcWireClientOptions["onUnexpectedFrame"];
   readonly #observability: RpcObservability | undefined;
 
@@ -134,6 +144,8 @@ export class RpcWireClient {
    * are removed when the question is finished (or the client closes).
    */
   #questionsWithResultCaps = new Set<number>();
+  // Wire grants outlive canceled waiters until a terminal Return or close.
+  #questionParamCapGrants = new Map<number, Map<number, number>>();
 
   constructor(
     transport: RpcTransport,
@@ -143,6 +155,16 @@ export class RpcWireClient {
     this.#interfaceId = options.interfaceId;
     this.#nextQuestionId = options.nextQuestionId ?? 1;
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
+    this.#maxOutstandingParamCapQuestions =
+      options.maxOutstandingParamCapQuestions ?? 4096;
+    if (
+      !Number.isSafeInteger(this.#maxOutstandingParamCapQuestions) ||
+      this.#maxOutstandingParamCapQuestions <= 0
+    ) {
+      throw new SessionError(
+        "maxOutstandingParamCapQuestions must be a positive safe integer",
+      );
+    }
     this.#onUnexpectedFrame = options.onUnexpectedFrame;
     this.#observability = options.observability;
 
@@ -235,7 +257,7 @@ export class RpcWireClient {
       encodeBootstrapRequestFrame({ questionId }),
       options,
     );
-    if (response.kind === "exception") {
+    if (response.kind !== "results") {
       throw new ProtocolError(`rpc bootstrap failed: ${response.reason}`, {
         metadata: {
           phase: "bootstrap",
@@ -274,6 +296,8 @@ export class RpcWireClient {
    *
    * This adapter intentionally does not auto-finish calls. Generated stubs
    * handle finish semantics by invoking `finish()` when available.
+   * Parameter capability grants settle on the peer's terminal Return, even
+   * after a timeout or abort. A retaining peer releases them explicitly.
    */
   async callRaw(
     capability: CapabilityPointer,
@@ -290,6 +314,14 @@ export class RpcWireClient {
       );
     }
 
+    if (
+      options.paramsCapTable?.some((entry) =>
+        entry.tag === CAP_DESCRIPTOR_TAG_SENDER_HOSTED
+      )
+    ) {
+      this.#checkParamCapAdmission();
+    }
+
     const questionId = this.#allocQuestionId();
     options.onQuestionId?.(questionId);
 
@@ -298,19 +330,21 @@ export class RpcWireClient {
       importedCap: capability.capabilityIndex,
     };
 
+    const frame = encodeCallRequestFrame({
+      questionId,
+      interfaceId,
+      methodId,
+      target,
+      paramsContent: params,
+      paramsCapTable: options.paramsCapTable,
+    });
+    this.#recordParamCapGrants(questionId, options.paramsCapTable);
     const response = await this.#requestReturn(
       questionId,
-      encodeCallRequestFrame({
-        questionId,
-        interfaceId,
-        methodId,
-        target,
-        paramsContent: params,
-        paramsCapTable: options.paramsCapTable,
-      }),
+      frame,
       options,
     );
-    if (response.kind === "exception") {
+    if (response.kind !== "results") {
       throw new ProtocolError(`rpc call failed: ${response.reason}`, {
         metadata: {
           phase: "client_call",
@@ -401,6 +435,7 @@ export class RpcWireClient {
     if (this.#closed) {
       throw new SessionError("rpc wire client is closed");
     }
+    this.#checkParamCapAdmission();
     if (!this.#localBridge) {
       this.#localBridge = new RpcServerBridge({
         observability: this.#observability,
@@ -433,6 +468,7 @@ export class RpcWireClient {
     this.#unsubscribeClose = undefined;
     this.#rejectAllPending(new SessionError("rpc wire client is closed"));
     this.#questionsWithResultCaps.clear();
+    this.#questionParamCapGrants.clear();
     this.#localBridge?.close();
     this.#localBridge = null;
   }
@@ -510,6 +546,9 @@ export class RpcWireClient {
       return;
     }
 
+    // An aborted waiter is gone, but its transmitted param grants still
+    // belong to this question. Settle before looking up the live waiter.
+    this.#settleParamCapGrants(decoded.answerId, decoded.releaseParamCaps);
     const waiter = this.#pendingReturns.get(decoded.answerId);
     if (!waiter) return;
     if (
@@ -521,6 +560,53 @@ export class RpcWireClient {
       this.#questionsWithResultCaps.add(decoded.answerId);
     }
     this.#settleWaiter(decoded.answerId, waiter, decoded);
+  }
+
+  #recordParamCapGrants(
+    questionId: number,
+    capTable: RpcCapDescriptor[] | undefined,
+  ): void {
+    let grants: Map<number, number> | undefined;
+    for (const descriptor of capTable ?? []) {
+      if (descriptor.tag !== CAP_DESCRIPTOR_TAG_SENDER_HOSTED) continue;
+      grants ??= new Map<number, number>();
+      grants.set(descriptor.id, (grants.get(descriptor.id) ?? 0) + 1);
+    }
+    if (grants) this.#questionParamCapGrants.set(questionId, grants);
+  }
+
+  #checkParamCapAdmission(): void {
+    if (
+      this.#questionParamCapGrants.size >= this.#maxOutstandingParamCapQuestions
+    ) {
+      throw new SessionError(
+        `outstanding param-cap question limit of ${this.#maxOutstandingParamCapQuestions} reached`,
+      );
+    }
+  }
+
+  #settleParamCapGrants(questionId: number, release: boolean): void {
+    const grants = this.#questionParamCapGrants.get(questionId);
+    // Retire bookkeeping on either terminal flag so replays cannot spend
+    // another grant. releaseParamCaps=false leaves the peer's explicit
+    // Release path solely responsible for dropping the references.
+    this.#questionParamCapGrants.delete(questionId);
+    if (!release || !grants || !this.#localBridge) return;
+    for (const [capabilityIndex, referenceCount] of grants) {
+      try {
+        this.#localBridge.releaseCapability(capabilityIndex, referenceCount);
+      } catch (error) {
+        emitObservabilityEvent(this.#observability, {
+          name: "rpc.wire_client.param_cap_settle_error",
+          error,
+          attributes: {
+            "rpc.question_id": questionId,
+            "rpc.capability_id": capabilityIndex,
+            "rpc.reference_count": referenceCount,
+          },
+        });
+      }
+    }
   }
 
   async #ensureReady(): Promise<void> {
@@ -550,6 +636,14 @@ export class RpcWireClient {
         `questionId must be within 1..4294967295, got ${String(questionId)}`,
       );
     }
+    if (
+      this.#pendingReturns.has(questionId) ||
+      this.#questionParamCapGrants.has(questionId)
+    ) {
+      throw new SessionError(
+        `questionId ${questionId} is still awaiting a terminal Return`,
+      );
+    }
     this.#nextQuestionId = questionId + 1;
     return questionId;
   }
@@ -559,7 +653,10 @@ export class RpcWireClient {
     frame: Uint8Array,
     options: RpcClientCallOptions,
   ): Promise<RpcReturnMessage> {
-    if (this.#closed) throw new SessionError("rpc wire client is closed");
+    if (this.#closed) {
+      this.#questionParamCapGrants.delete(questionId);
+      throw new SessionError("rpc wire client is closed");
+    }
     const wait = this.#waitForReturn(questionId, options);
     // Cancellation can reject before send completes. Keep the rejection
     // handled while preserving Finish for a successfully written request.
@@ -571,10 +668,12 @@ export class RpcWireClient {
       );
     });
     let frameSent = false;
+    let handoffStarted = false;
     try {
       await Promise.race([
         Promise.resolve().then(() => {
           if (this.#closed) throw new SessionError("rpc wire client is closed");
+          handoffStarted = true;
           return this.transport.send(frame);
         }),
         // EOF must reject even while transport write cleanup lags. Ordinary
@@ -583,6 +682,9 @@ export class RpcWireClient {
       ]);
       frameSent = true;
     } catch (error) {
+      // A rejected write may already have delivered the Call. Once handed
+      // to the transport, its grants need a terminal Return or client close.
+      if (!handoffStarted) this.#questionParamCapGrants.delete(questionId);
       const pending = this.#pendingReturns.get(questionId);
       if (pending) {
         this.#settleWaiter(questionId, pending, error);

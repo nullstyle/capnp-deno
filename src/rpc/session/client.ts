@@ -166,8 +166,9 @@ export interface RpcFinishOptions {
    */
   releaseResultCaps?: boolean;
   /**
-   * Whether the server should cancel the call if it has not yet started
-   * processing it. Defaults to `false` when not specified.
+   * Legacy wire workaround: `true` asks the peer to defer cancellation until
+   * the call has been delivered. Modern peers use `false`. Either value permits
+   * cancellation of a pending delivered call. Defaults to `false`.
    */
   requireEarlyCancellation?: boolean;
 }
@@ -388,6 +389,13 @@ export interface SessionRpcClientTransportOptions {
    */
   defaultTimeoutMs?: number;
   /**
+   * Maximum cap-bearing questions awaiting a terminal Return, including
+   * canceled waiters. Defaults to 4096; must be a positive integer. At the
+   * limit, new param-cap calls and callback exports are rejected until a
+   * terminal Return frees a slot. Existing grants are never evicted.
+   */
+  maxOutstandingParamCapQuestions?: number;
+  /**
    * Optional array of middleware interceptors. Middleware hooks are executed
    * in array order for `onCall`, and in array order for `onResponse` and
    * `onError`. All hooks run for every call/response/error even if an
@@ -413,6 +421,16 @@ export interface SessionRpcClientTransportCreateOptions
   runtimeModule?: RpcRuntimeModuleOptions;
   /** Whether to start the internal session before returning. Defaults to `false`. */
   startSession?: boolean;
+}
+
+function validateParamCapQuestionLimit(value: number | undefined): number {
+  const limit = value ?? 4096;
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new SessionError(
+      "maxOutstandingParamCapQuestions must be a positive safe integer",
+    );
+  }
+  return limit;
 }
 
 /**
@@ -643,6 +661,7 @@ export class SessionRpcClientTransport {
   #nextQuestionId: number;
   #autoStart: boolean;
   #defaultTimeoutMs: number | undefined;
+  #maxOutstandingParamCapQuestions: number;
   #middleware: RpcClientMiddleware[];
   #observability: RpcObservability | undefined;
   #opChain: Promise<void> = Promise.resolve();
@@ -666,6 +685,9 @@ export class SessionRpcClientTransport {
     options: SessionRpcClientTransportCreateOptions,
   ): Promise<SessionRpcClientTransport> {
     const { session, runtimeModule, startSession, ...clientOptions } = options;
+    validateParamCapQuestionLimit(
+      clientOptions.maxOutstandingParamCapQuestions,
+    );
     const rpcSession = await RpcSession.create(transport, {
       ...(session ?? {}),
       runtimeModule,
@@ -687,6 +709,9 @@ export class SessionRpcClientTransport {
     this.#nextQuestionId = options.nextQuestionId ?? 1;
     this.#autoStart = options.autoStart ?? true;
     this.#defaultTimeoutMs = options.defaultTimeoutMs;
+    this.#maxOutstandingParamCapQuestions = validateParamCapQuestionLimit(
+      options.maxOutstandingParamCapQuestions,
+    );
     this.#middleware = options.middleware ?? [];
     this.#observability = options.observability;
   }
@@ -790,7 +815,7 @@ export class SessionRpcClientTransport {
       options.onQuestionId?.(questionId);
       const frame = encodeBootstrapRequestFrame({ questionId });
       const message = await this.#request(questionId, frame, options);
-      if (message.kind === "exception") {
+      if (message.kind !== "results") {
         throw new ProtocolError(`rpc bootstrap failed: ${message.reason}`);
       }
 
@@ -853,6 +878,8 @@ export class SessionRpcClientTransport {
    * If you set `autoFinish: false`, you take responsibility for calling
    * {@link finish} yourself. Failing to do so will leak the server's answer
    * table entry for this question indefinitely, including timeout/abort paths.
+   * Parameter capability grants remain tracked after timeout or abort until
+   * the peer's terminal Return settles them, or this client closes.
    *
    * @param capability - The target capability obtained from {@link bootstrap} or a cap table.
    * @param methodId - The zero-based method index within the interface.
@@ -871,6 +898,7 @@ export class SessionRpcClientTransport {
     options: RpcClientCallOptions = {},
   ): Promise<RpcClientCallResult> {
     return await this.#enqueue(async () => {
+      this.#checkParamCapCallAdmission(options.paramsCapTable);
       const questionId = this.#allocQuestionId();
       options.onQuestionId?.(questionId);
       const target = options.target ?? {
@@ -976,6 +1004,7 @@ export class SessionRpcClientTransport {
     options: RpcClientCallOptions = {},
   ): Promise<{ pipeline: RpcPipeline; result: Promise<RpcClientCallResult> }> {
     return await this.#enqueue(async () => {
+      this.#checkParamCapCallAdmission(options.paramsCapTable);
       const questionId = this.#allocQuestionId();
       options.onQuestionId?.(questionId);
       const target = options.target ?? {
@@ -1010,12 +1039,15 @@ export class SessionRpcClientTransport {
 
       // Send the call frame but do NOT wait for the response yet.
       this.#markReturnExpected(questionId);
+      let handoffStarted = false;
       try {
         await this.#ensureStarted();
+        handoffStarted = true;
         await this.transport.emitInbound(frame);
         await this.session.flush();
       } catch (error) {
         this.#abandonExpectedReturn(questionId);
+        if (!handoffStarted) this.#questionParamCapGrants.delete(questionId);
         throw error;
       }
 
@@ -1119,6 +1151,7 @@ export class SessionRpcClientTransport {
     if (this.#closed || this.session.closed) {
       throw new SessionError("rpc client transport is closed");
     }
+    this.#checkParamCapAdmission();
     if (!this.session.peer.abi.capabilities.hasHostCallBridge) {
       throw new SessionError(
         "local capability export requires WASM host-call bridge support",
@@ -1220,6 +1253,18 @@ export class SessionRpcClientTransport {
 
   #allocQuestionId(): number {
     const next = this.#nextQuestionId;
+    if (!Number.isInteger(next) || next <= 0 || next > 0xffff_ffff) {
+      throw new SessionError(
+        `questionId must be within 1..4294967295, got ${String(next)}`,
+      );
+    }
+    if (
+      this.#expectedReturns.has(next) || this.#questionParamCapGrants.has(next)
+    ) {
+      throw new SessionError(
+        `questionId ${next} is still awaiting a terminal Return`,
+      );
+    }
     this.#nextQuestionId += 1;
     return next;
   }
@@ -1237,14 +1282,19 @@ export class SessionRpcClientTransport {
   ): Promise<RpcReturnMessage> {
     this.#markReturnExpected(questionId);
     let frameSent = false;
+    let handoffStarted = false;
     try {
       await this.#ensureStarted();
+      handoffStarted = true;
       await this.transport.emitInbound(frame);
       frameSent = true;
       await this.session.flush();
       return await this.#awaitReturn(questionId, options);
     } catch (error) {
       this.#abandonExpectedReturn(questionId);
+      // emitInbound can reject after delivering the Call. Retain its grant
+      // accounting unless startup failed before the transport handoff.
+      if (!handoffStarted) this.#questionParamCapGrants.delete(questionId);
       if (frameSent && (options.autoFinish ?? true)) {
         await this.#tryFinishAfterWaitFailure(questionId, options.finish);
       }
@@ -1436,10 +1486,11 @@ export class SessionRpcClientTransport {
   #markReturnObserved(questionId: number): void {
     this.#expectedReturns.delete(questionId);
     this.#queuedReturns.delete(questionId);
-    this.#questionParamCapGrants.delete(questionId);
   }
 
   #abandonExpectedReturn(questionId: number): void {
+    // Stop delivering the result while preserving the transmitted grants:
+    // a canceled call can still return releaseParamCaps=true later.
     this.#markReturnObserved(questionId);
   }
 
@@ -1467,6 +1518,24 @@ export class SessionRpcClientTransport {
     }
     if (grants) {
       this.#questionParamCapGrants.set(questionId, grants);
+    }
+  }
+
+  #checkParamCapCallAdmission(capTable: RpcCapDescriptor[] | undefined): void {
+    if (
+      capTable?.some((entry) => entry.tag === CAP_DESCRIPTOR_TAG_SENDER_HOSTED)
+    ) {
+      this.#checkParamCapAdmission();
+    }
+  }
+
+  #checkParamCapAdmission(): void {
+    if (
+      this.#questionParamCapGrants.size >= this.#maxOutstandingParamCapQuestions
+    ) {
+      throw new SessionError(
+        `outstanding param-cap question limit of ${this.#maxOutstandingParamCapQuestions} reached`,
+      );
     }
   }
 
@@ -1607,13 +1676,19 @@ export class SessionRpcClientTransport {
         continue;
       }
 
-      if (!this.#expectedReturns.has(decoded.answerId)) {
-        // Ignore stale/forged returns for unknown or already-finished questions.
+      const expected = this.#expectedReturns.has(decoded.answerId);
+      if (!expected && !this.#questionParamCapGrants.has(decoded.answerId)) {
+        // Ignore stale/forged returns with neither a waiter nor wire grants.
         continue;
       }
       if (decoded.releaseParamCaps) {
         this.#settleParamCapGrants(decoded.answerId);
+      } else {
+        // A retaining peer owns the explicit Release path; even a duplicate
+        // terminal with different flags must not spend these grants twice.
+        this.#questionParamCapGrants.delete(decoded.answerId);
       }
+      if (!expected) continue;
       if (!this.#resolvePendingReturn(decoded)) {
         this.#queueReturn(decoded);
       }

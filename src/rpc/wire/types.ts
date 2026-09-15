@@ -44,7 +44,7 @@ export interface RpcFinishRequest {
   questionId: number;
   /** Whether to release capabilities in the result. */
   releaseResultCaps: boolean;
-  /** Whether early cancellation is required. */
+  /** Legacy workaround requesting cancellation be deferred until delivery. */
   requireEarlyCancellation: boolean;
 }
 
@@ -117,8 +117,17 @@ export interface RpcReturnException extends RpcReturnBase {
   reason: string;
 }
 
-/** Discriminated union of Return message types: results or exception. */
-export type RpcReturnMessage = RpcReturnResults | RpcReturnException;
+/** A terminal response for a call the peer canceled. */
+export interface RpcReturnCanceled extends RpcReturnBase {
+  kind: "canceled";
+  reason: "rpc call canceled";
+}
+
+/** Discriminated union of results, exception, or terminal canceled Returns. */
+export type RpcReturnMessage =
+  | RpcReturnResults
+  | RpcReturnException
+  | RpcReturnCanceled;
 
 /** Parameters for encoding a Return results frame via {@link encodeReturnResultsFrame}. */
 export interface RpcReturnResultsFrameRequest {

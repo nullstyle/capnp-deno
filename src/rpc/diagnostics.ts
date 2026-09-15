@@ -89,7 +89,7 @@ export interface RpcDebugEvent {
   /** Number of capability descriptors attached to params/results. */
   readonly capTableCount?: number;
   /** Return message kind. */
-  readonly returnKind?: "results" | "exception";
+  readonly returnKind?: "results" | "exception" | "canceled";
   /** Finish release-result-capability flag. */
   readonly releaseResultCaps?: boolean;
   /** Finish early-cancellation flag. */
@@ -294,7 +294,7 @@ function summarizeFrame(
       }
       case RPC_MESSAGE_TAG_RETURN: {
         const ret = decodeReturnFrame(frame);
-        if (ret.kind === "exception") {
+        if (ret.kind !== "results") {
           return {
             ...base,
             answerId: ret.answerId,

@@ -118,6 +118,37 @@ If `onError` is not provided, the first failed or canceled in-flight call is
 reported by `send()`, `flush()`, or `cancel()` after cleanup. If `onError` is
 provided, the sender treats handled call failures as drained progress.
 
+### Outstanding callback grants
+
+Aborting a client wait does not release callback capabilities already granted to
+the peer. Both `RpcWireClient` and `SessionRpcClientTransport` retain that
+question's capability accounting until its first terminal Return arrives,
+including a late result, exception, or cancellation. `releaseParamCaps: true`
+spends one reference per parameter cap-table entry; `false` leaves those
+references for explicit Release messages. Closing the client clears its grants.
+
+The client option `maxOutstandingParamCapQuestions` defaults to **4096** and
+must be a positive integer. It counts cap-bearing questions awaiting a terminal
+Return, including aborted waits. At the limit, new cap-bearing calls and new
+callback exports reject with `SessionError`; existing remote grants remain
+callable, and cap-free calls and control traffic continue. A terminal Return
+frees the question's slot even when it retains the callbacks.
+
+Configure the option on `new RpcWireClient(transport, options)`,
+`new SessionRpcClientTransport(session, harness, options)`, or
+`SessionRpcClientTransport.create(harness, options)`:
+
+```ts
+const client = new RpcWireClient(transport, {
+  maxOutstandingParamCapQuestions: 1024,
+});
+```
+
+This counts unfinished capability grants, separately from the sender's
+`maxInFlightBytes` parameter-buffer budget and the server's incoming-frame
+budget below. It does not limit total heap memory or expire remotely owned
+capabilities on a timer.
+
 ## Server input budget
 
 Configure `runtime.bridgeOptions.maxRetainedInputFrameBytes` on `serve()` or

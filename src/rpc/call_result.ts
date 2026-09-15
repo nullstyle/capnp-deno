@@ -22,7 +22,7 @@ export interface RpcCallResultData {
 export function requireRpcReturnResults(
   message: RpcReturnMessage,
 ): RpcReturnResults {
-  if (message.kind === "exception") {
+  if (message.kind !== "results") {
     throw new ProtocolError(`rpc call failed: ${message.reason}`);
   }
   return message;
