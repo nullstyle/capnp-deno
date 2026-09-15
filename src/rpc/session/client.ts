@@ -1074,6 +1074,23 @@ export class SessionRpcClientTransport {
   }
 
   /**
+   * Release a local export before any question owns its reference.
+   * @param capability - Locally exported capability.
+   * @param referenceCount - Number of local references to release.
+   * @returns Nothing; no remote Release frame is sent.
+   * @example
+   * ```ts
+   * client.releaseExportedCapability(unusedCallback);
+   * ```
+   */
+  releaseExportedCapability(
+    capability: CapabilityPointer,
+    referenceCount = 1,
+  ): void {
+    this.#localBridge?.releaseCapability(capability, referenceCount);
+  }
+
+  /**
    * Export a local server dispatch as a callback capability.
    *
    * Generated high-level clients use this hook when a method parameter is an
@@ -1136,6 +1153,7 @@ export class SessionRpcClientTransport {
     if (this.#closed) return;
     this.#closed = true;
     this.#responsePumpStopped = true;
+    this.#localBridge?.close();
     this.#localBridge = null;
     this.#rejectAllPendingReturns(
       new SessionError("rpc client transport is closed"),

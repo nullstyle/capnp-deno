@@ -248,6 +248,9 @@ function emitInterfaceCode(
     out.push(
       `        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(${resolved.params.descriptorConst}, ${paramsExpression});`,
     );
+    out.push(
+      "        if (options?.onEncodedParams) await options.onEncodedParams(encoded.content.byteLength);",
+    );
     out.push("        let questionId: number | undefined;");
     out.push(
       "        const callOptions: RpcCallOptions & { paramsCapTable?: PreambleCapDescriptor[] } = {",

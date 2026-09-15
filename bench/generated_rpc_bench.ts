@@ -5,10 +5,12 @@ import {
   PongParamsCodec,
 } from "../examples/ping/gen/schema_types.ts";
 import {
+  CounterSink,
   type CounterSink as CounterSinkClient,
   createCounterSinkAddStreamSender,
 } from "../examples/streaming/gen/schema_types.ts";
 import type { CapabilityPointer } from "../src/encoding.ts";
+import { EMPTY_STRUCT_MESSAGE } from "../src/rpc.ts";
 import type {
   RpcBootstrapClientTransport,
   RpcCallContext,
@@ -125,3 +127,35 @@ Deno.bench({
     await sender.flush();
   },
 });
+
+// Exercise the actual generated serializer and transport boundary. The
+// paired cases isolate byte-admission overhead from network/server latency.
+let streamQuestionId = 0;
+const encodedCounter = await CounterSink.bootstrapClient({
+  bootstrap: () => Promise.resolve({ capabilityIndex: 0 }),
+  call(_capability, _method, params, options) {
+    blackhole ^= params.byteLength;
+    options?.onQuestionId?.(++streamQuestionId);
+    return Promise.resolve(EMPTY_STRUCT_MESSAGE);
+  },
+  finish() {},
+});
+for (const bounded of [false, true]) {
+  Deno.bench({
+    name: `generated_rpc:encoded_stream_32_${
+      bounded ? "byte_bounded" : "count_only"
+    }`,
+    group: "encoded_stream_admission",
+    baseline: !bounded,
+    n: 1_000,
+    warmup: 80,
+    async fn() {
+      const sender = createCounterSinkAddStreamSender(encodedCounter, {
+        maxInFlight: 8,
+        ...(bounded ? { maxInFlightBytes: 8 * 24 } : {}),
+      });
+      for (const value of streamValues) await sender.send(value);
+      await sender.flush();
+    },
+  });
+}

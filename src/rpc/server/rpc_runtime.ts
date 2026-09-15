@@ -19,6 +19,13 @@ export interface RpcFinishOptions {
  * Shared RPC call options used by generated client stubs.
  */
 export interface RpcCallOptions {
+  /**
+   * Optional admission hook invoked by generated clients after serializing
+   * parameters once and before transferring the call to its transport. The
+   * length includes the parameter message's segment table, but excludes RPC
+   * envelope/capability metadata. Rejection prevents the call from being sent.
+   */
+  onEncodedParams?: (byteLength: number) => Promise<void>;
   signal?: AbortSignal;
   timeoutMs?: number;
   interfaceId?: bigint;
@@ -92,6 +99,14 @@ export interface RpcClientTransport {
     capability: CapabilityPointer,
     referenceCount?: number,
   ): Promise<void> | void;
+  /**
+   * Release a locally exported capability that was never transferred to a
+   * question. This does not send a Release frame to the remote peer.
+   */
+  releaseExportedCapability?(
+    capability: CapabilityPointer,
+    referenceCount?: number,
+  ): void;
   /**
    * Optional capability-export hook used by high-level generated adapters
    * when users pass local callback implementations as arguments.

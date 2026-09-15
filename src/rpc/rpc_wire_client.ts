@@ -375,6 +375,23 @@ export class RpcWireClient {
   }
 
   /**
+   * Release a local export before any question owns its reference.
+   * @param capability - Locally exported capability.
+   * @param referenceCount - Number of local references to release.
+   * @returns Nothing; no remote Release frame is sent.
+   * @example
+   * ```ts
+   * client.releaseExportedCapability(unusedCallback);
+   * ```
+   */
+  releaseExportedCapability(
+    capability: CapabilityPointer,
+    referenceCount = 1,
+  ): void {
+    this.#localBridge?.releaseCapability(capability, referenceCount);
+  }
+
+  /**
    * Export a local server dispatch so the remote peer can call it back.
    */
   exportCapability(
@@ -416,6 +433,7 @@ export class RpcWireClient {
     this.#unsubscribeClose = undefined;
     this.#rejectAllPending(new SessionError("rpc wire client is closed"));
     this.#questionsWithResultCaps.clear();
+    this.#localBridge?.close();
     this.#localBridge = null;
   }
 

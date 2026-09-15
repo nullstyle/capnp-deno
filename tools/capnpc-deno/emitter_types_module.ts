@@ -498,6 +498,7 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("  transport: RpcClientTransport,");
   out.push("  service: RpcServiceToken<TClient, TServer>,");
   out.push("  value: TServer | RpcStub<TClient>,");
+  out.push("  pendingExports?: CapabilityPointer[],");
   out.push("): CapabilityPointer {");
   out.push("  const existing = parseCapabilityPointer(value);");
   out.push("  if (existing) return existing;");
@@ -510,7 +511,12 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
     '    throw new SessionError("transport does not support exporting local capabilities", { metadata: { phase: "capability_resolve", serviceName: service.interfaceName, interfaceId: service.interfaceId } });',
   );
   out.push("  }");
-  out.push("  return service.registerServer(");
+  out.push("  if (pendingExports && !host.releaseExportedCapability) {");
+  out.push(
+    '    throw new SessionError("byte admission requires local capability export rollback");',
+  );
+  out.push("  }");
+  out.push("  const capability = service.registerServer(");
   out.push("    {");
   out.push("      exportCapability: (dispatch, options) =>");
   out.push("        exportCapability.call(host, dispatch, options),");
@@ -518,6 +524,8 @@ function emitCapabilityBridgeHelpers(out: string[]): void {
   out.push("    value as TServer,");
   out.push("    { referenceCount: 1 },");
   out.push("  );");
+  out.push("  pendingExports?.push(capability);");
+  out.push("  return capability;");
   out.push("}");
   out.push("");
   out.push(
@@ -1200,7 +1208,18 @@ function emitClientAdapter(
           return `params: ${method.params.typeName}, options?: RpcCallOptions`;
       }
     })();
+    const rollbackExports = method.isStreaming ||
+      (shape.paramKind === "single" && shape.paramFieldKind === "interface");
     out.push(`    ${methodName}: async (${argList}) => {`);
+    if (rollbackExports) {
+      out.push(
+        "      const pendingExports: CapabilityPointer[] | undefined = options?.onEncodedParams ? [] : undefined;",
+      );
+      out.push("      let questionOwned = false;");
+      out.push(
+        "      const callOptions = pendingExports ? { ...options, onQuestionId: (id: number): void => { questionOwned = true; options?.onQuestionId?.(id); } } : options;",
+      );
+    }
     out.push("      try {");
     out.push(
       `        const result = await ${methodAccess}(${
@@ -1208,8 +1227,9 @@ function emitClientAdapter(
           method,
           shape,
           ctx,
+          rollbackExports,
         )
-      }, options);`,
+      }, ${rollbackExports ? "callOptions" : "options"});`,
     );
     const resultEmit = emitClientResultExtraction(
       method,
@@ -1220,6 +1240,15 @@ function emitClientAdapter(
       out.push(`        ${resultEmit}`);
     }
     out.push("      } catch (error) {");
+    if (rollbackExports) {
+      out.push("        if (!questionOwned && pendingExports) {");
+      out.push("          for (const capability of pendingExports) {");
+      out.push(
+        "            try { transport.releaseExportedCapability?.(capability, 1); } catch { /* Preserve the admission failure. */ }",
+      );
+      out.push("          }");
+      out.push("        }");
+    }
     out.push("        throw annotateCapnpError(error, {");
     out.push('          phase: "client_call",');
     out.push(`          serviceName: ${JSON.stringify(typeName)},`);
@@ -1293,6 +1322,13 @@ function emitServerAdapter(
       out.push("        await pending;");
       out.push("        return;");
     } else {
+      const priorStreams = resolved.methods.filter((candidate) =>
+        candidate.isStreaming
+      )
+        .map((candidate) => `${candidate.methodName}StreamChain`);
+      if (priorStreams.length > 0) {
+        out.push(`        await Promise.all([${priorStreams.join(", ")}]);`);
+      }
       out.push(
         `        const result = await ${invocation};`,
       );
@@ -1420,7 +1456,8 @@ function emitStreamSenderHelpers(
       : shape.paramKind === "single"
       ? "value"
       : "_value";
-    const callOptions = "{ ...(callOptions ?? {}), signal: context.signal }";
+    const callOptions =
+      "{ ...(callOptions ?? {}), signal: context.signal, ...(streamOptions.maxInFlightBytes !== undefined ? { onEncodedParams: async (byteLength: number): Promise<void> => { await callOptions?.onEncodedParams?.(byteLength); await context.reserveBytes(byteLength); } } : {}) }";
     const methodAccess = accessProperty("client", method.methodName);
     const callExpression = (() => {
       switch (shape.paramKind) {
@@ -1448,7 +1485,10 @@ function emitStreamSenderHelpers(
     out.push(`): StreamSender<${paramType}, void> {`);
     out.push("  const { call: callOptions, ...streamOptions } = options;");
     out.push(`  return createStreamSender<${paramType}, void>(`);
-    out.push(`    (${valueName}, context) => ${callExpression},`);
+    out.push(`    async (${valueName}, context) => {`);
+    out.push("      await context.prepare();");
+    out.push(`      return ${callExpression};`);
+    out.push("    },");
     out.push("    streamOptions,");
     out.push("  );");
     out.push("}");
@@ -1711,6 +1751,7 @@ function emitClientParamConstruction(
   method: RpcResolvedMethodInfo,
   shape: MethodShape,
   ctx: InterfaceEmitContext,
+  captureExports = false,
 ): string {
   switch (shape.paramKind) {
     case "none":
@@ -1726,7 +1767,9 @@ function emitClientParamConstruction(
           // low-level client dehydrates it back to a pointer before encoding.
           return `{ ${
             quoteIfNeeded(shape.paramFieldName!)
-          }: exportCapabilityFromTransport(transport, ${binding.token}, value) as unknown as ${method.params.typeName}[${
+          }: exportCapabilityFromTransport(transport, ${binding.token}, value${
+            captureExports ? ", pendingExports" : ""
+          }) as unknown as ${method.params.typeName}[${
             JSON.stringify(shape.paramFieldName!)
           }] }`;
         }

@@ -1,11 +1,25 @@
 import { generateTypescriptFiles } from "../../tools/capnpc-deno/emitter.ts";
 import { ProtocolError, SessionError } from "../../src/errors.ts";
 import {
+  connect,
+  MessagePortTransport,
+  serveConnection,
+} from "../../src/rpc.ts";
+import {
   type CodeGeneratorRequestModel,
   STREAM_RESULT_TYPE_ID,
 } from "../../tools/capnpc-deno/model.ts";
 import { parseCodeGeneratorRequest } from "../../tools/capnpc-deno/request_parser.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { assert, assertEquals, deferred, withTimeout } from "../test_utils.ts";
+import type {
+  RpcCallOptions,
+  RpcServerDispatch,
+} from "../../src/rpc/server/rpc_runtime.ts";
+import type { RpcServiceToken } from "../../src/rpc/server/service.ts";
+import type {
+  StreamSender,
+  StreamSenderOptions,
+} from "../../src/rpc/session/streaming.ts";
 
 const REQUEST_BASE64 =
   "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";
@@ -755,7 +769,7 @@ Deno.test("capnpc-deno documents generated callback-capable params", () => {
   );
   assert(
     source.includes(
-      "p: exportCapabilityFromTransport(transport, Ponger, value)",
+      "p: exportCapabilityFromTransport(transport, Ponger, value, pendingExports)",
     ),
     "expected generated callback params to export local capabilities",
   );
@@ -915,4 +929,413 @@ Deno.test("capnpc-deno generates first-class streaming RPC methods", () => {
     !source.includes("StreamResult"),
     "expected no generated dependency on a local StreamResult codec",
   );
+});
+
+Deno.test("generated streaming clients admit the single encoded payload before transport ownership", async () => {
+  const mod = await importGeneratedModule(
+    fileByPath(
+      generateTypescriptFiles(makeStreamingRequest()),
+      "streaming_codegen_types.ts",
+    ).contents,
+  );
+  let calls = 0;
+  let reads = 0;
+  let measured = 0;
+  const createClient = mod.createCounterClient as (
+    transport: unknown,
+    cap: unknown,
+  ) => {
+    add(params: { value: number }, options?: RpcCallOptions): Promise<void>;
+  };
+  const client = createClient({
+    call() {
+      calls++;
+      return Promise.resolve(new Uint8Array());
+    },
+  }, { capabilityIndex: 1 });
+  await client.add({
+    get value() {
+      reads++;
+      return 42;
+    },
+  });
+  const singleEncodingReads = reads;
+  reads = 0;
+  calls = 0;
+  let error: unknown;
+  try {
+    await client.add({
+      get value() {
+        reads++;
+        return 42;
+      },
+    }, {
+      onEncodedParams: (size) => {
+        measured = size;
+        return Promise.reject(new Error("admission refused"));
+      },
+    });
+  } catch (failure) {
+    error = failure;
+  }
+  assert(error instanceof Error && /admission refused/.test(error.message));
+  assertEquals(reads, singleEncodingReads);
+  assertEquals(measured, 24);
+  assertEquals(calls, 0);
+});
+
+Deno.test("generated stream sender reserves exact parameter-message bytes", async () => {
+  const mod = await importGeneratedModule(
+    fileByPath(
+      generateTypescriptFiles(makeStreamingRequest()),
+      "streaming_codegen_types.ts",
+    ).contents,
+  );
+  type Counter = {
+    add(value: number, options?: RpcCallOptions): Promise<void>;
+  };
+  const token = mod.Counter as RpcServiceToken<Counter>;
+  const replies = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+  let calls = 0;
+  const client = await token.bootstrapClient({
+    bootstrap: () => Promise.resolve({ capabilityIndex: 1 }),
+    call: (_cap, _method, params) => {
+      assertEquals(params.byteLength, 24);
+      return replies[calls++].promise;
+    },
+  });
+  const create = mod.createCounterAddStreamSender as (
+    client: Counter,
+    options: StreamSenderOptions<void>,
+  ) => StreamSender<number, void>;
+  const sender = create(client, { maxInFlight: 4, maxInFlightBytes: 24 });
+  await sender.send(1);
+  const second = sender.send(2);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assertEquals(calls, 1);
+  assertEquals(sender.inFlightBytes, 24);
+  assertEquals(sender.pendingEncodedBytes, 24);
+  replies[0].resolve(new Uint8Array());
+  await withTimeout(second, 500, "generated byte admission");
+  replies[1].resolve(new Uint8Array());
+  await sender.flush();
+  assertEquals(calls, 2);
+  assertEquals(sender.inFlightBytes, 0);
+  assertEquals(sender.pendingEncodedBytes, 0);
+});
+
+Deno.test("generated ordinary admission failure rolls back unowned local callback exports", async () => {
+  const mod = await importGeneratedModule(
+    fileByPath(
+      generateTypescriptFiles(makeCallbackRequest()),
+      "callback_codegen_types.ts",
+    ).contents,
+  );
+  const token = mod.Pinger as RpcServiceToken<
+    { ping(value: object, options?: RpcCallOptions): Promise<void> }
+  >;
+  let exports = 0;
+  let releases = 0;
+  let calls = 0;
+  const client = await token.bootstrapClient({
+    bootstrap: () => Promise.resolve({ capabilityIndex: 1 }),
+    exportCapability: () => {
+      exports++;
+      return { capabilityIndex: 10 };
+    },
+    releaseExportedCapability: (cap, count) => {
+      assertEquals(cap.capabilityIndex, 10);
+      assertEquals(count, 1);
+      releases++;
+    },
+    call: () => {
+      calls++;
+      return Promise.resolve(new Uint8Array());
+    },
+  });
+  let error: unknown;
+  try {
+    await client.ping({ pong() {} }, {
+      onEncodedParams: () =>
+        Promise.reject(new Error("ordinary admission refused")),
+    });
+  } catch (failure) {
+    error = failure;
+  }
+  assert(
+    error instanceof Error && /ordinary admission refused/.test(error.message),
+  );
+  assertEquals(exports, 1);
+  assertEquals(releases, 1);
+  assertEquals(calls, 0);
+});
+
+Deno.test("generated stream admission failure rolls back unowned local callback exports", async () => {
+  const request = makeCallbackRequest();
+  request.nodes.find((node) => node.id === 0x711n)!.interfaceNode!.methods[0]
+    .resultStructTypeId = STREAM_RESULT_TYPE_ID;
+  const mod = await importGeneratedModule(
+    fileByPath(generateTypescriptFiles(request), "callback_codegen_types.ts")
+      .contents,
+  );
+  type Pinger = {
+    ping(value: object, options?: RpcCallOptions): Promise<void>;
+  };
+  const token = mod.Pinger as RpcServiceToken<Pinger>;
+  let exports = 0;
+  let releases = 0;
+  let calls = 0;
+  const client = await token.bootstrapClient({
+    bootstrap: () => Promise.resolve({ capabilityIndex: 1 }),
+    exportCapability: () => {
+      exports++;
+      return { capabilityIndex: 10 };
+    },
+    releaseExportedCapability: (cap, count) => {
+      assertEquals(cap.capabilityIndex, 10);
+      assertEquals(count, 1);
+      releases++;
+    },
+    call: () => {
+      calls++;
+      return Promise.resolve(new Uint8Array());
+    },
+  });
+  const create = mod.createPingerPingStreamSender as (
+    client: Pinger,
+    options: StreamSenderOptions<void>,
+  ) => StreamSender<object, void>;
+  const sender = create(client, { maxInFlightBytes: 1 });
+  let error: unknown;
+  try {
+    await sender.send({ pong() {} });
+  } catch (failure) {
+    error = failure;
+  }
+  assert(
+    error instanceof Error && /exceeds maxInFlightBytes/.test(error.message),
+  );
+  assertEquals(exports, 1);
+  assertEquals(releases, 1);
+  assertEquals(calls, 0);
+  assertEquals(sender.inFlight, 0);
+  assertEquals(sender.inFlightBytes, 0);
+  assertEquals(sender.pendingEncodedBytes, 0);
+});
+
+function makeStreamingBarrierRequest(): CodeGeneratorRequestModel {
+  const request = makeStreamingRequest();
+  request.nodes[1].interfaceNode!.methods.push({
+    name: "barrier",
+    codeOrder: 1,
+    paramStructTypeId: 0x703n,
+    resultStructTypeId: 0x704n,
+  });
+  for (
+    const [id, suffix] of [[0x703n, "Params"], [0x704n, "Results"]] as const
+  ) {
+    request.nodes.push({
+      id,
+      displayName:
+        `tests/fixtures/schemas/streaming_codegen.capnp:Counter.barrier$${suffix}`,
+      displayNamePrefixLength:
+        "tests/fixtures/schemas/streaming_codegen.capnp:".length,
+      scopeId: 0x701n,
+      nestedNodes: [],
+      kind: "struct",
+      structNode: {
+        dataWordCount: 0,
+        pointerCount: 0,
+        isGroup: false,
+        discriminantCount: 0,
+        discriminantOffset: 0,
+        fields: [],
+      },
+    });
+  }
+  return request;
+}
+
+Deno.test("generated regular calls wait for previously accepted streaming work", async () => {
+  const request = makeStreamingBarrierRequest();
+  const mod = await importGeneratedModule(
+    fileByPath(generateTypescriptFiles(request), "streaming_codegen_types.ts")
+      .contents,
+  );
+  const token = mod.Counter as RpcServiceToken<
+    object,
+    { add(value: number): Promise<void>; barrier(): void }
+  >;
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const order: string[] = [];
+  let dispatch!: RpcServerDispatch;
+  token.registerServer({
+    exportCapability(value) {
+      dispatch = value;
+      return { capabilityIndex: 1 };
+    },
+  }, {
+    async add() {
+      started.resolve();
+      await release.promise;
+      order.push("add");
+    },
+    barrier() {
+      order.push("barrier");
+    },
+  });
+  const context = {
+    capability: { capabilityIndex: 1 },
+    methodId: 0,
+    signal: new AbortController().signal,
+  };
+  const stream = Promise.resolve(
+    dispatch.dispatch(0, encodeSingleU32StructMessage(1), context),
+  );
+  await started.promise;
+  const barrier = Promise.resolve(
+    dispatch.dispatch(
+      1,
+      new Uint8Array([0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+      { ...context, methodId: 1 },
+    ),
+  );
+  for (let i = 0; i < 6; i++) await Promise.resolve();
+  assertEquals(order.length, 0);
+  release.resolve();
+  await withTimeout(
+    Promise.all([stream, barrier]),
+    500,
+    "generated stream barrier",
+  );
+  assertEquals(order.join(","), "add,barrier");
+});
+
+Deno.test("generated byte admission and streaming barriers work through real WASM and MessagePort", async () => {
+  const mod = await importGeneratedModule(
+    fileByPath(
+      generateTypescriptFiles(makeStreamingBarrierRequest()),
+      "streaming_codegen_types.ts",
+    ).contents,
+  );
+  type Counter = {
+    add(value: number, options?: RpcCallOptions): Promise<void>;
+    barrier(options?: RpcCallOptions): Promise<void>;
+  };
+  const token = mod.Counter as RpcServiceToken<
+    Counter,
+    { add(value: number): Promise<void>; barrier(): void }
+  >;
+  const create = mod.createCounterAddStreamSender as (
+    client: Counter,
+    options: StreamSenderOptions<void>,
+  ) => StreamSender<number, void>;
+  const firstStarted = deferred<void>();
+  const releaseFirst = deferred<void>();
+  const applied: number[] = [];
+  let barrierApplied = false;
+  const channel = new MessageChannel();
+  const serverTransport = new MessagePortTransport(channel.port1, {
+    closePortOnClose: true,
+  });
+  const clientTransport = new MessagePortTransport(channel.port2, {
+    closePortOnClose: true,
+  });
+  const handle = await serveConnection(token, { transport: serverTransport }, {
+    async add(value) {
+      if (value === 1) {
+        firstStarted.resolve();
+        await releaseFirst.promise;
+      }
+      applied.push(value);
+    },
+    barrier() {
+      assertEquals(applied[0], 1);
+      barrierApplied = true;
+    },
+  });
+  const client = await connect(token, clientTransport);
+  try {
+    const sender = create(client, { maxInFlight: 4, maxInFlightBytes: 24 });
+    await sender.send(1);
+    await withTimeout(firstStarted.promise, 500, "real stream handler");
+    const second = sender.send(2);
+    const barrier = client.barrier();
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    assertEquals(sender.inFlightBytes, 24);
+    assertEquals(sender.pendingEncodedBytes, 24);
+    assertEquals(barrierApplied, false);
+    releaseFirst.resolve();
+    await withTimeout(
+      Promise.all([second, barrier]),
+      500,
+      "real byte admission and barrier",
+    );
+    await withTimeout(sender.flush(), 500, "real stream flush");
+    assertEquals(applied.join(","), "1,2");
+    assertEquals(sender.inFlightBytes, 0);
+    assertEquals(handle.runtime.bridge.stats.retainedInputFrameBytes, 0);
+  } finally {
+    releaseFirst.resolve();
+    await client.close();
+    await handle.close();
+    channel.port1.close();
+    channel.port2.close();
+  }
+});
+
+Deno.test("generated byte cancellation rolls back only callbacks without question ownership", async () => {
+  const request = makeCallbackRequest();
+  request.nodes.find((node) => node.id === 0x711n)!.interfaceNode!.methods[0]
+    .resultStructTypeId = STREAM_RESULT_TYPE_ID;
+  const mod = await importGeneratedModule(
+    fileByPath(generateTypescriptFiles(request), "callback_codegen_types.ts")
+      .contents,
+  );
+  type Pinger = {
+    ping(value: object, options?: RpcCallOptions): Promise<void>;
+  };
+  const token = mod.Pinger as RpcServiceToken<Pinger>;
+  let exports = 0;
+  const released: number[] = [];
+  const firstSent = deferred<void>();
+  const client = await token.bootstrapClient({
+    bootstrap: () => Promise.resolve({ capabilityIndex: 1 }),
+    exportCapability: () => ({ capabilityIndex: 10 + exports++ }),
+    releaseExportedCapability: (cap) => released.push(cap.capabilityIndex),
+    call: (_cap, _method, _params, options) => {
+      options?.onQuestionId?.(1);
+      firstSent.resolve();
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        const signal = options?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        else {signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });}
+      });
+    },
+  });
+  const create = mod.createPingerPingStreamSender as (
+    client: Pinger,
+    options: StreamSenderOptions<void>,
+  ) => StreamSender<object, void>;
+  const sender = create(client, {
+    maxInFlightBytes: 24,
+    maxInFlight: 4,
+    onError: () => {},
+  });
+  await sender.send({ pong() {} });
+  await firstSent.promise;
+  const second = sender.send({ pong() {} }).then(
+    () => undefined,
+    (error) => error,
+  );
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assertEquals(exports, 2);
+  await withTimeout(sender.cancel("stop"), 500, "callback byte cancellation");
+  assert(await second instanceof Error);
+  assertEquals(released.join(","), "11");
+  assertEquals(sender.inFlightBytes, 0);
+  assertEquals(sender.pendingEncodedBytes, 0);
 });

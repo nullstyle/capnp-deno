@@ -534,6 +534,7 @@ export class RpcServerRuntime {
 
   /** Close the underlying RPC session and stop processing. */
   async close(): Promise<void> {
+    this.bridge.close();
     await this.session.close();
     try {
       await this.#postInboundHookTransport.flushAfterInbound();

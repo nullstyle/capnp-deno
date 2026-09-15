@@ -26,6 +26,18 @@ export interface StreamSendContext {
   readonly index: number;
   /** Abort signal scoped to this send. */
   readonly signal: AbortSignal;
+  /**
+   * Acquire the sender's single encoding slot before constructing encoded
+   * parameters. Generated helpers call this automatically when byte bounded.
+   * The slot is released by reserveBytes(), or when the call rejects.
+   */
+  prepare(): Promise<void>;
+  /**
+   * Reserve the exact encoded parameter-message length before sending it.
+   * Excludes RPC envelopes, capability descriptors, and transport queues.
+   * Non-Uint8Array call functions must use this hook when a byte limit is set.
+   */
+  reserveBytes(byteLength: number): Promise<void>;
 }
 
 /**
@@ -50,6 +62,13 @@ export interface StreamSenderOptions<TResult = Uint8Array> {
    */
   maxInFlight?: number;
   /**
+   * Maximum admitted encoded parameter-message bytes awaiting ordered
+   * completion. Unset means unlimited. Generated helpers serialize once and
+   * reserve the exact length before sending. One encoded candidate may wait
+   * outside this budget; its length is exposed as pendingEncodedBytes.
+   */
+  maxInFlightBytes?: number;
+  /**
    * Called for each successful response in order.
    * Can be used to track progress or accumulate results.
    */
@@ -66,6 +85,8 @@ export interface StreamSenderOptions<TResult = Uint8Array> {
 
 /** Options for waiting until a {@link StreamSender} has capacity. */
 export interface StreamSenderWaitOptions {
+  /** Minimum parameter bytes needed, if known. Defaults to one byte with a byte limit. */
+  byteLength?: number;
   /** Abort signal that cancels only the capacity wait, not the stream itself. */
   signal?: AbortSignal;
 }
@@ -77,6 +98,7 @@ interface InFlightCall<TResult> {
   readonly index: number;
   readonly abortController: AbortController;
   readonly cleanup: () => void;
+  byteLength: number;
   settled?: StreamCallSettled<TResult>;
 }
 
@@ -116,14 +138,14 @@ export interface StreamSender<TParams = Uint8Array, TResult = Uint8Array> {
   send(params: TParams): Promise<void>;
 
   /**
-   * Wait until at least one in-flight slot is available.
+   * Wait until an in-flight slot and the requested byte capacity are available.
    *
    * This exposes the same backpressure boundary used by {@link send} without
    * starting another RPC call, which is useful when producing stream items is
    * expensive and should pause before allocating more work.
    *
-   * @param options - Optional abort signal for the wait itself.
-   * @returns Resolves when `inFlight < maxInFlight`.
+   * @param options - Optional abort signal and encoded byte requirement.
+   * @returns Resolves when both count and configured byte limits allow admission.
    *
    * @example
    * ```ts
@@ -160,7 +182,16 @@ export interface StreamSender<TParams = Uint8Array, TResult = Uint8Array> {
   /** Number of calls currently in-flight. */
   readonly inFlight: number;
 
-  /** Total number of calls sent so far (including completed ones). */
+  /** Configured parameter-message byte budget, or null when unlimited. */
+  readonly maxInFlightBytes: number | null;
+
+  /** Admitted encoded parameter-message bytes awaiting ordered completion. */
+  readonly inFlightBytes: number;
+
+  /** Bytes of the single encoded candidate waiting for admission. */
+  readonly pendingEncodedBytes: number;
+
+  /** Total calls accepted into the count window, including preparations. */
   readonly totalSent: number;
 
   /** Total number of responses received so far. */
@@ -208,12 +239,42 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
     );
   }
 
+  const maxInFlightBytes = options.maxInFlightBytes ?? null;
+  if (
+    maxInFlightBytes !== null &&
+    (!Number.isSafeInteger(maxInFlightBytes) || maxInFlightBytes < 1)
+  ) {
+    throw new SessionError("maxInFlightBytes must be a positive safe integer");
+  }
+  let inFlightBytes = 0;
+  let pendingEncodedBytes = 0;
+  let encodingTail: Promise<void> = Promise.resolve();
+
+  function validateByteLength(value: number): void {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new SessionError(
+        "encoded byte length must be a non-negative safe integer",
+      );
+    }
+    if (maxInFlightBytes !== null && value > maxInFlightBytes) {
+      throw new SessionError(
+        `encoded stream item (${value} bytes) exceeds maxInFlightBytes (${maxInFlightBytes})`,
+      );
+    }
+  }
+
+  function hasByteCapacity(byteLength: number): boolean {
+    return maxInFlightBytes === null ||
+      byteLength <= maxInFlightBytes - inFlightBytes;
+  }
+
   const signal = options.signal;
   const onResponse = options.onResponse;
   const onError = options.onError;
   const streamAbortController = new AbortController();
 
   const inFlightCalls: InFlightCall<TResult>[] = [];
+  const readyResponses: InFlightCall<TResult>[] = [];
   const stateWaiters = new Set<() => void>();
   let nextIndex = 0;
   let totalReceived = 0;
@@ -355,6 +416,7 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
     }
 
     totalReceived++;
+    inFlightBytes -= oldest.byteLength;
     oldest.cleanup();
     if (inFlightCalls[0] === oldest) {
       inFlightCalls.shift();
@@ -394,14 +456,22 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
     throw settled.error;
   }
 
+  async function deliverReadyResponses(): Promise<void> {
+    while (readyResponses.length > 0) {
+      // Remove before invoking user code so re-entrant flush/send can drain
+      // the remainder without waiting for their own callback to finish.
+      await deliverSettled(readyResponses.shift()!);
+    }
+  }
+
   async function drainOne(options: StreamDrainOptions = {}): Promise<void> {
     // The lock only guards waiting for the window head to settle and removing
     // it. User callbacks run after the lock is released and the call has left
     // the window, so re-entrant send()/flush()/waitForCapacity()/cancel()
     // calls from inside a callback cannot deadlock on the drain in progress.
     const drained = await withDrainLock(() => takeSettledHead(options));
-    if (!drained) return;
-    await deliverSettled(drained);
+    if (drained) readyResponses.push(drained);
+    await deliverReadyResponses();
   }
 
   async function waitForCapacity(
@@ -409,7 +479,12 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
   ): Promise<void> {
     checkAborted();
     checkError();
-    while (inFlightCalls.length >= maxInFlight) {
+    const byteLength = options.byteLength ??
+      (maxInFlightBytes === null ? 0 : 1);
+    validateByteLength(byteLength);
+    while (
+      inFlightCalls.length >= maxInFlight || !hasByteCapacity(byteLength)
+    ) {
       await drainOne(options);
       checkAborted();
       checkError();
@@ -425,7 +500,11 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
       // the first await): an intervening microtask would let unawaited
       // concurrent sends overshoot maxInFlight and let a same-task cancel()
       // miss this call.
-      while (inFlightCalls.length >= maxInFlight) {
+      const initialBytes = params instanceof Uint8Array ? params.byteLength : 0;
+      validateByteLength(initialBytes);
+      while (
+        inFlightCalls.length >= maxInFlight || !hasByteCapacity(initialBytes)
+      ) {
         await drainOne();
         checkAborted();
         checkError();
@@ -450,34 +529,133 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
       if (signal) relayAbort(signal);
       relayAbort(streamAbortController.signal);
 
+      let ownsEncoding = false;
+      let releaseEncodingTicket: (() => void) | undefined;
+      const previousEncoding = encodingTail;
+      if (maxInFlightBytes !== null && !(params instanceof Uint8Array)) {
+        const ticket = new Promise<void>((resolve) => {
+          releaseEncodingTicket = resolve;
+        });
+        encodingTail = previousEncoding.then(() => ticket, () => ticket);
+      }
+      let bytesReserved = params instanceof Uint8Array;
+      let resolveAdmission!: () => void;
+      let rejectAdmission!: (error: unknown) => void;
+      const admission = new Promise<void>((resolve, reject) => {
+        resolveAdmission = resolve;
+        rejectAdmission = reject;
+      });
+      // The rejection is observed immediately even when the caller awaits a
+      // preceding send. send() still returns the original admission promise.
+      admission.catch(() => {});
+      const releaseEncoding = (): void => {
+        if (ownsEncoding) {
+          ownsEncoding = false;
+          pendingEncodedBytes = 0;
+        }
+        releaseEncodingTicket?.();
+        releaseEncodingTicket = undefined;
+        notifyStateChange();
+      };
       const call: InFlightCall<TResult> = {
         index,
+        byteLength: initialBytes,
         abortController,
         cleanup: () => {
           for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
         },
       };
+      const prepare = async (): Promise<void> => {
+        if (maxInFlightBytes === null || ownsEncoding) return;
+        await previousEncoding;
+        checkAborted();
+        checkError();
+        ownsEncoding = true;
+      };
+      const reserveBytes = async (byteLength: number): Promise<void> => {
+        try {
+          validateByteLength(byteLength);
+          if (bytesReserved) {
+            if (byteLength !== call.byteLength) {
+              throw new SessionError("stream call byte reservation changed");
+            }
+            return;
+          }
+          await prepare();
+          if (maxInFlightBytes !== null) pendingEncodedBytes = byteLength;
+          while (!hasByteCapacity(byteLength)) {
+            const drained = await withDrainLock(() => takeSettledHead({}));
+            if (drained) readyResponses.push(drained);
+            // User callbacks must not run while this encoded candidate owns
+            // the preparation slot: a callback can itself await send().
+            checkAborted();
+            checkError();
+          }
+          checkAborted();
+          checkError();
+          call.byteLength = byteLength;
+          inFlightBytes += byteLength;
+          bytesReserved = true;
+          resolveAdmission();
+        } finally {
+          releaseEncoding();
+        }
+      };
+      const abandonUnadmitted = (): void => {
+        if (bytesReserved || maxInFlightBytes === null) return;
+        const slot = inFlightCalls.indexOf(call);
+        if (slot >= 0) inFlightCalls.splice(slot, 1);
+        call.cleanup();
+      };
+      inFlightCalls.push(call);
+      inFlightBytes += initialBytes;
+      if (bytesReserved || maxInFlightBytes === null) resolveAdmission();
       try {
         Promise.resolve(callFn(params, {
           index,
           signal: abortController.signal,
+          prepare,
+          reserveBytes,
         })).then(
           (value) => {
-            call.settled = { ok: true, value };
+            releaseEncoding();
+            if (!bytesReserved && maxInFlightBytes !== null) {
+              const error = new SessionError(
+                "byte-bounded call must reserve encoded bytes before sending",
+              );
+              call.settled = { ok: false, error };
+              abandonUnadmitted();
+              rejectAdmission(error);
+            } else {
+              call.settled = { ok: true, value };
+              resolveAdmission();
+            }
             notifyStateChange();
           },
           (error) => {
+            releaseEncoding();
             call.settled = { ok: false, error };
+            abandonUnadmitted();
+            rejectAdmission(error);
             notifyStateChange();
           },
         );
       } catch (error) {
+        releaseEncoding();
+        const slot = inFlightCalls.indexOf(call);
+        if (slot >= 0) inFlightCalls.splice(slot, 1);
+        inFlightBytes -= call.byteLength;
         for (const cleanup of cleanupCallbacks.splice(0)) cleanup();
         rememberError(error);
+        rejectAdmission(error);
+        notifyStateChange();
         throw error;
       }
-      inFlightCalls.push(call);
       notifyStateChange();
+      if (maxInFlightBytes !== null) {
+        await admission;
+        await deliverReadyResponses();
+      }
     },
 
     async waitForCapacity(
@@ -488,9 +666,10 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
 
     async flush(): Promise<void> {
       let firstUnhandledError: unknown = undefined;
-      while (inFlightCalls.length > 0) {
+      while (inFlightCalls.length > 0 || readyResponses.length > 0) {
         try {
-          await drainOne({ allowClosed: true });
+          if (readyResponses.length > 0) await deliverReadyResponses();
+          else await drainOne({ allowClosed: true });
         } catch (error) {
           if (firstUnhandledError === undefined) {
             firstUnhandledError = error;
@@ -529,6 +708,18 @@ export function createStreamSender<TParams, TResult = Uint8Array>(
 
     get inFlight(): number {
       return inFlightCalls.length;
+    },
+
+    get maxInFlightBytes(): number | null {
+      return maxInFlightBytes;
+    },
+
+    get inFlightBytes(): number {
+      return inFlightBytes;
+    },
+
+    get pendingEncodedBytes(): number {
+      return pendingEncodedBytes;
     },
 
     get totalSent(): number {

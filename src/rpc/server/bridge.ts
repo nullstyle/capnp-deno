@@ -314,6 +314,13 @@ export interface RpcServerDispatch {
  * Options for configuring an {@link RpcServerBridge}.
  */
 export interface RpcServerBridgeOptions {
+  /**
+   * Maximum aggregate Call-frame bytes retained by unfinished dispatches.
+   * New calls above the limit receive an exception; control frames still run.
+   * Unset means unlimited. A canceled handler retains its charge until it
+   * actually settles, including after Finish or bridge shutdown.
+   */
+  maxRetainedInputFrameBytes?: number;
   nextCapabilityIndex?: number;
   onUnhandledError?: (
     error: unknown,
@@ -410,6 +417,12 @@ export interface RpcServerBridgePumpHostCallsOptions {
  * Operational snapshot for {@link RpcServerBridge}.
  */
 export interface RpcServerBridgeStats {
+  /** Full incoming Call-frame bytes charged to unfinished dispatches. */
+  readonly retainedInputFrameBytes: number;
+  /** Configured aggregate Call-frame byte limit, or null when unlimited. */
+  readonly maxRetainedInputFrameBytes: number | null;
+  /** Calls rejected because their frame would exceed the input byte limit. */
+  readonly rejectedInputFrames: number;
   /** Number of answer table entries currently retained by the bridge. */
   readonly answerTableEntries: number;
   /** Number of answers whose dispatch handler has not completed yet. */
@@ -470,6 +483,7 @@ type RpcDispatchOutcome =
  * we look up the referenced question here to find the capability to dispatch to.
  */
 interface AnswerTableEntry {
+  readonly inputFrameBytes: number;
   /** Promise that resolves when the dispatch completes */
   readonly promise: Promise<RpcDispatchOutcome>;
   /** Abort controller exposed to the handler via RpcCallContext.signal. */
@@ -618,6 +632,10 @@ function resolvePromisedAnswerCapability(
  */
 export class RpcServerBridge {
   #nextCapabilityIndex: number;
+  #closed = false;
+  #retainedInputFrameBytes = 0;
+  #rejectedInputFrames = 0;
+  readonly #maxRetainedInputFrameBytes: number | null;
   #dispatchByCapability = new Map<number, RegisteredDispatch>();
   #onUnhandledError?: RpcServerBridgeOptions["onUnhandledError"];
   #onFinish?: RpcServerBridgeOptions["onFinish"];
@@ -634,6 +652,16 @@ export class RpcServerBridge {
   #onAsyncHostCallSettled: (() => void | Promise<void>) | undefined;
 
   constructor(options: RpcServerBridgeOptions = {}) {
+    const maxInputBytes = options.maxRetainedInputFrameBytes ?? null;
+    if (
+      maxInputBytes !== null &&
+      (!Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1)
+    ) {
+      throw new ProtocolError(
+        "maxRetainedInputFrameBytes must be a positive safe integer",
+      );
+    }
+    this.#maxRetainedInputFrameBytes = maxInputBytes;
     this.#nextCapabilityIndex = options.nextCapabilityIndex ?? 0;
     this.#onUnhandledError = options.onUnhandledError;
     this.#onFinish = options.onFinish;
@@ -646,6 +674,28 @@ export class RpcServerBridge {
     this.#outboundClient = undefined;
     this.#asyncHostCallDispatch = false;
     this.#onAsyncHostCallSettled = undefined;
+  }
+
+  /**
+   * Stop accepting work, cancel pending handlers, and drop exported services.
+   * Input charges remain until handlers actually settle; shutdown cannot force
+   * application code to release a retained parameter object.
+   * @returns Nothing. Repeated calls are harmless.
+   * @example
+   * ```ts
+   * bridge.close();
+   * ```
+   */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const entry of this.#answerTable.values()) {
+      entry.finished = true;
+      if (entry.evictionTimer !== undefined) clearTimeout(entry.evictionTimer);
+      entry.abortController.abort(new SessionError("rpc server bridge closed"));
+    }
+    this.#answerTable.clear();
+    this.#dispatchByCapability.clear();
   }
 
   setOutboundClient(outboundClient: RpcCallContext["outboundClient"]): void {
@@ -695,6 +745,7 @@ export class RpcServerBridge {
     dispatch: RpcServerDispatch,
     options: { capabilityIndex?: number; referenceCount?: number } = {},
   ): CapabilityPointer {
+    if (this.#closed) throw new SessionError("rpc server bridge is closed");
     const capabilityIndex = options.capabilityIndex ??
       this.#nextCapabilityIndex;
     if (options.capabilityIndex === undefined) {
@@ -904,6 +955,9 @@ export class RpcServerBridge {
     }
 
     return {
+      retainedInputFrameBytes: this.#retainedInputFrameBytes,
+      maxRetainedInputFrameBytes: this.#maxRetainedInputFrameBytes,
+      rejectedInputFrames: this.#rejectedInputFrames,
       answerTableEntries: this.#answerTable.size,
       pendingAnswers,
       completedAnswers,
@@ -938,6 +992,7 @@ export class RpcServerBridge {
   }
 
   async handleFrame(frame: Uint8Array): Promise<Uint8Array | null> {
+    if (this.#closed) throw new SessionError("rpc server bridge is closed");
     // Run onIncomingFrame middleware chain.
     let currentFrame: Uint8Array | null = frame;
     const middlewareState = new Map<string, unknown>();
@@ -1052,6 +1107,7 @@ export class RpcServerBridge {
 
     return await this.#handleCall(
       decodeCallRequestFrame(currentFrame),
+      currentFrame.byteLength,
       middlewareState,
     );
   }
@@ -1060,6 +1116,7 @@ export class RpcServerBridge {
     wasmHost: RpcServerWasmHost,
     options: RpcServerBridgePumpHostCallsOptions = {},
   ): Promise<number> {
+    if (this.#closed) return 0;
     const maxCalls = options.maxCalls;
     if (
       maxCalls !== undefined &&
@@ -1085,9 +1142,10 @@ export class RpcServerBridge {
 
   async #handleCall(
     call: RpcCallRequest,
+    inputFrameBytes: number,
     middlewareState?: Map<string, unknown>,
   ): Promise<Uint8Array | null> {
-    const registration = this.#registerAnswerEntry(call);
+    const registration = this.#registerAnswerEntry(call, inputFrameBytes);
     if ("errorFrame" in registration) return registration.errorFrame;
 
     const completion = this.#completeCall(
@@ -1100,12 +1158,20 @@ export class RpcServerBridge {
     return await completion;
   }
 
-  #registerAnswerEntry(call: RpcCallRequest):
+  #registerAnswerEntry(call: RpcCallRequest, inputFrameBytes: number):
     | {
       entry: AnswerTableEntry;
       resolveEntry: (outcome: RpcDispatchOutcome) => void;
     }
     | { errorFrame: Uint8Array } {
+    if (this.#closed) {
+      return {
+        errorFrame: encodeReturnExceptionFrame({
+          answerId: call.questionId,
+          reason: "rpc server bridge is closed",
+        }),
+      };
+    }
     if (this.#answerTable.has(call.questionId)) {
       return {
         errorFrame: encodeReturnExceptionFrame({
@@ -1130,9 +1196,25 @@ export class RpcServerBridge {
       };
     }
 
+    if (
+      this.#maxRetainedInputFrameBytes !== null &&
+      inputFrameBytes >
+        this.#maxRetainedInputFrameBytes - this.#retainedInputFrameBytes
+    ) {
+      this.#rejectedInputFrames++;
+      return {
+        errorFrame: encodeReturnExceptionFrame({
+          answerId: call.questionId,
+          reason:
+            `input frame byte budget exceeded (${this.#maxRetainedInputFrameBytes} bytes)`,
+        }),
+      };
+    }
+
     let resolveEntry!: (outcome: RpcDispatchOutcome) => void;
     const abortController = new AbortController();
     const entry: AnswerTableEntry = {
+      inputFrameBytes,
       promise: new Promise<RpcDispatchOutcome>((resolve) => {
         resolveEntry = resolve;
       }),
@@ -1142,6 +1224,7 @@ export class RpcServerBridge {
       evictionAttempts: 0,
     };
     this.#answerTable.set(call.questionId, entry);
+    this.#retainedInputFrameBytes += inputFrameBytes;
     return { entry, resolveEntry };
   }
 
@@ -1151,43 +1234,47 @@ export class RpcServerBridge {
     resolveEntry: (outcome: RpcDispatchOutcome) => void,
     middlewareState: Map<string, unknown>,
   ): Promise<Uint8Array | null> {
-    const outcome = await this.#dispatchCall(
-      call,
-      middlewareState,
-      entry.abortController.signal,
-    );
+    try {
+      const outcome = await this.#dispatchCall(
+        call,
+        middlewareState,
+        entry.abortController.signal,
+      );
 
-    // Store the resolved outcome and resolve the promise.
-    (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
-    resolveEntry(outcome);
+      // Store the resolved outcome and resolve the promise.
+      (entry as { outcome?: RpcDispatchOutcome }).outcome = outcome;
+      resolveEntry(outcome);
 
-    if (this.#answerTable.get(call.questionId) !== entry || entry.finished) {
-      return null;
-    }
+      if (this.#answerTable.get(call.questionId) !== entry || entry.finished) {
+        return null;
+      }
 
-    // Schedule automatic eviction of completed entries that are not
-    // finished by the peer within the configured timeout.
-    this.#scheduleEviction(call.questionId, entry);
+      // Schedule automatic eviction of completed entries that are not
+      // finished by the peer within the configured timeout.
+      this.#scheduleEviction(call.questionId, entry);
 
-    if (outcome.kind === "exception") {
-      return encodeReturnExceptionFrame({
+      if (outcome.kind === "exception") {
+        return encodeReturnExceptionFrame({
+          answerId: call.questionId,
+          reason: outcome.reason,
+        });
+      }
+
+      // The Return frame below hands the peer one wire reference per
+      // senderHosted capTable occurrence; mirror that in the registry so
+      // inbound Release frames can drain exported dispatch entries.
+      this.#trackReturnedCapabilities(entry, outcome.response.capTable);
+
+      return encodeReturnResultsFrame({
         answerId: call.questionId,
-        reason: outcome.reason,
+        content: outcome.response.content,
+        capTable: outcome.response.capTable,
+        releaseParamCaps: outcome.response.releaseParamCaps,
+        noFinishNeeded: outcome.response.noFinishNeeded,
       });
+    } finally {
+      this.#retainedInputFrameBytes -= entry.inputFrameBytes;
     }
-
-    // The Return frame below hands the peer one wire reference per
-    // senderHosted capTable occurrence; mirror that in the registry so
-    // inbound Release frames can drain exported dispatch entries.
-    this.#trackReturnedCapabilities(entry, outcome.response.capTable);
-
-    return encodeReturnResultsFrame({
-      answerId: call.questionId,
-      content: outcome.response.content,
-      capTable: outcome.response.capTable,
-      releaseParamCaps: outcome.response.releaseParamCaps,
-      noFinishNeeded: outcome.response.noFinishNeeded,
-    });
   }
 
   /**
@@ -1393,7 +1480,10 @@ export class RpcServerBridge {
       return;
     }
 
-    const registration = this.#registerAnswerEntry(call);
+    const registration = this.#registerAnswerEntry(
+      call,
+      hostCall.frame.byteLength,
+    );
     if ("errorFrame" in registration) {
       this.#respondWasmHostCallFrame(wasmHost, call, registration.errorFrame);
       return;
@@ -1618,7 +1708,26 @@ export class RpcServerBridge {
       if (answerEntry.outcome !== undefined) {
         targetOutcome = answerEntry.outcome;
       } else {
-        targetOutcome = await answerEntry.promise;
+        // This wait owns only the child frame, so cancellation can release it
+        // even when the parent handler is still retaining its own input.
+        let onAbort!: () => void;
+        const canceled = new Promise<RpcDispatchOutcome>((resolve) => {
+          onAbort = () =>
+            resolve({
+              kind: "exception",
+              reason: "pipelined call canceled",
+            });
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+        try {
+          targetOutcome = await Promise.race([answerEntry.promise, canceled]);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      }
+      if (signal.aborted) {
+        return { kind: "exception", reason: "pipelined call canceled" };
       }
 
       // Resolve the capability index from the answer's result cap table.
