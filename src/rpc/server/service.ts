@@ -454,63 +454,88 @@ function attachTransportLifecycle(
   onError: (error: unknown) => Promise<void>,
   report: ((error: unknown) => void | Promise<void>) | undefined,
 ): () => void {
-  let detachTransportListeners = (): void => {};
-  if (
-    !(transport instanceof TcpTransport) &&
-    !(transport instanceof WebSocketTransport) &&
-    !(transport instanceof WebTransportTransport)
-  ) {
-    return detachTransportListeners;
-  }
-
-  const optionCarrier = transport as {
-    options: {
-      onClose?: () => void | Promise<void>;
-      onError?: (error: unknown) => void | Promise<void>;
-    };
-  };
-  const previousOnClose = optionCarrier.options.onClose;
-  const previousOnError = optionCarrier.options.onError;
-
-  optionCarrier.options.onClose = () => {
-    if (previousOnClose) {
-      void Promise.resolve(previousOnClose()).catch((error) => {
-        void reportConnectionError(report, error);
-      });
-    }
+  let active = true;
+  const cleanup: Array<() => void> = [];
+  const notifyClose = (): void => {
+    if (!active) return;
     void onClose().catch((error) => {
       void reportConnectionError(report, error);
     });
   };
+  if (transport.subscribeClose) {
+    cleanup.push(transport.subscribeClose(notifyClose));
+  }
 
-  optionCarrier.options.onError = (error) => {
-    if (previousOnError) {
-      void Promise.resolve(previousOnError(error)).catch((callbackError) => {
-        void reportConnectionError(report, callbackError);
-      });
-    }
-    void onError(error).catch((closeError) => {
-      void reportConnectionError(report, closeError);
-    });
-  };
-
-  if (transport instanceof WebSocketTransport) {
-    const onSocketClose = (): void => {
-      void onClose().catch((error) => {
-        void reportConnectionError(report, error);
+  // Older transports can lack the optional close subscription. Keep their
+  // existing callbacks intact, and retain built-in error reporting independently
+  // of closure subscription.
+  if (
+    transport instanceof TcpTransport ||
+    transport instanceof WebSocketTransport ||
+    transport instanceof WebTransportTransport
+  ) {
+    const options = transport.options;
+    const previousOnError = options.onError;
+    const handleError = (error: unknown): void => {
+      if (!active) return;
+      if (previousOnError) {
+        void Promise.resolve().then(() => previousOnError(error)).catch(
+          (callbackError) => {
+            void reportConnectionError(report, callbackError);
+          },
+        );
+      }
+      void onError(error).catch((closeError) => {
+        void reportConnectionError(report, closeError);
       });
     };
-    if (transport.socket.readyState === WebSocket.CLOSED) {
-      queueMicrotask(onSocketClose);
-    } else {
-      transport.socket.addEventListener("close", onSocketClose, { once: true });
-      detachTransportListeners = (): void => {
-        transport.socket.removeEventListener("close", onSocketClose);
+    options.onError = handleError;
+    cleanup.push(() => {
+      if (options.onError === handleError) options.onError = previousOnError;
+    });
+
+    if (!transport.subscribeClose) {
+      const previousOnClose = options.onClose;
+      const handleClose = (): void => {
+        if (!active) return;
+        if (previousOnClose) {
+          void Promise.resolve().then(previousOnClose).catch((error) => {
+            void reportConnectionError(report, error);
+          });
+        }
+        notifyClose();
       };
+      options.onClose = handleClose;
+      cleanup.push(() => {
+        if (options.onClose === handleClose) options.onClose = previousOnClose;
+      });
     }
   }
 
-  return detachTransportListeners;
+  // WebSocketTransport attaches its own socket listeners in start(). Observe
+  // early socket closure as well, while an asynchronous service factory runs.
+  if (transport instanceof WebSocketTransport) {
+    if (transport.socket.readyState === WebSocket.CLOSED) {
+      notifyClose();
+    } else {
+      transport.socket.addEventListener("close", notifyClose, { once: true });
+      cleanup.push(() => {
+        transport.socket.removeEventListener("close", notifyClose);
+      });
+    }
+  }
+
+  return () => {
+    if (!active) return;
+    active = false;
+    for (const detach of cleanup.reverse()) {
+      try {
+        detach();
+      } catch (error) {
+        void reportConnectionError(report, error);
+      }
+    }
+  };
 }
 
 class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
@@ -519,6 +544,7 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
 
   readonly #disposeInstance: (() => Promise<void>) | null;
   readonly #onClosed: (() => void) | undefined;
+  readonly #detachTransportLifecycle: () => void;
   readonly #closedWaiters = new Set<() => void>();
   #forcedClosedConnections = 0;
   #draining = false;
@@ -530,12 +556,14 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
     peer: RpcPeer,
     runtime: RpcServerRuntime,
     disposeInstance: (() => Promise<void>) | null,
-    onClosed?: () => void,
+    onClosed: (() => void) | undefined,
+    detachTransportLifecycle: () => void,
   ) {
     this.peer = peer;
     this.runtime = runtime;
     this.#disposeInstance = disposeInstance;
     this.#onClosed = onClosed;
+    this.#detachTransportLifecycle = detachTransportLifecycle;
   }
 
   get closed(): boolean {
@@ -600,6 +628,7 @@ class RpcServiceConnectionHandleImpl implements RpcServiceConnectionHandle {
     this.#closePromise = (async () => {
       if (this.#closed) return;
       this.#closed = true;
+      this.#detachTransportLifecycle();
       try {
         await this.runtime.close();
       } finally {
@@ -1384,18 +1413,22 @@ async function createServiceConnectionHandle<
       runtime,
       resolved.disposeInstance,
       onClosed,
+      detachTransportLifecycle,
     );
     if (closedBeforeActive) {
-      await handle.close().catch((error) => {
-        void reportConnectionError(options.onConnectionError, error);
-      });
+      throw new SessionError(
+        "rpc service connection closed during initialization",
+      );
     }
-    detachTransportLifecycle();
     return handle;
   } catch (error) {
     detachTransportLifecycle();
-    await Promise.resolve(accepted.transport.close()).catch(() => {});
-    await resolved?.disposeInstance?.().catch(() => {});
+    if (handle) {
+      await handle.close().catch(() => {});
+    } else {
+      await Promise.resolve(accepted.transport.close()).catch(() => {});
+      await resolved?.disposeInstance?.().catch(() => {});
+    }
     throw annotateCapnpError(error, {
       phase: "service_serve",
       serviceName: service.interfaceName,
