@@ -172,6 +172,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -189,7 +190,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -197,6 +203,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<

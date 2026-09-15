@@ -1,6 +1,6 @@
 import { RpcPeer, type RpcTransport } from "@nullstyle/capnp";
 import { assert, assertEquals } from "../../tests/test_utils.ts";
-import type { PeerEvents } from "./gen/mod.ts";
+import type { PeerEvents } from "./gen/schema_types.ts";
 import { PeerRuntime } from "./runtime.ts";
 import {
   DEFAULT_HOST,

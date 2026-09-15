@@ -119,9 +119,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -167,6 +170,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -184,7 +188,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -192,6 +201,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -221,7 +232,7 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 
@@ -305,7 +316,7 @@ export interface SetWatchedKeysResults {
 }
 
 export interface SubscribeParams {
-  notifier: CapabilityPointer | null;
+  notifier: RpcStub<KvClientNotifier> | null;
 }
 
 export interface SubscribeResults {
@@ -855,7 +866,10 @@ export const SubscribeParamsStruct: StructDescriptor<SubscribeParams> = {
 };
 export const SubscribeParamsCodec: StructCodec<SubscribeParams> = {
   encode: (value: SubscribeParams): Uint8Array =>
-    encodeStructMessage(SubscribeParamsStruct, value),
+    encodeStructMessage(
+      SubscribeParamsStruct,
+      dehydrateStubs$SubscribeParams(value),
+    ),
   decode: (bytes: Uint8Array): SubscribeParams =>
     decodeStructMessage(SubscribeParamsStruct, bytes),
 };
@@ -1049,6 +1063,45 @@ export const WriteOpResultCodec: StructCodec<WriteOpResult> = {
     decodeStructMessage(WriteOpResultStruct, bytes),
 };
 
+/**
+ * Wrap decoded capability pointers in `SubscribeParams` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$SubscribeParams(
+  value: SubscribeParams,
+  transport: () => RpcClientTransport,
+): SubscribeParams {
+  const out = { ...value };
+  if (out.notifier != null) {
+    out.notifier = capabilityToServiceStub(
+      out.notifier,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createKvClientNotifierServiceClient(
+          createKvClientNotifierClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `SubscribeParams` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$SubscribeParams(
+  value: SubscribeParams,
+): SubscribeParams {
+  const out = { ...value };
+  if (out.notifier != null) {
+    out.notifier = requireRpcStubCapability(out.notifier) as unknown as RpcStub<
+      KvClientNotifier
+    >;
+  }
+  return out;
+}
+
 export const KvClientNotifierInterfaceId = 0x86eb32e5c8fdeed1n;
 
 export const KvClientNotifierMethodOrdinals = {
@@ -1092,6 +1145,9 @@ export function createKvClientNotifierClient(
           KeysChangedParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1167,6 +1223,9 @@ export function createKvClientNotifierClient(
           StateResetRequiredParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1407,6 +1466,9 @@ export function createKvStoreClient(
           GetParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1482,6 +1544,9 @@ export function createKvStoreClient(
           WriteBatchParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1557,6 +1622,9 @@ export function createKvStoreClient(
           ListParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1630,8 +1698,11 @@ export function createKvStoreClient(
       try {
         const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
           SubscribeParamsStruct,
-          params,
+          dehydrateStubs$SubscribeParams(params),
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1707,6 +1778,9 @@ export function createKvStoreClient(
           SetWatchedKeysParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1782,6 +1856,9 @@ export function createKvStoreClient(
           CreateBackupParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1857,6 +1934,9 @@ export function createKvStoreClient(
           ListBackupsParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1932,6 +2012,9 @@ export function createKvStoreClient(
           RestoreFromBackupParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -2072,11 +2155,14 @@ export function createKvStoreServer(server: KvStoreServer): RpcServerDispatch {
           return encoded.content;
         }
         case 3: {
-          const decoded = decodeStructMessageWithCaps(
-            SubscribeParamsStruct,
-            params,
-            ctx.paramsCapTable ?? [],
-          ) as SubscribeParams;
+          const decoded = hydrateStubs$SubscribeParams(
+            decodeStructMessageWithCaps(
+              SubscribeParamsStruct,
+              params,
+              ctx.paramsCapTable ?? [],
+            ) as SubscribeParams,
+            () => requireOutboundClient(ctx),
+          );
           const result = await server["subscribe"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             SubscribeResultsStruct,
@@ -2200,7 +2286,13 @@ export interface KvClientNotifier {
   ): Promise<void>;
 }
 
-function createKvClientNotifierServiceClient(
+/**
+ * Adapt a low-level `KvClientNotifierClient` into the high-level `KvClientNotifier` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<KvClientNotifier>` values for cross-file interface references.
+ */
+export function createKvClientNotifierServiceClient(
   client: KvClientNotifierClient,
   transport: RpcClientTransport,
 ): KvClientNotifier {
@@ -2415,7 +2507,13 @@ export interface KvStore {
   ): Promise<RestoreFromBackupResults>;
 }
 
-function createKvStoreServiceClient(
+/**
+ * Adapt a low-level `KvStoreClient` into the high-level `KvStore` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<KvStore>` values for cross-file interface references.
+ */
+export function createKvStoreServiceClient(
   client: KvStoreClient,
   transport: RpcClientTransport,
 ): KvStore {
@@ -2472,16 +2570,36 @@ function createKvStoreServiceClient(
       value: KvClientNotifier | RpcStub<KvClientNotifier>,
       options?: RpcCallOptions,
     ) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
         const result = await client.subscribe({
           notifier: exportCapabilityFromTransport(
             transport,
             KvClientNotifier,
             value,
-          ),
-        }, options);
+            pendingExports,
+          ) as unknown as SubscribeParams["notifier"],
+        }, callOptions);
         return;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "KvStore",

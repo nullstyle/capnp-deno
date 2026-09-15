@@ -125,9 +125,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -173,6 +176,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -190,7 +194,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -198,6 +207,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -227,7 +238,7 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 
@@ -344,6 +355,9 @@ export function createCounterSinkClient(
           AddParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -413,6 +427,9 @@ export function createCounterSinkClient(
           TotalParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -598,16 +615,41 @@ export interface CounterSinkService {
   total(ctx: RpcCallContext): Promise<TotalResults> | TotalResults;
 }
 
-function createCounterSinkServiceClient(
+/**
+ * Adapt a low-level `CounterSinkClient` into the high-level `CounterSink` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<CounterSink>` values for cross-file interface references.
+ */
+export function createCounterSinkServiceClient(
   client: CounterSinkClient,
   transport: RpcClientTransport,
 ): CounterSink {
   return {
     add: async (value: AddParams["value"], options?: RpcCallOptions) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
-        const result = await client.add({ value: value }, options);
+        const result = await client.add({ value: value }, callOptions);
         return;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "CounterSink",
@@ -664,6 +706,7 @@ function createCounterSinkServiceServer(
     },
     total: async (params: TotalParams, _ctx: RpcCallContext) => {
       try {
+        await Promise.all([addStreamChain]);
         const result = await server.total(_ctx);
         return result;
       } catch (error) {
@@ -738,8 +781,21 @@ export function createCounterSinkAddStreamSender(
 ): StreamSender<AddParams["value"], void> {
   const { call: callOptions, ...streamOptions } = options;
   return createStreamSender<AddParams["value"], void>(
-    (value, context) =>
-      client.add(value, { ...(callOptions ?? {}), signal: context.signal }),
+    async (value, context) => {
+      await context.prepare();
+      return client.add(value, {
+        ...(callOptions ?? {}),
+        signal: context.signal,
+        ...(streamOptions.maxInFlightBytes !== undefined
+          ? {
+            onEncodedParams: async (byteLength: number): Promise<void> => {
+              await callOptions?.onEncodedParams?.(byteLength);
+              await context.reserveBytes(byteLength);
+            },
+          }
+          : {}),
+      });
+    },
     streamOptions,
   );
 }

@@ -119,9 +119,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -167,6 +170,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -184,7 +188,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -192,6 +201,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -221,7 +232,7 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 
@@ -265,7 +276,7 @@ interface Coords {
 }
 
 export interface InteropHolder {
-  cap: CapabilityPointer | null;
+  cap: RpcStub<InteropCallback> | null;
   dyn: AnyPointerValue;
 }
 
@@ -481,7 +492,10 @@ export const InteropHolderStruct: StructDescriptor<InteropHolder> = {
 };
 export const InteropHolderCodec: StructCodec<InteropHolder> = {
   encode: (value: InteropHolder): Uint8Array =>
-    encodeStructMessage(InteropHolderStruct, value),
+    encodeStructMessage(
+      InteropHolderStruct,
+      dehydrateStubs$InteropHolder(value),
+    ),
   decode: (bytes: Uint8Array): InteropHolder =>
     decodeStructMessage(InteropHolderStruct, bytes),
 };
@@ -684,6 +698,43 @@ export const InteropUnionCodec: StructCodec<InteropUnion> = {
     decodeStructMessage(InteropUnionStruct, bytes),
 };
 
+/**
+ * Wrap decoded capability pointers in `InteropHolder` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$InteropHolder(
+  value: InteropHolder,
+  transport: () => RpcClientTransport,
+): InteropHolder {
+  const out = { ...value };
+  if (out.cap != null) {
+    out.cap = capabilityToServiceStub(
+      out.cap,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createInteropCallbackServiceClient(
+          createInteropCallbackClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `InteropHolder` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$InteropHolder(value: InteropHolder): InteropHolder {
+  const out = { ...value };
+  if (out.cap != null) {
+    out.cap = requireRpcStubCapability(out.cap) as unknown as RpcStub<
+      InteropCallback
+    >;
+  }
+  return out;
+}
+
 export const InteropCallbackInterfaceId = 0xcdd9ce50477174dcn;
 
 export const InteropCallbackMethodOrdinals = {
@@ -715,6 +766,9 @@ export function createInteropCallbackClient(
           PingParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -864,7 +918,13 @@ export interface InteropCallback {
   ping(options?: RpcCallOptions): Promise<void>;
 }
 
-function createInteropCallbackServiceClient(
+/**
+ * Adapt a low-level `InteropCallbackClient` into the high-level `InteropCallback` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<InteropCallback>` values for cross-file interface references.
+ */
+export function createInteropCallbackServiceClient(
   client: InteropCallbackClient,
   transport: RpcClientTransport,
 ): InteropCallback {

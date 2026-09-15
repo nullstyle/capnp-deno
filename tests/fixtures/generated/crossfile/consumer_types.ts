@@ -185,6 +185,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -202,7 +203,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -210,6 +216,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -938,6 +946,9 @@ export function createFeedClient(
           PublishParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1013,6 +1024,9 @@ export function createFeedClient(
           StreamParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1200,6 +1214,9 @@ export function createHubClient(
           AttachParamsStruct,
           dehydrateStubs$AttachParams(params),
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1275,6 +1292,9 @@ export function createHubClient(
           AcquireParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1356,6 +1376,9 @@ export function createHubClient(
           RegisterParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1608,10 +1631,29 @@ export function createFeedServiceClient(
       }
     },
     stream: async (value: StreamParams["chunk"], options?: RpcCallOptions) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
-        const result = await client.stream({ chunk: value }, options);
+        const result = await client.stream({ chunk: value }, callOptions);
         return;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "Feed",
@@ -1632,6 +1674,7 @@ function createFeedServiceServer(
   return {
     publish: async (params: PublishParams, _ctx: RpcCallContext) => {
       try {
+        await Promise.all([streamStreamChain]);
         const result = await server.publish(params, _ctx);
         return result;
       } catch (error) {
@@ -1721,8 +1764,21 @@ export function createFeedStreamStreamSender(
 ): StreamSender<StreamParams["chunk"], void> {
   const { call: callOptions, ...streamOptions } = options;
   return createStreamSender<StreamParams["chunk"], void>(
-    (value, context) =>
-      client.stream(value, { ...(callOptions ?? {}), signal: context.signal }),
+    async (value, context) => {
+      await context.prepare();
+      return client.stream(value, {
+        ...(callOptions ?? {}),
+        signal: context.signal,
+        ...(streamOptions.maxInFlightBytes !== undefined
+          ? {
+            onEncodedParams: async (byteLength: number): Promise<void> => {
+              await callOptions?.onEncodedParams?.(byteLength);
+              await context.reserveBytes(byteLength);
+            },
+          }
+          : {}),
+      });
+    },
     streamOptions,
   );
 }
@@ -1773,16 +1829,36 @@ export function createHubServiceClient(
       value: Watcher | RpcStub<Watcher>,
       options?: RpcCallOptions,
     ) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
         const result = await client.attach({
           watcher: exportCapabilityFromTransport(
             transport,
             Watcher$Base,
             value,
+            pendingExports,
           ) as unknown as AttachParams["watcher"],
-        }, options);
+        }, callOptions);
         return;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "Hub",

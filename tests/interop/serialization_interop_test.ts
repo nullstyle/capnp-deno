@@ -13,7 +13,7 @@ import {
   InteropUnionCodec,
   type PingParams,
   PingParamsCodec,
-} from "../fixtures/generated/interop_matrix/mod.ts";
+} from "../fixtures/generated/interop_matrix/tests/fixtures/schemas/interop_matrix_types.ts";
 import {
   assert,
   assertBytes,
@@ -22,6 +22,22 @@ import {
 } from "../test_utils.ts";
 
 const WORD_BYTES = 8;
+
+// A typed capability stub carries its wire pointer through the same symbol as
+// generated clients. Serialization must never invoke the capability itself.
+const canonicalCallback = {
+  ping(): Promise<void> {
+    throw new Error("serialization invoked callback");
+  },
+  close(): Promise<void> {
+    return Promise.resolve();
+  },
+  [Symbol.dispose](): void {},
+  [Symbol.asyncDispose](): Promise<void> {
+    return Promise.resolve();
+  },
+  [Symbol.for("@nullstyle/capnp/rpcStubCapability")]: { capabilityIndex: 7 },
+};
 
 interface CanonicalCase<T extends object> {
   readonly name: string;
@@ -234,7 +250,7 @@ const canonicalCases: CanonicalCase<object>[] = [
     name: "InteropHolder",
     codec: InteropHolderCodec,
     value: {
-      cap: { capabilityIndex: 7 },
+      cap: canonicalCallback,
       dyn: { kind: "interface", capabilityIndex: 9 },
     } satisfies InteropHolder,
     hex: "0000000003000000000000000000020003000000070000000300000009000000",
@@ -323,7 +339,9 @@ Deno.test("serialization interop snapshots preserve capability pointer indices",
     bytesFromHex(canonicalCases[7].hex),
   );
   assert(decoded.cap !== null, "expected interface capability pointer");
-  assertEquals(decoded.cap.capabilityIndex, 7);
+  // Bare codec decoding yields the wire pointer; a transport hydrates it into
+  // a callable service stub later in the RPC path.
+  assertEquals(Reflect.get(decoded.cap, "capabilityIndex"), 7);
   assertEquals(decoded.dyn.kind, "interface");
   if (decoded.dyn.kind === "interface") {
     assertEquals(decoded.dyn.capabilityIndex, 9);

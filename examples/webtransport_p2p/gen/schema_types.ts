@@ -119,9 +119,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -167,6 +170,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -184,7 +188,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -192,6 +201,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -221,7 +232,7 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 
@@ -240,7 +251,7 @@ export interface AdvertiseResults {
 }
 
 export interface ConnectParams {
-  events: CapabilityPointer | null;
+  events: RpcStub<PeerEvents> | null;
 }
 
 export interface ConnectResults {
@@ -379,7 +390,10 @@ export const ConnectParamsStruct: StructDescriptor<ConnectParams> = {
 };
 export const ConnectParamsCodec: StructCodec<ConnectParams> = {
   encode: (value: ConnectParams): Uint8Array =>
-    encodeStructMessage(ConnectParamsStruct, value),
+    encodeStructMessage(
+      ConnectParamsStruct,
+      dehydrateStubs$ConnectParams(value),
+    ),
   decode: (bytes: Uint8Array): ConnectParams =>
     decodeStructMessage(ConnectParamsStruct, bytes),
 };
@@ -615,6 +629,43 @@ export const PeerSummaryCodec: StructCodec<PeerSummary> = {
     decodeStructMessage(PeerSummaryStruct, bytes),
 };
 
+/**
+ * Wrap decoded capability pointers in `ConnectParams` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$ConnectParams(
+  value: ConnectParams,
+  transport: () => RpcClientTransport,
+): ConnectParams {
+  const out = { ...value };
+  if (out.events != null) {
+    out.events = capabilityToServiceStub(
+      out.events,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createPeerEventsServiceClient(
+          createPeerEventsClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `ConnectParams` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$ConnectParams(value: ConnectParams): ConnectParams {
+  const out = { ...value };
+  if (out.events != null) {
+    out.events = requireRpcStubCapability(out.events) as unknown as RpcStub<
+      PeerEvents
+    >;
+  }
+  return out;
+}
+
 export const PeerEventsInterfaceId = 0xf25d0d52ad30289bn;
 
 export const PeerEventsMethodOrdinals = {
@@ -649,6 +700,9 @@ export function createPeerEventsClient(
           SystemParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -853,8 +907,11 @@ export function createPeerNodeClient(
       try {
         const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
           ConnectParamsStruct,
-          params,
+          dehydrateStubs$ConnectParams(params),
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -930,6 +987,9 @@ export function createPeerNodeClient(
           SayParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1005,6 +1065,9 @@ export function createPeerNodeClient(
           RenameParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1080,6 +1143,9 @@ export function createPeerNodeClient(
           ListPeersParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1155,6 +1221,9 @@ export function createPeerNodeClient(
           DisconnectParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1230,6 +1299,9 @@ export function createPeerNodeClient(
           AdvertiseParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -1327,11 +1399,14 @@ export function createPeerNodeServer(
     ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(
-            ConnectParamsStruct,
-            params,
-            ctx.paramsCapTable ?? [],
-          ) as ConnectParams;
+          const decoded = hydrateStubs$ConnectParams(
+            decodeStructMessageWithCaps(
+              ConnectParamsStruct,
+              params,
+              ctx.paramsCapTable ?? [],
+            ) as ConnectParams,
+            () => requireOutboundClient(ctx),
+          );
           const result = await server["connect"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             ConnectResultsStruct,
@@ -1457,7 +1532,13 @@ export interface PeerEvents {
   ): Promise<void>;
 }
 
-function createPeerEventsServiceClient(
+/**
+ * Adapt a low-level `PeerEventsClient` into the high-level `PeerEvents` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<PeerEvents>` values for cross-file interface references.
+ */
+export function createPeerEventsServiceClient(
   client: PeerEventsClient,
   transport: RpcClientTransport,
 ): PeerEvents {
@@ -1602,7 +1683,13 @@ export interface PeerNode {
   ): Promise<void>;
 }
 
-function createPeerNodeServiceClient(
+/**
+ * Adapt a low-level `PeerNodeClient` into the high-level `PeerNode` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<PeerNode>` values for cross-file interface references.
+ */
+export function createPeerNodeServiceClient(
   client: PeerNodeClient,
   transport: RpcClientTransport,
 ): PeerNode {
@@ -1611,12 +1698,36 @@ function createPeerNodeServiceClient(
       value: PeerEvents | RpcStub<PeerEvents>,
       options?: RpcCallOptions,
     ) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
         const result = await client.connect({
-          events: exportCapabilityFromTransport(transport, PeerEvents, value),
-        }, options);
+          events: exportCapabilityFromTransport(
+            transport,
+            PeerEvents,
+            value,
+            pendingExports,
+          ) as unknown as ConnectParams["events"],
+        }, callOptions);
         return result;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "PeerNode",

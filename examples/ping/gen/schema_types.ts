@@ -119,9 +119,12 @@ function withCapabilityStubLifecycle<TClient extends object>(
     closed = true;
     await transport.release?.(capability, 1);
   };
+  // A schema method literally named `close` keeps the property, so the
+  // lifecycle close is then reachable only via Symbol.dispose/asyncDispose.
+  const hasSchemaClose = Reflect.has(client, "close");
   return new Proxy(client as object, {
     get(target, prop, receiver) {
-      if (prop === "close") return close;
+      if (prop === "close" && !hasSchemaClose) return close;
       if (prop === Symbol.asyncDispose) return close;
       if (prop === Symbol.dispose) {
         return (): void => {
@@ -167,6 +170,7 @@ function exportCapabilityFromTransport<
   transport: RpcClientTransport,
   service: RpcServiceToken<TClient, TServer>,
   value: TServer | RpcStub<TClient>,
+  pendingExports?: CapabilityPointer[],
 ): CapabilityPointer {
   const existing = parseCapabilityPointer(value);
   if (existing) return existing;
@@ -184,7 +188,12 @@ function exportCapabilityFromTransport<
       },
     );
   }
-  return service.registerServer(
+  if (pendingExports && !host.releaseExportedCapability) {
+    throw new SessionError(
+      "byte admission requires local capability export rollback",
+    );
+  }
+  const capability = service.registerServer(
     {
       exportCapability: (dispatch, options) =>
         exportCapability.call(host, dispatch, options),
@@ -192,6 +201,8 @@ function exportCapabilityFromTransport<
     value as TServer,
     { referenceCount: 1 },
   );
+  pendingExports?.push(capability);
+  return capability;
 }
 
 function exportCapabilityFromContext<
@@ -221,12 +232,12 @@ function exportCapabilityFromContext<
   return service.registerServer(
     { exportCapability: ctx.exportCapability },
     value as TServer,
-    { referenceCount: 1 },
+    { referenceCount: 0 },
   );
 }
 
 export interface PingParams {
-  p: CapabilityPointer | null;
+  p: RpcStub<Ponger> | null;
 }
 
 export interface PingResults {
@@ -258,7 +269,7 @@ export const PingParamsStruct: StructDescriptor<PingParams> = {
 };
 export const PingParamsCodec: StructCodec<PingParams> = {
   encode: (value: PingParams): Uint8Array =>
-    encodeStructMessage(PingParamsStruct, value),
+    encodeStructMessage(PingParamsStruct, dehydrateStubs$PingParams(value)),
   decode: (bytes: Uint8Array): PingParams =>
     decodeStructMessage(PingParamsStruct, bytes),
 };
@@ -317,6 +328,41 @@ export const PongResultsCodec: StructCodec<PongResults> = {
     decodeStructMessage(PongResultsStruct, bytes),
 };
 
+/**
+ * Wrap decoded capability pointers in `PingParams` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$PingParams(
+  value: PingParams,
+  transport: () => RpcClientTransport,
+): PingParams {
+  const out = { ...value };
+  if (out.p != null) {
+    out.p = capabilityToServiceStub(
+      out.p,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createPongerServiceClient(
+          createPongerClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `PingParams` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$PingParams(value: PingParams): PingParams {
+  const out = { ...value };
+  if (out.p != null) {
+    out.p = requireRpcStubCapability(out.p) as unknown as RpcStub<Ponger>;
+  }
+  return out;
+}
+
 export const PingerInterfaceId = 0xfc4a3c8417f1ca81n;
 
 export const PingerMethodOrdinals = {
@@ -346,8 +392,11 @@ export function createPingerClient(
       try {
         const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
           PingParamsStruct,
-          params,
+          dehydrateStubs$PingParams(params),
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -443,11 +492,14 @@ export function createPingerServer(server: PingerServer): RpcServerDispatch {
     ): Promise<RpcServerDispatchResult> => {
       switch (methodId) {
         case 0: {
-          const decoded = decodeStructMessageWithCaps(
-            PingParamsStruct,
-            params,
-            ctx.paramsCapTable ?? [],
-          ) as PingParams;
+          const decoded = hydrateStubs$PingParams(
+            decodeStructMessageWithCaps(
+              PingParamsStruct,
+              params,
+              ctx.paramsCapTable ?? [],
+            ) as PingParams,
+            () => requireOutboundClient(ctx),
+          );
           const result = await server["ping"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             PingResultsStruct,
@@ -510,6 +562,9 @@ export function createPongerClient(
           PongParamsStruct,
           params,
         );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
         let questionId: number | undefined;
         const callOptions: RpcCallOptions & {
           paramsCapTable?: PreambleCapDescriptor[];
@@ -658,18 +713,48 @@ export interface Pinger {
   ): Promise<void>;
 }
 
-function createPingerServiceClient(
+/**
+ * Adapt a low-level `PingerClient` into the high-level `Pinger` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Pinger>` values for cross-file interface references.
+ */
+export function createPingerServiceClient(
   client: PingerClient,
   transport: RpcClientTransport,
 ): Pinger {
   return {
     ping: async (value: Ponger | RpcStub<Ponger>, options?: RpcCallOptions) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
       try {
         const result = await client.ping({
-          p: exportCapabilityFromTransport(transport, Ponger, value),
-        }, options);
+          p: exportCapabilityFromTransport(
+            transport,
+            Ponger,
+            value,
+            pendingExports,
+          ) as unknown as PingParams["p"],
+        }, callOptions);
         return;
       } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
         throw annotateCapnpError(error, {
           phase: "client_call",
           serviceName: "Pinger",
@@ -760,7 +845,13 @@ export interface Ponger {
   pong(value: PongParams["n"], options?: RpcCallOptions): Promise<void>;
 }
 
-function createPongerServiceClient(
+/**
+ * Adapt a low-level `PongerClient` into the high-level `Ponger` API.
+ *
+ * Exported so generated modules in other schema files can build typed
+ * `RpcStub<Ponger>` values for cross-file interface references.
+ */
+export function createPongerServiceClient(
   client: PongerClient,
   transport: RpcClientTransport,
 ): Ponger {

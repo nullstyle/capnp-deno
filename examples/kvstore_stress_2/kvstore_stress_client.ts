@@ -1,6 +1,10 @@
 import { Command } from "@cliffy/command";
 import { connect, TcpTransport } from "@nullstyle/capnp";
-import { KvStore, type WriteBatchResults, type WriteOp } from "./gen/mod.ts";
+import {
+  KvStore,
+  type WriteBatchResults,
+  type WriteOp,
+} from "./gen/kvstore_types.ts";
 
 interface ClientOptions {
   host: string;

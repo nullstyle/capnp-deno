@@ -6,13 +6,13 @@ import {
   serve,
   WebTransportTransport,
 } from "@nullstyle/capnp";
-import { PeerNode } from "./gen/mod.ts";
+import { PeerNode } from "./gen/schema_types.ts";
 import type {
   ConnectResults,
   PeerEvents as PeerEventsService,
   PeerNode as PeerNodeService,
   PeerSummary,
-} from "./gen/mod.ts";
+} from "./gen/schema_types.ts";
 import { handlePeerCommand } from "./runtime_commands.ts";
 import {
   createConnectOptions,
