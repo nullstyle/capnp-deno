@@ -27,8 +27,18 @@ The independent TypeScript wire-copy regressions in
 encodings, present empty structs, unknown physical fields, capability indices,
 strict Text, malformed list storage, and bounded copy expansion. The real WASM
 comparison lives in `tests/wasm/real_wasm_wire_conformance_test.ts` and checks
-the current Zig reader against the TypeScript reader. These do not claim native
-transport interoperability or generic schema-model parity.
+the current Zig reader and payload clone against the TypeScript reader/copy. It
+exercises evolved fields, result capability routing and Finish cleanup, and
+rejects malformed, cyclic, or alias-amplified copies without settling the call
+or prematurely releasing its parameter capabilities. Copy budgets use each
+implementation's own defaults; their error names and accounting are not
+identical.
+
+Historical Layout A double-far list tags are rejected by the untyped clone in
+both paths rather than misread as structs. Native Zig's typed legacy-list reader
+is not exposed through this WASM ABI. Standard list encodings and the ambiguous
+zero-count tag interpreted as a present empty struct are covered. These tests do
+not claim generic schema-model parity.
 
 When refreshing the corpus, copy it from a reviewed upstream revision, update
 its SHA-256 and inventory, then run the conformance gate. Do not regenerate the

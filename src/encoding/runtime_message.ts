@@ -344,6 +344,9 @@ export class MessageReader {
       throw new Error("expected struct pointer, got kind " + kind);
     }
     const offsetWords = signed30((word >> 2n) & MASK_30);
+    if (resolved.contentWord !== undefined && offsetWords !== 0) {
+      throw new ProtocolError("double-far struct tag must have zero offset");
+    }
     const dataWordCount = Number((word >> 32n) & 0xffffn);
     const pointerCount = Number((word >> 48n) & 0xffffn);
     const targetWord = resolved.contentWord ??
