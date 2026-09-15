@@ -1,0 +1,184 @@
+{
+  "schemaVersion": 1,
+  "toolchain": {
+    "schemaVersion": 1,
+    "capnpZigCommit": "c30abbbdde561931f3f179884f24d1309c5599ae",
+    "zigVersion": "0.17.0-dev.1683+5ceec001b",
+    "buildStep": "wasm-host",
+    "optimization": "ReleaseSmall",
+    "binaryenVersion": "130",
+    "binaryenArgs": [
+      "--enable-bulk-memory",
+      "-Oz",
+      "--strip-debug"
+    ]
+  },
+  "artifact": {
+    "filename": "capnp_deno.wasm",
+    "sha256": "c230e7715b071031c22a8a30a25e755a0265ab56dcbfc5bc26c0d7bc385247e3",
+    "bytes": 298540
+  },
+  "abi": {
+    "version": 1,
+    "minimum": 1,
+    "maximum": 1,
+    "features": [
+      1023,
+      0
+    ]
+  },
+  "exports": [
+    {
+      "name": "__stack_pointer",
+      "kind": "global"
+    },
+    {
+      "name": "capnp_alloc",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_buf_free",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_clear_error",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_error_take",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_example_person_from_json",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_example_person_to_json",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_free",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_last_error_code",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_last_error_len",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_last_error_ptr",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_free",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_free_host_call_frame",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_get_limits",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_has_uncommitted_pop",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_new",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_outbound_bytes",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_outbound_count",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_pop_commit",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_pop_host_call",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_pop_out_frame",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_push_frame",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_respond_host_call_exception",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_respond_host_call_results",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_respond_host_call_return_frame",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_send_finish",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_send_release",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_set_bootstrap_stub",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_set_bootstrap_stub_with_id",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_set_limits",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_schema_manifest_json",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_shutdown",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_wasm_abi_max_version",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_wasm_abi_min_version",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_wasm_abi_version",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_wasm_feature_flags_hi",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_wasm_feature_flags_lo",
+      "kind": "function"
+    },
+    {
+      "name": "memory",
+      "kind": "memory"
+    }
+  ]
+}

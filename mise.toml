@@ -1,6 +1,6 @@
 [tools]
 deno = "2.6.8"
-"github:WebAssembly/binaryen" = { version = "latest", extract_all = true, bin_path = "bin" }
+"github:WebAssembly/binaryen" = { version = "version_130", extract_all = true, bin_path = "bin" }
 just = "1.46.0"
 node = "lts"
 "npm:esbuild" = "0.28.1"

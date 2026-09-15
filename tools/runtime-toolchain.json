@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "capnpZigCommit": "c30abbbdde561931f3f179884f24d1309c5599ae",
+  "zigVersion": "0.17.0-dev.1683+5ceec001b",
+  "buildStep": "wasm-host",
+  "optimization": "ReleaseSmall",
+  "binaryenVersion": "130",
+  "binaryenArgs": ["--enable-bulk-memory", "-Oz", "--strip-debug"]
+}
