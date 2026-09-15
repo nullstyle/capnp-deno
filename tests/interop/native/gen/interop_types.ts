@@ -256,6 +256,23 @@ export interface FailParams {
 export interface FailResults {
 }
 
+export interface HoldParams {
+  cap: RpcStub<Doubler> | null;
+}
+
+export interface HoldResults {
+}
+
+export interface HoldStatusParams {
+  release: boolean;
+}
+
+export interface HoldStatusResults {
+  started: boolean;
+  active: boolean;
+  canceled: boolean;
+}
+
 export interface BarrierParams {
 }
 
@@ -373,6 +390,107 @@ export const FailResultsCodec: StructCodec<FailResults> = {
     encodeStructMessage(FailResultsStruct, value),
   decode: (bytes: Uint8Array): FailResults =>
     decodeStructMessage(FailResultsStruct, bytes),
+};
+
+export const HoldParamsStruct: StructDescriptor<HoldParams> = {
+  kind: "struct",
+  name: "HoldParams",
+  dataWordCount: 0,
+  pointerCount: 1,
+  createDefault: () => ({
+    cap: null,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "cap",
+      offset: 0,
+      type: TYPE_INTERFACE,
+    },
+  ],
+};
+export const HoldParamsCodec: StructCodec<HoldParams> = {
+  encode: (value: HoldParams): Uint8Array =>
+    encodeStructMessage(HoldParamsStruct, dehydrateStubs$HoldParams(value)),
+  decode: (bytes: Uint8Array): HoldParams =>
+    decodeStructMessage(HoldParamsStruct, bytes),
+};
+
+export const HoldResultsStruct: StructDescriptor<HoldResults> = {
+  kind: "struct",
+  name: "HoldResults",
+  dataWordCount: 0,
+  pointerCount: 0,
+  createDefault: () => ({}),
+  fields: [],
+};
+export const HoldResultsCodec: StructCodec<HoldResults> = {
+  encode: (value: HoldResults): Uint8Array =>
+    encodeStructMessage(HoldResultsStruct, value),
+  decode: (bytes: Uint8Array): HoldResults =>
+    decodeStructMessage(HoldResultsStruct, bytes),
+};
+
+export const HoldStatusParamsStruct: StructDescriptor<HoldStatusParams> = {
+  kind: "struct",
+  name: "HoldStatusParams",
+  dataWordCount: 1,
+  pointerCount: 0,
+  createDefault: () => ({
+    release: false,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "release",
+      offset: 0,
+      type: TYPE_BOOL,
+    },
+  ],
+};
+export const HoldStatusParamsCodec: StructCodec<HoldStatusParams> = {
+  encode: (value: HoldStatusParams): Uint8Array =>
+    encodeStructMessage(HoldStatusParamsStruct, value),
+  decode: (bytes: Uint8Array): HoldStatusParams =>
+    decodeStructMessage(HoldStatusParamsStruct, bytes),
+};
+
+export const HoldStatusResultsStruct: StructDescriptor<HoldStatusResults> = {
+  kind: "struct",
+  name: "HoldStatusResults",
+  dataWordCount: 1,
+  pointerCount: 0,
+  createDefault: () => ({
+    started: false,
+    active: false,
+    canceled: false,
+  }),
+  fields: [
+    {
+      kind: "slot",
+      name: "started",
+      offset: 0,
+      type: TYPE_BOOL,
+    },
+    {
+      kind: "slot",
+      name: "active",
+      offset: 1,
+      type: TYPE_BOOL,
+    },
+    {
+      kind: "slot",
+      name: "canceled",
+      offset: 2,
+      type: TYPE_BOOL,
+    },
+  ],
+};
+export const HoldStatusResultsCodec: StructCodec<HoldStatusResults> = {
+  encode: (value: HoldStatusResults): Uint8Array =>
+    encodeStructMessage(HoldStatusResultsStruct, value),
+  decode: (bytes: Uint8Array): HoldStatusResults =>
+    decodeStructMessage(HoldStatusResultsStruct, bytes),
 };
 
 export const BarrierParamsStruct: StructDescriptor<BarrierParams> = {
@@ -646,6 +764,41 @@ function dehydrateStubs$ChildResults(value: ChildResults): ChildResults {
 }
 
 /**
+ * Wrap decoded capability pointers in `HoldParams` into typed
+ * `RpcStub`s via the owning interfaces' client factories.
+ */
+function hydrateStubs$HoldParams(
+  value: HoldParams,
+  transport: () => RpcClientTransport,
+): HoldParams {
+  const out = { ...value };
+  if (out.cap != null) {
+    out.cap = capabilityToServiceStub(
+      out.cap,
+      transport(),
+      (nextTransport, nextCapability) =>
+        createDoublerServiceClient(
+          createDoublerClient(nextTransport, nextCapability),
+          nextTransport,
+        ),
+    );
+  }
+  return out;
+}
+
+/**
+ * Replace live `RpcStub` values in `HoldParams` by their raw
+ * capability pointers so the encoding runtime can serialize them.
+ */
+function dehydrateStubs$HoldParams(value: HoldParams): HoldParams {
+  const out = { ...value };
+  if (out.cap != null) {
+    out.cap = requireRpcStubCapability(out.cap) as unknown as RpcStub<Doubler>;
+  }
+  return out;
+}
+
+/**
  * Wrap decoded capability pointers in `InvokeParams` into typed
  * `RpcStub`s via the owning interfaces' client factories.
  */
@@ -685,6 +838,8 @@ export const DoublerInterfaceId = 0x9f8dfef3719f4073n;
 export const DoublerMethodOrdinals = {
   compute: 0,
   fail: 1,
+  hold: 2,
+  holdStatus: 3,
 } as const;
 
 export interface DoublerClient {
@@ -693,6 +848,11 @@ export interface DoublerClient {
     options?: RpcCallOptions,
   ): Promise<ComputeResults>;
   fail(params: FailParams, options?: RpcCallOptions): Promise<FailResults>;
+  hold(params: HoldParams, options?: RpcCallOptions): Promise<HoldResults>;
+  holdStatus(
+    params: HoldStatusParams,
+    options?: RpcCallOptions,
+  ): Promise<HoldStatusResults>;
 }
 
 export interface DoublerServer {
@@ -704,6 +864,14 @@ export interface DoublerServer {
     params: FailParams,
     ctx: RpcCallContext,
   ): Promise<FailResults> | FailResults;
+  hold(
+    params: HoldParams,
+    ctx: RpcCallContext,
+  ): Promise<HoldResults> | HoldResults;
+  holdStatus(
+    params: HoldStatusParams,
+    ctx: RpcCallContext,
+  ): Promise<HoldStatusResults> | HoldStatusResults;
 }
 
 export function createDoublerClient(
@@ -867,6 +1035,162 @@ export function createDoublerClient(
         }, "Doubler.fail failed");
       }
     },
+    hold: async (
+      params: HoldParams,
+      options?: RpcCallOptions,
+    ): Promise<HoldResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          HoldParamsStruct,
+          dehydrateStubs$HoldParams(params),
+        );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0x9f8dfef3719f4073n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            DoublerMethodOrdinals["hold"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              HoldResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as HoldResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
+          capability,
+          DoublerMethodOrdinals["hold"],
+          encoded.content,
+          callOptions,
+        );
+        try {
+          return decodeStructMessageWithCaps(
+            HoldResultsStruct,
+            response,
+            [],
+          ) as HoldResults;
+        } finally {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Doubler",
+          interfaceId: 0x9f8dfef3719f4073n,
+          methodName: "hold",
+          methodId: 2,
+        }, "Doubler.hold failed");
+      }
+    },
+    holdStatus: async (
+      params: HoldStatusParams,
+      options?: RpcCallOptions,
+    ): Promise<HoldStatusResults> => {
+      try {
+        const encoded: EncodeWithCapsResult = encodeStructMessageWithCaps(
+          HoldStatusParamsStruct,
+          params,
+        );
+        if (options?.onEncodedParams) {
+          await options.onEncodedParams(encoded.content.byteLength);
+        }
+        let questionId: number | undefined;
+        const callOptions: RpcCallOptions & {
+          paramsCapTable?: PreambleCapDescriptor[];
+        } = {
+          ...(options ?? {}),
+          interfaceId: options?.interfaceId ?? 0x9f8dfef3719f4073n,
+          onQuestionId: (value: number): void => {
+            questionId = value;
+            options?.onQuestionId?.(value);
+          },
+          ...(encoded.capTable.length > 0
+            ? { paramsCapTable: encoded.capTable }
+            : {}),
+        };
+        if (transport.callRaw) {
+          const raw = await transport.callRaw(
+            capability,
+            DoublerMethodOrdinals["holdStatus"],
+            encoded.content,
+            callOptions,
+          );
+          try {
+            return decodeStructMessageWithCaps(
+              HoldStatusResultsStruct,
+              raw.contentBytes,
+              raw.capTable,
+            ) as HoldStatusResults;
+          } finally {
+            if (
+              (options?.autoFinish ?? true) && questionId !== undefined &&
+              transport.finish
+            ) {
+              await transport.finish(questionId, options?.finish);
+            }
+          }
+        }
+        const response = await transport.call(
+          capability,
+          DoublerMethodOrdinals["holdStatus"],
+          encoded.content,
+          callOptions,
+        );
+        try {
+          return decodeStructMessageWithCaps(
+            HoldStatusResultsStruct,
+            response,
+            [],
+          ) as HoldStatusResults;
+        } finally {
+          if (
+            (options?.autoFinish ?? true) && questionId !== undefined &&
+            transport.finish
+          ) {
+            await transport.finish(questionId, options?.finish);
+          }
+        }
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          interfaceName: "Doubler",
+          interfaceId: 0x9f8dfef3719f4073n,
+          methodName: "holdStatus",
+          methodId: 3,
+        }, "Doubler.holdStatus failed");
+      }
+    },
   };
 }
 
@@ -920,6 +1244,41 @@ export function createDoublerServer(server: DoublerServer): RpcServerDispatch {
           const result = await server["fail"](decoded, ctx);
           const encoded = encodeStructMessageWithCaps(
             FailResultsStruct,
+            result,
+          );
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 2: {
+          const decoded = hydrateStubs$HoldParams(
+            decodeStructMessageWithCaps(
+              HoldParamsStruct,
+              params,
+              ctx.paramsCapTable ?? [],
+            ) as HoldParams,
+            () => requireOutboundClient(ctx),
+          );
+          const result = await server["hold"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(
+            HoldResultsStruct,
+            result,
+          );
+          if (encoded.capTable.length > 0) {
+            return { content: encoded.content, capTable: encoded.capTable };
+          }
+          return encoded.content;
+        }
+        case 3: {
+          const decoded = decodeStructMessageWithCaps(
+            HoldStatusParamsStruct,
+            params,
+            ctx.paramsCapTable ?? [],
+          ) as HoldStatusParams;
+          const result = await server["holdStatus"](decoded, ctx);
+          const encoded = encodeStructMessageWithCaps(
+            HoldStatusResultsStruct,
             result,
           );
           if (encoded.capTable.length > 0) {
@@ -1635,6 +1994,28 @@ export interface Doubler {
    * @returns Resolves when the call completes.
    */
   fail(options?: RpcCallOptions): Promise<void>;
+  /**
+   * Call `Doubler.hold`.
+   *
+   * @param value - Local `Doubler` implementation or remote `RpcStub<Doubler>` callback capability.
+   * @param options - RPC call options.
+   * @returns Resolves when the call completes.
+   */
+  hold(
+    value: Doubler | RpcStub<Doubler>,
+    options?: RpcCallOptions,
+  ): Promise<void>;
+  /**
+   * Call `Doubler.holdStatus`.
+   *
+   * @param value - Flattened `HoldStatusParams.release` parameter.
+   * @param options - RPC call options.
+   * @returns Resolves with the decoded call result.
+   */
+  holdStatus(
+    value: HoldStatusParams["release"],
+    options?: RpcCallOptions,
+  ): Promise<HoldStatusResults>;
 }
 
 /**
@@ -1681,6 +2062,68 @@ export function createDoublerServiceClient(
         }, "Doubler.fail failed");
       }
     },
+    hold: async (
+      value: Doubler | RpcStub<Doubler>,
+      options?: RpcCallOptions,
+    ) => {
+      const pendingExports: CapabilityPointer[] | undefined =
+        options?.onEncodedParams ? [] : undefined;
+      let questionOwned = false;
+      const callOptions = pendingExports
+        ? {
+          ...options,
+          onQuestionId: (id: number): void => {
+            questionOwned = true;
+            options?.onQuestionId?.(id);
+          },
+        }
+        : options;
+      try {
+        const result = await client.hold({
+          cap: exportCapabilityFromTransport(
+            transport,
+            Doubler,
+            value,
+            pendingExports,
+          ) as unknown as HoldParams["cap"],
+        }, callOptions);
+        return;
+      } catch (error) {
+        if (!questionOwned && pendingExports) {
+          for (const capability of pendingExports) {
+            try {
+              transport.releaseExportedCapability?.(capability, 1);
+            } catch { /* Preserve the admission failure. */ }
+          }
+        }
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Doubler",
+          interfaceName: "Doubler",
+          interfaceId: DoublerInterfaceId,
+          methodName: "hold",
+          methodId: 2,
+        }, "Doubler.hold failed");
+      }
+    },
+    holdStatus: async (
+      value: HoldStatusParams["release"],
+      options?: RpcCallOptions,
+    ) => {
+      try {
+        const result = await client.holdStatus({ release: value }, options);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "client_call",
+          serviceName: "Doubler",
+          interfaceName: "Doubler",
+          interfaceId: DoublerInterfaceId,
+          methodName: "holdStatus",
+          methodId: 3,
+        }, "Doubler.holdStatus failed");
+      }
+    },
   };
 }
 
@@ -1720,6 +2163,48 @@ function createDoublerServiceServer(
         }, "Doubler.fail handler failed");
       }
     },
+    hold: async (params: HoldParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.hold(
+          capabilityToServiceStub(
+            params.cap,
+            requireOutboundClient(_ctx),
+            (nextTransport, nextCapability) =>
+              createDoublerServiceClient(
+                createDoublerClient(nextTransport, nextCapability),
+                nextTransport,
+              ),
+          ),
+        );
+        return {} as HoldResults;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Doubler",
+          interfaceName: "Doubler",
+          interfaceId: DoublerInterfaceId,
+          methodName: "hold",
+          methodId: 2,
+          questionId: _ctx.questionId,
+        }, "Doubler.hold handler failed");
+      }
+    },
+    holdStatus: async (params: HoldStatusParams, _ctx: RpcCallContext) => {
+      try {
+        const result = await server.holdStatus(params.release);
+        return result;
+      } catch (error) {
+        throw annotateCapnpError(error, {
+          phase: "handler",
+          serviceName: "Doubler",
+          interfaceName: "Doubler",
+          interfaceId: DoublerInterfaceId,
+          methodName: "holdStatus",
+          methodId: 3,
+          questionId: _ctx.questionId,
+        }, "Doubler.holdStatus handler failed");
+      }
+    },
   };
 }
 
@@ -1737,6 +2222,20 @@ export const DoublerDebugMethods = [
     serviceName: "Doubler",
     methodId: DoublerMethodOrdinals["fail"],
     methodName: "fail",
+  },
+  {
+    interfaceId: DoublerInterfaceId,
+    interfaceName: "Doubler",
+    serviceName: "Doubler",
+    methodId: DoublerMethodOrdinals["hold"],
+    methodName: "hold",
+  },
+  {
+    interfaceId: DoublerInterfaceId,
+    interfaceName: "Doubler",
+    serviceName: "Doubler",
+    methodId: DoublerMethodOrdinals["holdStatus"],
+    methodName: "holdStatus",
   },
 ] as const satisfies readonly RpcDebugSchemaMethod[];
 

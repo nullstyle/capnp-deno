@@ -9,7 +9,9 @@ import {
   TcpTransport,
 } from "../../../src/advanced.ts";
 import { assert, assertEquals, withTimeout } from "../../test_utils.ts";
+import { CancellationAudit } from "./cancellation_audit.ts";
 import {
+  createDoublerServer,
   type Doubler,
   Interop,
   type InteropService,
@@ -114,8 +116,12 @@ async function stop(child: Deno.ChildProcess): Promise<void> {
   await child.status;
 }
 
-async function consume(transport: RpcTransport): Promise<void> {
-  const client = await connect(Interop, transport);
+async function consume(
+  transport: RpcTransport,
+  cooperative: boolean,
+): Promise<void> {
+  const audit = new CancellationAudit();
+  const client = await connect(Interop, audit.wrap(transport, true));
   let callbacks = 0;
   const doubler: Doubler = {
     compute(value) {
@@ -125,6 +131,12 @@ async function consume(transport: RpcTransport): Promise<void> {
     fail() {
       return Promise.reject(new Error("InteropExpectedFailure"));
     },
+    hold() {
+      throw new Error("unexpected callback hold");
+    },
+    holdStatus() {
+      throw new Error("unexpected callback holdStatus");
+    },
   };
   try {
     assertEquals(await client.echo(41), 42);
@@ -133,6 +145,40 @@ async function consume(transport: RpcTransport): Promise<void> {
     const child = await client.child();
     try {
       assertEquals(await child.compute(21), 42);
+      const controller = new AbortController();
+      let holdSettled = false;
+      const hold = child.hold(doubler, { signal: controller.signal }).then(
+        () => {
+          holdSettled = true;
+          return null;
+        },
+        (error: unknown) => {
+          holdSettled = true;
+          return error;
+        },
+      );
+      const beforeCancellation = await child.holdStatus(false);
+      assert(
+        beforeCancellation.started && beforeCancellation.active &&
+          !beforeCancellation.canceled,
+      );
+      assertEquals(
+        holdSettled,
+        false,
+        "cancel only after remote confirms pending handler",
+      );
+      controller.abort();
+      assert(
+        await withTimeout(hold, 2_000, "pending RPC cancellation") !== null,
+      );
+      const afterCancellation = await child.holdStatus(true);
+      assert(afterCancellation.started && !afterCancellation.active);
+      assertEquals(afterCancellation.canceled, cooperative);
+      assertEquals(
+        await child.compute(21),
+        42,
+        "same capability recovers after cancellation",
+      );
       let thrown: unknown;
       try {
         await child.fail();
@@ -163,6 +209,7 @@ async function consume(transport: RpcTransport): Promise<void> {
     await Promise.all([first, second]);
     assertEquals(result.sum, 3n);
     assertEquals(result.count, 2);
+    audit.check();
   } finally {
     await client.close();
   }
@@ -173,6 +220,10 @@ function service(): { implementation: InteropService; check(): void } {
   let count = 0;
   let callbackCount = 0;
   let barrierSeen = false;
+  let holdStarted = false;
+  let holdActive = false;
+  let holdCanceled = false;
+  let holdCleanup: Promise<void> | undefined;
   const implementation: InteropService = {
     echo(value) {
       return value + 1;
@@ -185,15 +236,50 @@ function service(): { implementation: InteropService; check(): void } {
         if ("close" in cap) await cap.close();
       }
     },
-    child() {
-      // Generated service result currently types an exported implementation as
-      // a stub. Runtime exportCapabilityFromContext accepts either form.
-      return {
-        compute: (value: number) => Promise.resolve(value * 2),
+    child(ctx) {
+      // The non-streaming convenience adapter omits call contexts. Register
+      // the generated dispatch directly to observe cancellation of this child.
+      return ctx.exportCapability!(createDoublerServer({
+        compute: ({ value }) => ({ value: value * 2 }),
         fail: () => {
           throw new Error("InteropExpectedFailure");
         },
-      } as unknown as RpcStub<Doubler>;
+        hold({ cap }, ctx) {
+          assert(!holdStarted);
+          assert(cap !== null);
+          ctx.retainParamCaps!();
+          holdStarted = true;
+          holdActive = true;
+          holdCleanup = (async () => {
+            try {
+              await new Promise<void>((resolve) => {
+                ctx.signal.addEventListener("abort", () => {
+                  holdCanceled = true;
+                  resolve();
+                }, { once: true });
+              });
+            } finally {
+              await cap.close();
+              holdActive = false;
+            }
+          })();
+          return holdCleanup.then(() => ({}));
+        },
+        async holdStatus({ release }) {
+          if (release) {
+            await withTimeout(
+              holdCleanup!,
+              2_000,
+              "remote pending handler cancellation",
+            );
+          }
+          return {
+            started: holdStarted,
+            active: holdActive,
+            canceled: holdCanceled,
+          };
+        },
+      })) as unknown as RpcStub<Doubler>;
     },
     fail() {
       throw new Error("InteropExpectedFailure");
@@ -217,6 +303,7 @@ function service(): { implementation: InteropService; check(): void } {
       assertEquals(count, 2);
       assertEquals(callbackCount, 1);
       assert(barrierSeen);
+      assert(holdStarted && holdCanceled && !holdActive);
     },
   };
 }
@@ -225,7 +312,7 @@ async function denoToZig(): Promise<void> {
   const child = launch(zig, ["server"], true);
   const transport = new PipeTransport(child);
   try {
-    await consume(transport);
+    await consume(transport, false);
     await terminated(child);
     await transport.drained();
   } finally {
@@ -238,15 +325,17 @@ async function zigToDeno(): Promise<void> {
   const child = launch(zig, ["client"], true);
   const transport = new PipeTransport(child);
   const state = service();
+  const audit = new CancellationAudit();
   const handle = await serveConnection(
     Interop,
-    { transport },
+    { transport: audit.wrap(transport, false) },
     state.implementation,
   );
   try {
     await terminated(child);
     await transport.drained();
     state.check();
+    audit.check();
   } finally {
     await handle.close();
     await transport.close();
@@ -260,11 +349,23 @@ async function cppToDeno(): Promise<void> {
   const listener = TcpTransport.listen({ port: 0, hostname: "127.0.0.1" });
   const address = listener.addr as Deno.NetAddr;
   const state = service();
-  const handle = serve(Interop, listener, state.implementation);
+  const audit = new CancellationAudit();
+  const handle = serve(Interop, {
+    get closed() {
+      return listener.closed;
+    },
+    close: () => listener.close(),
+    async *accept() {
+      for await (const accepted of listener.accept()) {
+        yield { transport: audit.wrap(accepted.transport, false) };
+      }
+    },
+  }, state.implementation);
   const child = launch(cpp, ["client", `127.0.0.1:${address.port}`]);
   try {
     await terminated(child);
     state.check();
+    audit.check();
   } finally {
     await handle.close();
     await stop(child);
@@ -288,7 +389,7 @@ async function denoToCpp(): Promise<void> {
     reader.releaseLock();
     const port = Number(line.trim());
     assert(Number.isInteger(port) && port > 0 && port <= 65535);
-    await consume(await TcpTransport.connect("127.0.0.1", port));
+    await consume(await TcpTransport.connect("127.0.0.1", port), true);
     await terminated(child);
   } finally {
     await stop(child);
@@ -306,6 +407,6 @@ for (
   if (Deno.args[2] === "cpp-only" && !label.includes("C++")) continue;
   await withTimeout(run(), 20_000, label);
   console.log(
-    `${label}: unary, callback, returned cap, error recovery, stream barrier, cleanup passed`,
+    `${label}: unary, callback, returned cap, pending cancellation/Finish/Release, error recovery, stream barrier, cleanup passed`,
   );
 }

@@ -6,6 +6,10 @@ export const schemaFilename = "interop.capnp";
 
 export const schemaImports = [
   {
+    id: 0xbdf87d7bb8304e81n,
+    name: "/capnp/c++.capnp",
+  },
+  {
     id: 0x86c366a91393f3f8n,
     name: "/capnp/stream.capnp",
   },
@@ -46,6 +50,30 @@ export const schemaNodes = [
     id: 0xc496cd3ead998d3bn,
     kind: "struct",
     displayName: "interop.capnp:Doubler.fail$Results",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xe87458e6623fe3bbn,
+    kind: "struct",
+    displayName: "interop.capnp:Doubler.hold$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xd39650b14bb38458n,
+    kind: "struct",
+    displayName: "interop.capnp:Doubler.hold$Results",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xace542a1a1e1d349n,
+    kind: "struct",
+    displayName: "interop.capnp:Doubler.holdStatus$Params",
+    scopeId: 0x0n,
+  },
+  {
+    id: 0xd1f7813ebb4da26en,
+    kind: "struct",
+    displayName: "interop.capnp:Doubler.holdStatus$Results",
     scopeId: 0x0n,
   },
   {
@@ -138,6 +166,22 @@ export const interfaceMethods = [
     codeOrder: 1,
     paramStructTypeId: 0xb224277dfb4062abn,
     resultStructTypeId: 0xc496cd3ead998d3bn,
+  },
+  {
+    interfaceId: 0x9f8dfef3719f4073n,
+    interfaceName: "Doubler",
+    methodName: "hold",
+    codeOrder: 2,
+    paramStructTypeId: 0xe87458e6623fe3bbn,
+    resultStructTypeId: 0xd39650b14bb38458n,
+  },
+  {
+    interfaceId: 0x9f8dfef3719f4073n,
+    interfaceName: "Doubler",
+    methodName: "holdStatus",
+    codeOrder: 3,
+    paramStructTypeId: 0xace542a1a1e1d349n,
+    resultStructTypeId: 0xd1f7813ebb4da26en,
   },
   {
     interfaceId: 0x809bab7477c424a3n,

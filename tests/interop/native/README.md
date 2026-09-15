@@ -49,3 +49,38 @@ To refresh checked-in TypeScript after an intentional emitter/schema change, run
 `deno task test:native-interop --update-fixtures`. This uses the same verified
 request and stable `interop.capnp` source prefix as normal verification, updates
 only `gen/`, and then runs the complete matrix. Review those generated changes.
+
+## Pending cancellation
+
+Every matrix row starts `Doubler.hold(cap)` on an already-returned child
+capability. `holdStatus(false)` proves the handler is active before the caller
+cancels: Deno uses `AbortSignal`, native Zig uses `Peer.cancelQuestion`, and C++
+drops the pending RPC promise. A subsequent successful `compute` uses the same
+capability and connection.
+
+The transport audit inspects actual frames without modifying them. It requires
+one `Finish` before the hold's terminal `Return` and one `Release` for its
+callback capability. The pending handler retains that callback explicitly.
+
+Deno's low-level generated server dispatch exposes `ctx.signal`; its ordinary
+convenience adapter does not pass call context. C++ enables cancellation on
+`hold` using the schema's `allowCancellation` annotation. Both handlers release
+their callback when cancellation reaches them.
+
+Native Zig's deferred handler API has no cancellation callback. Its
+`holdStatus(true)` verifies that `Finish` retired the pending answer, then
+completes it late and releases the callback. That row verifies client
+cancellation, late-return absorption, and cleanup; it does not claim that Zig
+automatically stops application work.
+
+The Deno bridge sends a terminal exception Return after a canceled handler
+settles, so native callers can retire their canceled-question bookkeeping. It
+discards late application results, preserves the handler's parameter-capability
+ownership decision even when it throws, and emits nothing after closure.
+
+The shared wire decoder also recognizes native `Return(canceled)` as
+`kind: "canceled"`. A late canceled Return is absorbed without affecting another
+pending call; an unsolicited canceled Return rejects its matching live call.
+Code consuming `RpcReturnMessage` should narrow on `kind === "results"` before
+reading result content; checking only `kind !== "exception"` is no longer
+sufficient.

@@ -61,6 +61,12 @@ fn compute(_: *anyopaque, _: *Peer, params: g.Doubler.Compute.Params.Reader, res
 fn fail(_: *anyopaque, _: *Peer, _: g.Doubler.Fail.Params.Reader, _: *g.Doubler.Fail.Results.Builder, _: *const Caps) anyerror!void {
     return error.InteropExpectedFailure;
 }
+fn forbiddenHold(_: *anyopaque, _: *Peer, _: g.Doubler.Hold.Params.Reader, _: *g.Doubler.Hold.Results.Builder, _: *const Caps) anyerror!void {
+    return error.ExpectedDeferredHold;
+}
+fn forbiddenHoldStatus(_: *anyopaque, _: *Peer, _: g.Doubler.HoldStatus.Params.Reader, _: *g.Doubler.HoldStatus.Results.Builder, _: *const Caps) anyerror!void {
+    return error.UnexpectedCallbackHoldStatus;
+}
 const ServerState = struct {
     child_id: u32 = 0,
     callback_client: ?g.Doubler.Client = null,
@@ -70,6 +76,38 @@ const ServerState = struct {
     count: u32 = 0,
     ack: ?g.Interop.Push.StreamReturnSender = null,
     barrier_seen: bool = false,
+    hold_started: bool = false,
+    hold_sender: ?g.Doubler.Hold.ReturnSender = null,
+    hold_cap: ?g.Doubler.Client = null,
+
+    fn hold(ctx: *anyopaque, peer: *Peer, params: g.Doubler.Hold.Params.Reader, caps: *const Caps, sender: g.Doubler.Hold.ReturnSender) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        try require(!self.hold_started);
+        const cap = try params.getCap();
+        const resolved = try caps.resolveCapability(cap);
+        try require(resolved == .imported);
+        try @constCast(caps).retainCapability(cap);
+        self.hold_started = true;
+        self.hold_sender = sender;
+        self.hold_cap = g.Doubler.Client.init(peer, resolved.imported.id);
+    }
+    fn holdStatus(ctx: *anyopaque, peer: *Peer, params: g.Doubler.HoldStatus.Params.Reader, result: *g.Doubler.HoldStatus.Results.Builder, _: *const Caps) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (try params.getRelease()) {
+            const sender = self.hold_sender orelse return error.NoPendingHold;
+            // Deferred native Zig handlers have no cancellation callback. The
+            // wire Finish must already have retired this active answer; the
+            // explicit probe now completes it late to drain caller ownership.
+            try require(peer.stats().active_inbound_questions == 1);
+            try sender.sendException("late native completion after cancellation");
+            self.hold_sender = null;
+            self.hold_cap.?.release();
+            self.hold_cap = null;
+        }
+        try result.setStarted(self.hold_started);
+        try result.setActive(self.hold_sender != null);
+        try result.setCanceled(false);
+    }
 
     fn echo(_: *anyopaque, _: *Peer, params: g.Interop.Echo.Params.Reader, result: *g.Interop.Echo.Results.Builder, _: *const Caps) anyerror!void {
         try result.setValue((try params.getValue()) + 1);
@@ -134,7 +172,7 @@ const ServerState = struct {
 };
 fn serve(peer: *Peer, link: *Link) !void {
     var state = ServerState{};
-    var child = g.Doubler.Server{ .ctx = &state, .vtable = .{ .compute = compute, .fail = fail } };
+    var child = g.Doubler.Server{ .ctx = &state, .vtable = .{ .compute = compute, .fail = fail, .hold = forbiddenHold, .hold_deferred = ServerState.hold, .holdStatus = ServerState.holdStatus } };
     state.child_id = try g.Doubler.exportServer(peer, &child);
     var server = g.Interop.Server{ .ctx = &state, .vtable = .{
         .echo = ServerState.echo,
@@ -160,6 +198,7 @@ fn serve(peer: *Peer, link: *Link) !void {
         }
     }
     try require(state.barrier_seen and state.callback_sender == null);
+    try require(state.hold_started and state.hold_sender == null and state.hold_cap == null);
     try require(peer.streaming.outstanding_calls == 0 and peer.streaming.outstanding_bytes == 0);
 }
 
@@ -169,6 +208,30 @@ const ClientState = struct {
     callback_id: u32 = 0,
     done: bool = false,
     next: u32 = 0,
+    holding_release: bool = false,
+    hold_canceled: bool = false,
+    fn holdBuild(ctx: *anyopaque, params: *g.Doubler.Hold.Params.Builder) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        try params.setCapCapability(.{ .id = self.callback_id });
+    }
+    fn holdReturn(ctx: *anyopaque, _: *Peer, response: g.Doubler.Hold.Response, _: *const Caps) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        try require(!self.hold_canceled);
+        try require(response == .exception and std.mem.eql(u8, response.exception.reason, "native pending cancellation"));
+        self.hold_canceled = true;
+    }
+    fn holdStatusBuild(ctx: *anyopaque, params: *g.Doubler.HoldStatus.Params.Builder) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        try params.setRelease(self.holding_release);
+    }
+    fn holdStatusReturn(ctx: *anyopaque, _: *Peer, response: g.Doubler.HoldStatus.Response, _: *const Caps) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const result = try response.unwrap();
+        try require(try result.getStarted());
+        try require(try result.getActive() == !self.holding_release);
+        try require(try result.getCanceled() == self.holding_release);
+        self.done = true;
+    }
     fn bootstrap(ctx: *anyopaque, _: *Peer, response: g.Interop.BootstrapResponse) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx));
         self.client = try response.unwrap();
@@ -237,7 +300,7 @@ const ClientState = struct {
 };
 fn consume(peer: *Peer, link: *Link) !void {
     var state = ClientState{};
-    var callback = g.Doubler.Server{ .ctx = &state, .vtable = .{ .compute = compute, .fail = fail } };
+    var callback = g.Doubler.Server{ .ctx = &state, .vtable = .{ .compute = compute, .fail = fail, .hold = forbiddenHold, .holdStatus = forbiddenHoldStatus } };
     state.callback_id = try g.Doubler.exportServer(peer, &callback);
     _ = try g.Interop.Client.fromBootstrap(peer, &state, ClientState.bootstrap);
     while (state.client == null) try link.receive(peer);
@@ -251,6 +314,20 @@ fn consume(peer: *Peer, link: *Link) !void {
     try state.wait(peer, link);
     _ = try state.child.?.callCompute(&state, ClientState.computeBuild, ClientState.computeReturn);
     try state.wait(peer, link);
+    // invoke released its imported callback, so export a new reference for hold.
+    state.callback_id = try g.Doubler.exportServer(peer, &callback);
+    const pending = try state.child.?.callHold(&state, ClientState.holdBuild, ClientState.holdReturn);
+    _ = try state.child.?.callHoldStatus(&state, ClientState.holdStatusBuild, ClientState.holdStatusReturn);
+    try state.wait(peer, link);
+    try require(!state.hold_canceled);
+    try peer.cancelQuestion(pending, "native pending cancellation");
+    try require(state.hold_canceled);
+    state.holding_release = true;
+    _ = try state.child.?.callHoldStatus(&state, ClientState.holdStatusBuild, ClientState.holdStatusReturn);
+    try state.wait(peer, link);
+    _ = try state.child.?.callCompute(&state, ClientState.computeBuild, ClientState.computeReturn);
+    try state.wait(peer, link);
+    try require(peer.stats().cancelled_questions == 0);
     _ = try state.child.?.callFail(&state, null, ClientState.failReturn);
     try state.wait(peer, link);
     // A successful call on the same cap after the exception proves recovery.

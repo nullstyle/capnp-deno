@@ -8,7 +8,22 @@
 #include <unistd.h>
 
 namespace {
+struct Checks {
+  uint32_t count = 0;
+  uint64_t sum = 0;
+  bool barrier = false;
+  bool pendingCanceled = false;
+};
+
 class DoublerServer final: public Doubler::Server {
+public:
+  explicit DoublerServer(Checks* checks = nullptr): checks(checks) {}
+private:
+  Checks* checks;
+  bool started = false;
+  bool active = false;
+  bool canceled = false;
+
   kj::Promise<void> fail(FailContext) override {
     return KJ_EXCEPTION(FAILED, "InteropExpectedFailure");
   }
@@ -17,9 +32,25 @@ class DoublerServer final: public Doubler::Server {
     context.getResults().setValue(context.getParams().getValue() * 2);
     return kj::READY_NOW;
   }
+  kj::Promise<void> hold(HoldContext context) override {
+    KJ_REQUIRE(!started);
+    started = true;
+    active = true;
+    auto cap = context.getParams().getCap();
+    return kj::Promise<void>(kj::NEVER_DONE).attach(kj::mv(cap), kj::defer([this]() {
+      active = false;
+      canceled = true;
+      if (checks != nullptr) checks->pendingCanceled = true;
+    }));
+  }
+  kj::Promise<void> holdStatus(HoldStatusContext context) override {
+    if (context.getParams().getRelease()) KJ_REQUIRE(canceled && !active);
+    context.getResults().setStarted(started);
+    context.getResults().setActive(active);
+    context.getResults().setCanceled(canceled);
+    return kj::READY_NOW;
+  }
 };
-
-struct Checks { uint32_t count = 0; uint64_t sum = 0; bool barrier = false; };
 
 class InteropServer final: public Interop::Server {
 public:
@@ -39,7 +70,7 @@ private:
     });
   }
   kj::Promise<void> child(ChildContext context) override {
-    context.getResults().setCap(kj::heap<DoublerServer>());
+    context.getResults().setCap(kj::heap<DoublerServer>(&checks));
     return kj::READY_NOW;
   }
   kj::Promise<void> fail(FailContext) override { return KJ_EXCEPTION(FAILED, "InteropExpectedFailure"); }
@@ -89,6 +120,21 @@ void consume(kj::AsyncIoContext& io, kj::StringPtr address) {
     KJ_REQUIRE(failed);
     auto recovery = child.computeRequest(); recovery.setValue(21);
     KJ_REQUIRE(recovery.send().wait(io.waitScope).getValue() == 42);
+    auto hold = child.holdRequest(); hold.setCap(kj::heap<DoublerServer>());
+    kj::Maybe<kj::Promise<void>> pending = hold.send().ignoreResult();
+    {
+      auto status = child.holdStatusRequest().send().wait(io.waitScope);
+      KJ_REQUIRE(status.getStarted() && status.getActive() && !status.getCanceled());
+    }
+    // Dropping the still-pending native RPC promise sends Finish.
+    pending = nullptr;
+    {
+      auto request = child.holdStatusRequest(); request.setRelease(true);
+      auto status = request.send().wait(io.waitScope);
+      KJ_REQUIRE(status.getStarted() && !status.getActive() && status.getCanceled());
+    }
+    auto afterCancellation = child.computeRequest(); afterCancellation.setValue(21);
+    KJ_REQUIRE(afterCancellation.send().wait(io.waitScope).getValue() == 42);
   }
   bool regularFailed = false;
   try { client.failRequest().send().wait(io.waitScope); }
@@ -123,7 +169,7 @@ int main(int argc, char** argv) {
       std::cout << listener->getPort() << std::endl;
       auto stream = listener->accept().wait(io.waitScope);
       server.accept(*stream).wait(io.waitScope);
-      KJ_REQUIRE(checks.barrier && checks.count == 2 && checks.sum == 3);
+      KJ_REQUIRE(checks.barrier && checks.count == 2 && checks.sum == 3 && checks.pendingCanceled);
     } else {
       KJ_REQUIRE(mode == "client" && argc == 3);
       consume(io, argv[2]);

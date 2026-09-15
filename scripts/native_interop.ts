@@ -253,6 +253,19 @@ try {
           await Deno.readFile(join(fixture, "interop.capnp")),
         ),
         rows: ["deno-zig", "zig-deno", "deno-cpp", "cpp-deno"],
+        pendingCancellation: {
+          wireChecks: [
+            "pending Call",
+            "one Finish before Return",
+            "one terminal Return",
+            "one callback Release",
+          ],
+          recovery: "successful compute on the same child capability",
+          denoServer: "AbortSignal with the modern Finish workaround bit false",
+          cppServer: "allowCancellation promise destruction",
+          zigServer:
+            "Finish retirement followed by explicit late completion; no handler abort hook",
+        },
       },
       null,
       2,
