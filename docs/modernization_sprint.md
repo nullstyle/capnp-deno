@@ -1,37 +1,86 @@
 # capnp-deno modernization sprint
 
-Survey date: 2026-09-15 UTC. Status: proposed; no runtime, dependency, or
-release changes have been made. Companion evidence:
+Survey date: 2026-09-15 UTC. Delivery update: 2026-09-15 UTC. The
+compiler/runtime migration and RPC correctness work are implemented; final
+hosted platform acceptance remains in progress. The historical survey below
+preserves the original findings and counts. Companion evidence:
 [capnp-wasm survey](capnp_wasm_delta_survey.md).
 
-## Recommendation
+## Delivery status
 
-Plan a **three-week sprint with two parallel workstreams** to deliver Deno-only
-schema compilation, a reproducible current capnp-zig runtime, and bounded,
-correct RPC lifecycles. Budget **22–32 engineering days**, including 3–4 days of
-integration contingency. A single contributor should budget roughly 4–6 weeks;
-publication decisions or new platform failures can extend either estimate.
+| Area                            | Delivered                                                                                                                                         | Remaining acceptance                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| S1 — Compiler host              | Public compiler-host `0.1.0-rc.3`, exact inventory/provenance pins, bounded worker, ordered roots and source-prefix parity                        | Hosted producer browser coverage remains separate from Deno acceptance |
+| S2 — Deno compiler integration  | Verified worker adapter, bounded reachable-file snapshot, read/write-only source CLI, preserved request/stdin/layout modes, staged output         | Hosted native acceptance                                               |
+| S3 — Runtime identity           | Current capnp-zig revision, canonical isolated `wasm-host` rebuild, exact Zig/Binaryen pin, checked-in WASM receipt and rebuild comparison        | Required hosted clean Linux rebuild                                    |
+| S4 — WASM ownership             | Exact-length frees, borrowed error handling, wrapper/serde scratch disposal, shared-instance and failure recovery regressions                     | Required native-platform real ownership runs                           |
+| S5 — Service lifecycle          | Full-lifetime close subscriptions, initialization-race cleanup, exact-once disposal, custom/wrapped/local MessagePort coverage                    | Required native-platform transport runs                                |
+| S6 — Wire and native interop    | Shared framing corpus, independent TS wire/copy corrections, standing native Zig/C++ matrix, bootstrap pipelining and native error-recovery fixes | Hosted Linux native interop lane                                       |
+| S7 — Streaming admission        | Exact encoded parameter-byte admission, one preparation candidate, callback rollback, ordinary-call barriers, separate retained Call-frame budget | Hosted platform validation of the implemented behavior                 |
+| S8 — Consumer and release gates | Shared CI/release validation, five native binary targets, package and executable receipt checks, mandatory browser lane, benchmark comparison     | Actual hosted workflow execution                                       |
 
-The intended release is the next capnp-deno minor, provisionally `0.6.0`, after
-compatibility review. This plan does not authorize publishing an SDK or tagging
-a release.
+The package version remains `0.5.0` in `deno.json`. This record does not
+announce a runtime package release. Local results establish the behavior
+exercised here; workflow definitions and successful cross-compilation alone do
+not establish Linux/macOS/Windows release acceptance.
 
-Keep three responsibilities distinct:
+### Local evidence after implementation
 
-| Module                         | Responsibility after the sprint                                                                                                   |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| capnp-wasm compiler host       | Compile schema bytes into `CodeGeneratorRequest` using pinned Cap'n Proto 2.0-dev; isolate execution and enforce compiler limits. |
-| capnpc-deno                    | Discover permitted files, preserve CLI path/layout semantics, interpret the request, and generate TypeScript.                     |
-| capnp-deno + capnp-zig runtime | TypeScript codecs, service/session/transports, and the Zig WASM peer. The compiler SDK does not replace this runtime.             |
+- Full verification passes formatting, lint, type checking, artifact receipts,
+  RPC generation drift, and **1,138 unit tests**. Compiler acceptance passes
+  **24/24**; isolated runtime-package and install/use/uninstall consumers pass.
+  The complete fast benchmarks and **10/10** regression checks pass.
 
-The compiler's binary request is the existing integration seam. The survey
-proved it works without rewriting the TypeScript generator. The published
-runtime should remain independent of compiler tooling and retain its existing
-entrypoints. See
-[compiler integration evidence](capnp_wasm_delta_survey.md#in-process-integration-is-already-feasible)
-and [current package contents](../deno.json).
+- Compiler-host rc.3 verification passed on Deno 2.6.8 for workers and on the
+  producer's Deno 2.9.6 direct/rejection path. Real non-yielding worker probes
+  established the two-second engine termination grace and per-client 2.1-second
+  restart delay. Source compiler execution therefore enforces exactly Deno
+  2.6.8; the earlier successful 2.9.6 smoke did not establish cancellation.
+- Source CLI end-to-end checks passed 7/7 without granting the compiler child
+  network or process access. RPC schema output matches fresh WASM generation.
+  The local standalone compiler passed its outside-checkout, empty-PATH/cache,
+  imported-schema/embed and binary-stdin probe. Isolated install/use/uninstall
+  and fresh generated-output parity for four examples, positive crossfile
+  fixtures, and the interop matrix passed. The saved 1.3 and new 2.0-dev
+  requests produce identical TypeScript output.
+- The runtime ownership tests cover 2,000 peer-wrapper cycles and 2,000 serde
+  cycles, including another live shared-module user and memory growth.
+- After the bootstrap fix, the real-WASM suite passed **36/36**, socket
+  integration **32/32**, and browser WebTransport **1/1**. The focused
+  bridge/runtime/bootstrap/input-budget set passed **77/77**. These are local
+  macOS arm64 results.
+- Native Zig ↔ Deno over framed pipes and native C++ ↔ Deno over TCP passed both
+  fixture-update and normal drift-check runs. The matrix includes unary calls,
+  callbacks, returned capabilities after parent Finish, typed failure and
+  recovery, delayed streaming barriers, and cleanup. C++ eagerly pipelines its
+  first call through bootstrap. The native receipt records matching source and
+  schema/request identities in `.capnp-cache/native-interop/last-success.json`.
+- Paired generated-serializer benchmarks measured **40.0 µs** count-only and
+  **49.1 µs** byte-bounded for 32 immediate calls on an M5 Max / Deno 2.6.8.
+  This is a local bookkeeping-cost comparison, not a network throughput claim.
+- Reusable workflow files pass `actionlint` 1.7.12 (including shellcheck) and
+  formatting. Hosted jobs have not yet supplied platform acceptance evidence.
 
-## Survey findings
+### Current responsibilities
+
+| Component                      | Responsibility                                                                                                  |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| capnp-wasm compiler host       | Compile schema snapshots to `CodeGeneratorRequest` with pinned Cap'n Proto 2.0-dev and bounded worker execution |
+| capnpc-deno                    | Resolve permitted files and CLI semantics, invoke the verified host, parse requests, and emit TypeScript        |
+| capnp-deno + capnp-zig runtime | TypeScript codecs, sessions, services and transports plus the independently pinned Zig WASM peer                |
+
+Current versions and hashes live in
+[the compiler pin](../tools/compiler_toolchain.json) and
+[runtime pin](../tools/runtime-toolchain.json), with build output identity in
+[the runtime receipt](../generated/capnp_deno.provenance.json). See
+[Toolchains and artifact delivery](toolchains.md) for actual commands,
+permissions, and engine constraints.
+
+The original proposal estimated a three-week sprint with two workstreams and
+22–32 engineering days. That estimate is historical; the sections below record
+what was delivered and what still needs validation.
+
+## Historical survey findings
 
 ### Revision and compatibility baseline
 
@@ -72,7 +121,7 @@ Sources:
 [streaming](/Users/nullstyle/prj/zig/capnp-zig/docs/streaming.md:7), and
 [framing corpus](/Users/nullstyle/prj/zig/capnp-zig/tests/fixtures/framing/README.md:7).
 
-### Checks actually run
+### Checks run before implementation
 
 | Check                                      | Result and scope                                                                                                                                                                    |
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -93,8 +142,9 @@ not an upstream regression.
 Baseline logs are
 `/tmp/capnp-deno-survey-{fmt,lint,check,generated,unit,real}.log`;
 current-runtime log is `/tmp/capnp-deno-survey-real-current.log`. Compiler probe
-commands and limits are recorded in the companion survey. Disposable probes must
-become maintained regression tests during implementation.
+commands and limits are recorded in the companion survey. The ownership,
+service-close, and compiler probes now have maintained regressions described in
+the delivery record below.
 
 ### Confirmed defects and missing guarantees
 
@@ -144,238 +194,135 @@ streaming tests, named benchmarks, and budget reporting already exist. Extend
 those assets. The September 8 [native KVStore probes](consumer_compatibility.md)
 are useful evidence, but are not a standing native cross-implementation CI job.
 
-## Sprint backlog
+## Delivery record
 
-Effort ranges below exclude the shared integration contingency. Names describe
-proposed work, not features already implemented.
+### S1 — Verified compiler-host delivery
 
-### S1 — Deliver a verified compiler-host package
+The selected public package contains the compiler, standard schemas, built
+TypeScript host/worker/declarations, licenses, and integrity/provenance data. It
+does not ship the Go SDK or other language generator implementations. The public
+archive and exact package identities are pinned in capnp-deno. Acquisition and
+verification are separate from offline schema compilation.
 
-**P0; capnp-wasm owner; 1–2 days.** Produce the smallest useful bundle:
-compiler, standard schemas, built TypeScript host/declarations/worker, licenses,
-and complete integrity/provenance data. Omit other language generators and Go
-SDK. Pin its identity in capnp-deno. Reuse producer packaging and verification
-rather than forking its WASI implementation into capnp-deno.
+Worker cancellation uses the verified Deno 2.6.8 engine contract. Each client
+waits beyond the engine termination grace before restarting; unsupported Deno
+versions fail before bounded execution. The producer's package checks also cover
+native request parity, roots/prefixes, imports, embeds, corruption, and external
+consumers. Local Chromium/WebKit checks passed; Firefox hosted acceptance is
+separate and is not claimed by this Deno migration.
 
-**Acceptance:** reproducible staging; missing/modified/extra package files fail
-verification; clean external Deno consumer; compiler/module/include identity
-matches the selected 2.0-dev toolchain; required worker assets resolve outside
-the producer checkout. Separate bootstrap acquisition from compilation:
-bootstrap downloads/verifies assets; the installed or compiled CLI uses verified
-local or embedded bytes. Missing/corrupt assets fail clearly. Test outside the
-checkout with fresh caches, including cancellation followed by worker restart.
+### S2 — Deno compiler/workspace integration
 
-**Distribution decision:** the existing public compiler-only archive excludes
-SDK implementation code. During implementation, prepare and verify this concrete
-new bundle first, then obtain the explicit decision to publish SDK bytes before
-uploading it or placing them in a public repository. If that decision is
-deferred, the existing Python/Wasmtime driver can unblock repository generation,
-but does not satisfy the Deno-only shipped-CLI goal. Record that reduced scope
-explicitly.
+`tools/capnpc-deno/compiler.ts` runs the verified host in a worker.
+`workspace.ts` snapshots reachable schema/import/embed files, preserves ordered
+roots and prefixes, and enforces path/entry/byte limits. It reads explicit files
+under Deno's permissions; `--src` discovery is separately bounded and skips
+symlink entries. Output validation/staging preserves existing files on compiler
+or emitter failure, with per-file replacement rather than a whole-tree
+transaction guarantee.
 
-### S2 — Make normal codegen run entirely inside Deno
+Normal source generation grants only read/write permission. Saved requests,
+binary stdin/plugin responses, config, schema/flat layout, and barrel behavior
+remain supported. The saved multi-schema request is from compiler 1.3; evolution
+writer fixtures remain on 1.5.0. These are compatibility evidence alongside a
+separately identified current 2.0-dev request. Native encode/version fixture
+maintenance stays behind separate verified Python/Wasmtime tasks.
 
-**P0; compiler/codegen owner; 3–5 days; depends on S1.** Replace the native
-process call with a compiler module that snapshots permitted files, maps logical
-names, and returns request bytes. Preserve saved-request and stdin plugin modes,
-config precedence, schema/flat layout, successive barrel merging, and
-diagnostics. Bound traversal, file count, and bytes before constructing the
-snapshot; define symlink handling and never scan an entire drive merely to
-obtain a common root. Use the producer worker for real deadlines/cancellation; a
-timer around synchronous guest execution cannot interrupt it.
+Standalone delivery embeds the verified assets and engine; source compilation
+and compiled delivery share the same pin. Generated-output parity and isolated
+standalone/install checks passed locally. Final compatibility fixture tests,
+isolated runtime-package checks, and hosted platform execution remain the
+release acceptance work.
 
-Move normal task/install/compiled-binary paths off `--allow-run=capnp`. Migrate
-RPC/schema generation and request fixtures to the pinned compiler host. The SDK
-currently exposes compile/generate, not general `encode` commands: keep
-developer fixture encoding/version probes on the existing verified
-Python/Wasmtime driver, in a separate maintenance task. Do not expand the SDK
-command interface just for fixture refresh or add process permission to normal
-codegen. Stage generated output and validate destinations before publishing
-files; define per-file atomic replacement and stale-file behavior without
-promising whole-tree transactions.
+### S3 — Runtime refresh and provenance
 
-**Acceptance:** existing CLI end-to-end/golden suite; full generated-output
-review; ordered `-I` precedence and standard-import isolation; binary embeds;
-spaces, Unicode, same-basename files, absolute paths, and Windows volumes;
-resource-limit, timeout, cancellation, and recovery tests; no generated changes
-on compiler/emitter failure. Installed and compiled CLIs work offline after
-artifact acquisition, without native `capnp`, Wasmtime, or process permission.
-Compiled worker/module embedding is a required platform test, not an assumption.
+The vendored runtime now includes the reviewed native ordinary-call
+error-recovery fix discovered during interop. The canonical `wasm-host` build
+uses pinned ReleaseSmall/Binaryen settings in isolated output and records
+source, tool versions, optimization, hash, ABI range, exports, and features.
+`check:wasm` and `check:wasm-rebuild` verify artifact identity and
+reproducibility. The compiler host remains independent of ordinary runtime
+loading.
 
-Preserve old 1.5.0 writer fixtures as compatibility oracles and add 2.0-dev
-fixtures. The current request model ignores compiler/source-position metadata;
-do not introduce version-specific parsing or lossless reflection without an
-observed need. Full generics and composite defaults remain outside this ticket.
+### S4 — WASM ownership
 
-### S3 — Refresh and identify the runtime artifact
+Borrowed error strings are read without freeing their backing storage. Owned
+outputs preserve exact free lengths, including zero. ABI and serde wrapper
+scratch allocations have explicit disposal; closing one wrapper preserves other
+users of the shared module. Maintained real tests exercise failures, recovery,
+shared users, and thousands of create/use/close cycles.
 
-**P0; runtime owner; 2–3 days.** Advance capnp-zig to the surveyed current
-commit (or a deliberately reviewed successor). Keep the submodule bump separate
-from host behavior fixes. Use canonical `wasm-host` with explicit
-`-Dwasm-optimize` and isolated build/cache output. Make the expected WASM output
-unambiguous, pin optimization inputs, and generate a build receipt containing
-source commit, Zig/Binaryen versions and flags, artifact hash, ABI range,
-exports, and feature flags.
+### S5 — Service closure
 
-**Acceptance:** old-artifact/new-artifact real-test matrix; version/feature
-negotiation failures remain explicit; clean rebuild matches the checked-in
-artifact under the documented deterministic build configuration; package
-preflight uses those exact bytes. Do not require capnp-wasm or its compiler to
-load the ordinary runtime. Refresh RPC fixtures and schemas with independently
-reviewed semantic versus metadata changes.
+Service handles retain their close subscription for the full active lifetime,
+then detach it on terminal closure or initialization failure. Regressions cover
+custom/wrapped transports, asynchronous factory races, replay/unsubscribe,
+exact-once disposal, and local MessagePort closure. Remote MessagePort closure
+is not advertised where the platform provides no event.
 
-### S4 — Repair WASM allocation and error ownership
+### S6 — Wire and native interoperability
 
-**P0; runtime owner; 2–3 days; can start immediately.** Make borrowed reads and
-owned allocations explicit inside `WasmAbi`. Preserve the exact allocated or
-returned length, including zero. Never free borrowed error text. Audit error
-retrieval, scratch out-parameters, frame pops/commit, host-call frames, and peer
-closure against the upstream contract. Keep original failures from being masked
-by cleanup failures. Give persistent ABI/serde scratch an explicit disposal
-path; distinguish peer, wrapper, and shared module ownership so disposing one
-wrapper does not shut down others. Validate ABI compatibility before allocation
-or unwind failed constructors. Replace the fake test that currently expects
-borrowed error text to be freed.
+The shared framing corpus is pinned by revision/hash and checked through Deno's
+independent framing path. TS wire copying and text handling now cover the
+observed double-far, empty-struct, malformed pointer, UTF-8/NUL, and copy-budget
+gaps. The standing native runner builds source-matched Zig and C++ references
+and checks generated fixture drift.
 
-**Acceptance:** real tests for zero-length buffers, error read/clear/reuse,
-failed operations followed by valid operations, and repeated create/call/close
-cycles on one module instance, including serde and multiple shared wrappers. A
-soak of thousands of cycles exceeding the reproduced 512-cycle failure must keep
-allocations available and exhibit no accumulating `InvalidFree` state. Run on
-both bundled baseline and newly built runtime; retain existing fake tests for
-host control flow. Land narrow upstream fixes only if a producer defect is
-proved.
+Native testing exposed two real defects: Zig's generated server incorrectly made
+an ordinary failed call poison later streaming work, and Deno's bridge lacked
+bootstrap answers already produced by WASM. Both are fixed with regressions.
+Deno mirrors the actual bootstrap Return before host dispatch, accounts repeated
+grants/answer holds, and closes on answer-table overflow. Native error tests
+respect the host's public exception-disclosure policy.
 
-### S5 — Unify service and transport closure
+The four-way matrix is locally green. Multi-party RPC, native Zig socket
+coverage, and full generic support are outside this matrix's claims.
 
-**P1; lifecycle owner; 2–3 days; independent of compiler work.** Supervise
-services through the existing closure-subscription interface. Remove
-concrete-class knowledge where that contract suffices. Preserve compatibility
-for transports without the optional subscription and document the corresponding
-obligation. The service handle must own its subscription throughout active
-service, then unsubscribe on terminal closure or failed initialization. Existing
-code detaches the initialization observer immediately before returning an active
-handle; merely changing the helper to call `subscribeClose` would miss later
-closure again.
-([Current detach](/Users/nullstyle/prj/local/capnp-deno/src/rpc/server/service.ts:1393))
+### S7 — Exact byte admission
 
-**Acceptance:** actual custom and wrapped transports close the service handle,
-runtime, and instance exactly once; close before/during an async factory
-prevents activation and disposes late results; replay/unsubscribe races; local
-MessagePort closure; direct TCP/WS/WebTransport cases; cancellation rejects
-pending callers and releases callback capabilities; post-activation closure
-works and no listeners remain after disposal. Do not claim that remote
-MessagePort closure is detectable when its platform supplies no such event.
+Generated helpers serialize each item once and reserve its parameter-message
+length before a transport assigns a question. This includes the parameter
+segment table and excludes RPC envelopes, capability metadata, transport queues,
+and producer-owned input. One encoded preparation candidate may wait outside the
+admitted budget; stats report it separately. Abort/rejection before question
+ownership rolls back new callback exports.
 
-### S6 — Share framing evidence and automate native interoperability
+Server input admission separately counts full Call-frame bytes retained by
+unfinished dispatches. Finish/Release control traffic still runs; a canceled
+handler retains its charge until it actually settles. Pipelined child waits are
+abortable even if the parent handler ignores cancellation. Generated ordinary
+methods wait for accepted streaming handlers before running. These contracts and
+their limits are documented in [Streaming RPC](streaming.md).
 
-**P1; integration owner; 3–4 days; uses S3/S5.** Consume the current capnp-zig
-framing corpus by revision/hash and run it through Deno's independent framer and
-wire path. Define Deno's default versus explicitly configured segment/message/
-buffer limits rather than silently copying unrelated defaults. Extend existing
-interop tests into a standing native Zig peer and matched C++ reference job.
+### S8 — Validation before publication
 
-**Acceptance:** common split/coalesced, multi-segment, truncated, overflow, and
-limit cases; standard/legacy double-far structs and lists, empty-struct
-presence, malformed nested pointers, evolved-list unknown-field retention,
-strict text, and copy-budget behavior through both TS and WASM paths; external
-old/new schema defaults; bidirectional generated unary RPC, callback and
-returned capabilities, cancellation/Finish/Release, typed errors, and streaming
-barriers. Assert cleanup as well as returned values. Native reference
-compilers/generators must match their own runtime libraries; keep those
-reference tools separate from normal Deno codegen.
+CI and release call one reusable workflow. Each native Linux x86_64/arm64, macOS
+x86_64/arm64, and Windows x86_64 row runs compiler/runtime/package checks,
+compiles its own executable, executes its isolated-consumer checks, and uploads
+that binary plus provenance. Release publication depends on the entire shared
+validation result at the tag's commit and downloads only those tested assets.
 
-Sources:
-[upstream corpus](/Users/nullstyle/prj/zig/capnp-zig/tests/fixtures/framing/framing_fixtures.json),
-[Deno framer](/Users/nullstyle/prj/local/capnp-deno/src/rpc/wire/framer.ts:164),
-[current interop coverage](interop.md).
+Separate required lanes cover a clean Linux runtime rebuild, native interop,
+browser WebTransport, and existing benchmark budgets/comparison. Unit tests are
+not rerun solely to produce a second coverage pass. Successful main runs supply
+benchmark baselines only after comparison succeeds.
 
-### S7 — Add byte-bounded streaming admission
+Final local compatibility and runtime-package validation, followed by actual
+hosted workflow results, are still required before treating the sprint's full
+release acceptance as complete. No cross-compiled-only artifact is advertised as
+natively tested.
 
-**P1; RPC/codegen owner; 3–4 days; uses S2/S5/S6.** Current `StreamSender`
-bounds call count only. Add an encoded-byte budget alongside that window, with
-generated helpers supplying accurate encoded sizes and avoiding duplicate
-serialization. Account for retained/in-flight data through acknowledgment or
-cancellation and make oversized-item behavior explicit. Keep capacity waits and
-sender stats consistent with both limits. Define server-side retained-input
-admission as well; transport queue limits alone do not bound work retained by an
-asynchronous handler.
+## Remaining completion criteria
 
-**Acceptance:** mixed tiny/large messages respect call and byte budgets; a
-single oversized item fails promptly; byte reservations are released on
-error/cancel; slow handlers and delayed acknowledgments cannot grow retained
-work without a bound; a following non-streaming call observes the expected
-barrier; current callback/cancellation semantics and native interoperability
-remain correct. Measure allocation/throughput against the existing streaming
-benchmarks.
+1. Finish the compiler/compatibility fixture test rerun and isolated runtime
+   package checks on the final candidate; retain failures as blocking evidence.
+2. Run the shared workflow on the exact candidate across all five native
+   targets, including clean rebuild, native interop, browser and benchmark
+   gates.
+3. Review version/release notes and publish only after the required candidate
+   gates succeed. Keep source, runtime, compiler, and generated changes scoped
+   and preserve existing user workspace changes.
 
-This requires Deno work. Upstream native streaming improvements are not exported
-automatically by the WASM ABI. The first implementation task is to define the
-accounting point and size measurement in the generated send path; do not
-substitute an estimated byte count while documenting a hard exact-byte limit.
-State whether the accounting includes framing and capability descriptors, and
-test that exact definition against the bytes actually sent.
-([Current options](/Users/nullstyle/prj/local/capnp-deno/src/rpc/session/streaming.ts:46))
-
-### S8 — Make release artifacts prove themselves
-
-**P0 release gate; release owner; 3–4 days; start scaffolding early, finish
-last.** Add Linux/macOS/Windows execution for compiler CLI, runtime loading, and
-isolated consumer smoke tests. Make fast verification non-mutating. Check
-generation and artifact drift. Exercise the installed package's filtered
-contents in a directory without the source checkout, vendor tree, or developer
-caches.
-
-**Acceptance:** execute representative native release binaries on each supported
-OS, including Windows paths with spaces and binary stdin; verify all advertised
-target artifacts or label compile-only targets explicitly. Test runtime and
-compiler delivery independently. Every isolated runtime consumer must perform a
-generated unary call plus a callback/error case, not merely import its WASM.
-Keep published runtime imports dependency-clean. The tag workflow validates
-exact tag/version and depends on required test, integrity, and consumer gates
-before uploading assets. No CI token should need private-producer access once
-the selected public delivery model is established. Run an explicit
-browser/WebTransport lane when changing its lifecycle; record unsupported cases
-instead of silently calling them tested.
-
-## Sequence and landing plan
-
-| Period | Compiler/release stream                                                          | Runtime/RPC stream                                            | Exit evidence                                                                          |
-| ------ | -------------------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Week 1 | S1 package/decision; S2 workspace and request integration; S8 platform skeleton  | S4 ownership fixes; S3 reproducible runtime update; begin S5  | Verified compiler package locally, real host regressions green, pinned runtime receipt |
-| Week 2 | Finish S2 installed/compiled CLI and generation parity; begin consumer packaging | Finish S5; S6 shared corpus/native peers; begin S7            | Native-free codegen and real lifecycle/interop gates                                   |
-| Week 3 | S8 clean consumers and release gates; documentation and platform fixes           | Finish S7, cancellation/streaming interop and allocation soak | All required gates on exact release candidate; reviewable release artifacts            |
-
-Use scoped Conventional Commits. Keep host fixes, submodule advance, compiler
-integration, and regenerated artifacts reviewable as separate landing units, per
-the repository's guidance. Preserve the existing user `mise.toml` addition and
-`.zcode/` work. Update the stale prerequisites, ABI/additions guide, and release
-checklist as part of the relevant ticket rather than creating another obsolete
-roadmap.
-
-## Completion criteria and scope control
-
-The sprint is complete when a clean consumer can generate TypeScript with the
-pinned 2.0-dev compiler, run that output with the identified current Zig
-runtime, exercise lifecycle and byte limits, and reproduce the result on all
-three supported operating systems. Required compiler/runtime tests must fail
-when their artifacts are absent or invalid; browser availability remains
-explicitly scoped.
-
-Keep existing interop/performance gates and add meaningful allocation, compiler
-cold/warm, and byte-window measurements. Do not spend the sprint re-creating
-existing benchmarks or raising the Deno version merely because the producer uses
-a newer one: the compiler spike already works on 2.6.8. A Deno bump needs a
-specific required feature or a separate runtime/browser compatibility result.
-
-If time runs short, a reduced release milestone may defer S7 as a named
-follow-on while still completing compiler delivery, runtime ownership, closure,
-interop, and release gates. That milestone must omit byte-limit feature claims
-and is not full completion of this sprint. Do not cut the new regression tests
-or public-package verification to fit the date.
-
-Follow-on candidates: cross-file nested type exports (currently rejected),
-non-null struct/list defaults, generic brands, richer reflection/source
-metadata, and expanded L3/L4 host interfaces. Each needs its own observable
-consumer benefit; none is a prerequisite for adopting the surveyed
-compiler/runtime revisions.
+Follow-on candidates remain cross-file nested type exports, non-null struct/list
+defaults, generic brands, richer reflection/source metadata, and expanded L3/L4
+host interfaces. The migration does not claim those features.

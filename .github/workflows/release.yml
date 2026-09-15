@@ -1,4 +1,3 @@
-# .github/workflows/release.yml
 name: release
 
 on:
@@ -7,67 +6,35 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  # ── Build capnpc-deno binaries for release targets ────────────────
-  build-capnpc-binaries:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            asset_name: capnpc-deno-x86_64-unknown-linux-gnu
-          - target: aarch64-unknown-linux-gnu
-            asset_name: capnpc-deno-aarch64-unknown-linux-gnu
-          - target: x86_64-apple-darwin
-            asset_name: capnpc-deno-x86_64-apple-darwin
-          - target: aarch64-apple-darwin
-            asset_name: capnpc-deno-aarch64-apple-darwin
-          - target: x86_64-pc-windows-msvc
-            asset_name: capnpc-deno-x86_64-pc-windows-msvc.exe
-    steps:
-      - uses: actions/checkout@v4.3.1  # actions/checkout v4
+  # The local workflow and every checkout resolve to this tag's exact commit.
+  validate:
+    uses: ./.github/workflows/validation.yml
 
-      - uses: jdx/mise-action@v3.6.1  # jdx/mise-action v3
-        with:
-          install: true
-          cache: true
-          github_token: ${{ github.token }}
-
-      - name: Compile capnpc-deno binary
-        run: deno task codegen:compile "${{ matrix.target }}" "dist/${{ matrix.asset_name }}"
-
-      - name: Upload compiled binary artifact
-        uses: actions/upload-artifact@v4.6.2  # actions/upload-artifact v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
-          if-no-files-found: error
-          retention-days: 7
-
-  # ── Publish GitHub release and attach compiled binaries ───────────
   github-release:
-    runs-on: ubuntu-latest
+    name: Publish tested native binaries
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
-    needs: build-capnpc-binaries
+    needs: validate
+    permissions:
+      contents: write
     steps:
-      - name: Download compiled binary artifacts
-        uses: actions/download-artifact@v4  # actions/download-artifact v4
+      - name: Download only the native artifacts from this validation run
+        uses: actions/download-artifact@v4
         with:
+          pattern: capnpc-deno-*
           path: dist
           merge-multiple: true
-
-      - name: Create or update GitHub release
+      - name: Create or update the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --verify-tag --generate-notes --title "$TAG"
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"
           fi
-

@@ -1,169 +1,94 @@
-# CLAUDE.md
+# Repository instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with
-code in this repository.
+capnp-deno (`@nullstyle/capnp`) provides TypeScript serialization and RPC backed
+by a Zig-built WASM peer. `capnpc-deno` is its schema-to-TypeScript generator;
+it runs the separately pinned capnp-wasm compiler host. The compiler is a
+build-time dependency and is excluded from the published runtime.
 
-## Project Overview
+## Toolchains and validation
 
-capnp-deno (`@nullstyle/capnp`) is a Deno-first Cap'n Proto runtime providing
-binary serialization, RPC, and schema-to-TypeScript code generation. The core
-protocol logic runs in a WASM module built from Zig (`vendor/capnp-zig`
-submodule); the TypeScript layer handles session management, transports,
-middleware, and codegen.
+**Read [docs/toolchains.md](docs/toolchains.md) when changing compiler
+integration, WASM builds, artifact acquisition, installed binaries, or release
+validation.** It defines the two artifact contracts, permissions, version
+requirements, and maintenance-only native tools. Pins live in
+`tools/compiler_toolchain.json`, `tools/runtime-toolchain.json`, and
+`mise.toml`.
 
-## Common Commands
+Use `mise exec -- deno` for repository tasks. Source compilation and compiler
+builds require exactly Deno 2.6.8 because worker termination was verified on
+that engine version. Runtime consumers require Deno 2.6+.
 
-```sh
-# Fast gate: format, lint, type-check, unit tests
-deno task verify
+Acquire compiler assets with `deno task compiler:fetch` before generation or
+compiler validation. Normal source generation runs with read/write permission;
+acquisition is the separate network step. Missing or corrupt artifacts must fail
+clearly. Keep compiler assets out of runtime imports and package contents.
 
-# Unit tests only (fast, no network/WASM needed)
-deno task test:unit
+Use the task definitions in `deno.json` as the command reference:
 
-# Single test file
-deno test tests/session/session_test.ts
+- `verify` checks formatting without rewriting, lint, runtime integrity, types,
+  generated artifacts, and unit tests.
+- `test:unit` includes generated/lifecycle checks using the checked-in WASM.
+- `test:real` exercises that artifact; rebuild only when source or toolchain
+  inputs change.
+- `check:wasm-rebuild` proves the pinned clean source rebuild matches the
+  checked-in WASM and provenance.
+- Run socket and real-WASM tests when changing framing, session pumping,
+  capability ownership, or transport lifecycle. Run browser WebTransport when
+  its lifecycle changes.
+- `check:package`, `check:compiler-binary`, and `check:compiler-install`
+  exercise isolated package, executable, and installation consumers.
+  `.github/workflows/validation.yml` is the shared CI/release gate; a local run
+  does not establish unexecuted native-platform acceptance.
 
-# Socket integration tests (needs --allow-net)
-deno task test:integration
+When changing vendor code, run the relevant tests in its canonical repository.
+Keep the reviewed submodule advance separate from TypeScript/runtime behavior
+changes. RPC schema generation uses `deno task codegen:rpc`; native wire fixture
+regeneration uses `just regen-rpc-fixtures`.
 
-# Codegen CLI end-to-end tests (needs capnp binary, --allow-run/--allow-write)
-deno task test:codegen-e2e
+## Architecture and ownership
 
-# Real WASM tests (must build WASM first)
-just build-wasm          # or: CAPNPC_ZIG_ROOT=vendor/capnp-zig deno task build:wasm
-deno task test:real
+Public entrypoints are `src/mod.ts`, `src/rpc.ts`, `src/encoding.ts`, and
+`src/advanced.ts`. Keep public runtime imports relative and dependency-clean.
+Advanced exports expose low-level ABI, peer, and serde controls.
 
-# Full real-WASM verification (build + smoke + integration + real tests)
-deno task verify:real
+The compiler path is:
 
-# Format / lint / type-check individually
-deno task fmt
-deno task lint
-deno task check
-
-# Codegen from schema
-deno task codegen generate --schema path/to/schema.capnp --out generated
-
-# Codegen from directory of schemas
-deno task codegen generate --src schema/ --out generated --layout schema
-
-# Codegen via just (shorthand)
-just codegen-schema tests/fixtures/schemas/person_codegen.capnp
-just codegen-request path/to/request.bin
-
-# Benchmarks
-deno task bench:fast     # skip real-WASM benches
-deno task bench:real     # real-WASM benches only
+```text
+schema files → bounded workspace snapshot → verified compiler worker
+             → CodeGeneratorRequest → existing TS parser/emitter
+             → *_types.ts, *_meta.ts, namespaced barrel
 ```
 
-CI gates: `just ci-fast` (PR minimum), `just ci-integration`, `just ci-real`.
+`tools/capnpc-deno/workspace.ts` owns permitted files and ordered import roots;
+`compiler.ts` owns the verified worker. Preserve saved requests, stdin plugin
+mode, layout/config semantics, and failure-safe output staging when changing
+this seam.
 
-If changing vendor code, also run `cd vendor/capnp-zig && just test`. Regenerate
-RPC fixtures with `just regen-rpc-fixtures` (runs the local Zig CLI under
-`tools/gen_rpc_fixtures/`, which reuses the vendored fixture library).
+The RPC path is `RpcSession` → `WasmPeer`, with transport adapters below and
+client/server helpers above. `RpcServerRuntime` pumps host calls through
+`RpcServerBridge`; the bridge owns dispatch registrations and answer holds.
+`service.ts` owns service lifetime and close subscriptions.
 
-## Architecture
+**Invariant:** after each inbound frame, drain outbound frames in order before
+processing the next. Preserve ownership boundaries: borrowed error text, owned
+outputs with exact lengths, wrapper scratch, peer handles, and shared module
+state have different lifetimes. Streaming parameter-byte admission and server
+retained Call-frame budgets also have different accounting scopes; see
+[docs/streaming.md](docs/streaming.md).
 
-### Module Entrypoints
+## Changes and regression evidence
 
-- `src/mod.ts` — public API; all user-facing exports go here
-- `src/advanced.ts` — re-exports `mod.ts` plus low-level WASM APIs (`WasmAbi`,
-  `WasmPeer`, `instantiatePeer`, `WasmSerde`)
-
-### Layered RPC Stack
-
-```
-Schema (.capnp)  →  capnpc-deno codegen  →  *_types.ts, *_meta.ts
-
-Client side:                          Server side:
-  SessionRpcClientTransport             RpcServerBridge
-       ↓                                    ↓
-  RpcSession ←→ WasmPeer(ABI)          RpcServerRuntime
-       ↓                                    ↓
-  Transport (TCP/WS/MessagePort)        Transport (same)
-```
-
-**Core invariant**: after each inbound frame, drain all outbound frames in order
-before processing the next.
-
-### Key Source Files
-
-| Path                                    | Role                                                   |
-| --------------------------------------- | ------------------------------------------------------ |
-| `src/wasm/abi.ts`                       | WASM ABI wrapper (memory, alloc/free, peer calls)      |
-| `src/wasm/peer.ts`                      | Host-side peer lifecycle                               |
-| `src/wasm/load.ts`                      | WASM module loading                                    |
-| `src/observability/observability.ts`    | Observability helpers (spans, metrics)                 |
-| `src/rpc/session/session.ts`            | RPC session management                                 |
-| `src/rpc/session/client.ts`             | Client transport + pipeline                            |
-| `src/rpc/session/streaming.ts`          | Streaming RPC support                                  |
-| `src/rpc/server/bridge.ts`              | Server bridge + dispatch                               |
-| `src/rpc/server/runtime.ts`             | Combines session + bridge into a runtime               |
-| `src/rpc/server/outbound.ts`            | Server outbound message handling                       |
-| `src/rpc/server/service.ts`             | Service registry + dispatch                            |
-| `src/rpc/wire.ts`                       | Canonical RPC wire encode/decode/router barrel         |
-| `src/rpc/transports/middleware.ts`      | Frame-level middleware (logging, metrics, size limits) |
-| `src/rpc/transports/`                   | TCP, WebSocket, MessagePort adapters                   |
-| `src/rpc/transports/reconnect.ts`       | Reconnection + resilience                              |
-| `src/rpc/transports/connection_pool.ts` | Multi-connection pool                                  |
-| `src/rpc/wire/framer.ts`                | Cap'n Proto segment framing                            |
-| `tools/capnpc-deno/`                    | Schema→TypeScript code generator                       |
-
-### Code Generation Pipeline
-
-```
-.capnp schema
-    → capnp compile -o- (binary CodeGeneratorRequest)
-    → capnpc-deno plugin
-    → 2 files per schema: *_types.ts (types+codecs+stubs), *_meta.ts (reflection)
-```
-
-### Test Organization
-
-- `tests/fake_wasm.ts` — mock WASM for fast unit tests (no build step needed)
-- `tests/test_utils.ts` — shared test helpers
-- `tests/codegen/` — codegen test suite (`capnpc_deno_*_test.ts`)
-- `tests/encoding/` — serialization tests
-- `tests/server/` — server bridge, runtime, service, outbound tests
-- `tests/session/` — client, session, streaming, lifecycle tests
-- `tests/transports/` — TCP, WebSocket, MessagePort, reconnect, pool tests
-- `tests/wire/` — framer, frame limits, wire encode/decode tests
-- `tests/wasm/` — ABI, peer, and real WASM runtime tests (require `build-wasm`)
-- `tests/transports/socket_integration_test.ts` — TCP/WS loopback tests
-
-## Code Style
-
-- TypeScript strict mode. Format with `deno fmt`, lint with `deno lint`.
-- snake_case file names. Test files: `{module}_test.ts`.
-- Prefer named `function` declarations over arrows. Use `#private` fields.
-- Use `import type` for type-only imports (Deno's `verbatim-module-syntax`
-  rule).
-- Keep transport APIs aligned with `RpcTransport` (`start`, `send`, `close`) and
-  preserve byte/frame ordering.
-- Prefer explicit types on exported surfaces; avoid Node-specific types
-  (`Buffer`) in runtime code.
-- Use the custom error hierarchy (`AbiError`, `TransportError`, `ProtocolError`,
-  `SessionError`, `InstantiationError`); never throw bare `Error` from library
-  code.
-- All public APIs need JSDoc with `@param`, `@returns`, and `@example`.
-- Conventional Commits (`feat(session): ...`, `fix(transport): ...`).
-- Never create `bd:backup` commits. Use intentional, scoped Conventional Commit
-  messages for real code/docs/test changes only.
-- Keep runtime changes and `vendor/capnp-zig` submodule bumps in separate
-  commits.
-- PRs should list commands run, permissioned test modes used (`--allow-net`,
-  `--allow-read`), and any fixture or artifact updates.
-
-## Testing Guidelines
-
-- Use `tests/fake_wasm.ts` for fast host-logic tests; reserve real-WASM tests
-  for ABI compatibility and schema serde behavior.
-- Add/adjust integration tests when touching framing, session pumping, or
-  transport event handling.
-- No fixed coverage threshold is defined, but behavior changes must include
-  corresponding tests.
-
-## Prerequisites
-
-- Deno 2.6+, Just (task runner). Zig 0.15+ only for WASM builds. Versions pinned
-  in `mise.toml`.
+- Use strict TypeScript, snake_case filenames, `#private` fields, named
+  functions where practical, and explicit types on exported surfaces.
+- Keep Node-specific types such as `Buffer` out of runtime APIs.
+- Use the project's custom error hierarchy for library failures.
+- Public APIs need JSDoc with `@param`, `@returns`, and `@example`.
+- Format changed files with `deno fmt`; `verify` is the non-mutating gate.
+- Use `tests/fake_wasm.ts` for host control flow. ABI ownership, binary
+  compatibility, and native interop regressions need the real boundary.
+- Generated fixtures come from their schemas or saved requests. Review output
+  drift before updating intentional golden hashes.
+- Use scoped Conventional Commits, including the behavior and relevant
+  verification. Keep vendor changes, host fixes, compiler integration, and
+  generated output reviewable. Create intentional commits, never `bd:backup`.
+- PR descriptions record permissioned test modes and artifact/fixture updates.

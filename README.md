@@ -41,30 +41,38 @@ Runtime invariant:
 
 ### Prerequisites
 
-- Deno (repo pins `2.6.8` in `mise.toml`)
-- Just (`1.46.0`) for convenience commands
-- Zig (`0.15.2`) only when rebuilding `generated/capnp_deno.wasm`
-- `capnp` CLI for schema/codegen workflows
+- Runtime consumers: Deno 2.6+; the package includes its Zig-built WASM runtime.
+- Source schema compilation and compiler builds: exactly Deno **2.6.8**. Use
+  `mise exec -- deno` to select the repository pin.
+- Runtime rebuilds: the exact Zig and Binaryen versions in
+  [the runtime toolchain pin](tools/runtime-toolchain.json).
+- Just is optional; the commands below use Deno tasks directly.
 
-### Validate Your Environment
-
-```sh
-just ci-fast
-```
-
-This runs format, lint, type-check, and unit tests.
-
-### Build/Rebuild Runtime WASM (when needed)
+The compiler is the pinned **capnp-wasm compiler host**, using Cap'n Proto
+2.0-dev. Normal codegen needs no native `capnp`, Wasmtime, or Zig installation.
+Compiler acquisition is a separate network operation:
 
 ```sh
-just build-wasm
+mise exec -- deno task compiler:fetch
+mise exec -- deno task verify
 ```
 
-If auto-detect cannot find the Zig repo:
+`verify` checks formatting without rewriting files, then checks lint, types,
+runtime provenance, generated drift, and unit tests. See
+[Toolchains and artifact delivery](docs/toolchains.md) for compiler/runtime
+separation, worker cancellation, permissions, and standalone binaries.
+
+### Rebuild the runtime when its source or toolchain changes
 
 ```sh
-CAPNPC_ZIG_ROOT=/path/to/capnp-zig deno task build:wasm
+mise exec -- deno task build:wasm
+mise exec -- deno task check:wasm-rebuild
 ```
+
+`build:wasm` uses the pinned `vendor/capnp-zig` checkout and writes the WASM
+plus its provenance receipt. `check:wasm-rebuild` performs an isolated rebuild
+and compares the result with the checked-in artifact. A `CAPNPC_ZIG_ROOT`
+override must still match the pinned clean source revision.
 
 ## Primary Usage Paths
 
@@ -73,7 +81,7 @@ CAPNPC_ZIG_ROOT=/path/to/capnp-zig deno task build:wasm
 Generate from `.capnp`:
 
 ```sh
-deno task codegen generate --schema schema/person.capnp --out generated
+deno task codegen generate --schema schema/person.capnp --out generated --layout schema
 ```
 
 Use generated codec:
@@ -225,7 +233,10 @@ using counter = await connect(
   await TcpTransport.connect("127.0.0.1", 4010),
 );
 
-const sender = createCounterSinkAddStreamSender(counter, { maxInFlight: 4 });
+const sender = createCounterSinkAddStreamSender(counter, {
+  maxInFlight: 4,
+  maxInFlightBytes: 256 * 1024,
+});
 for (const value of [3, 5, 8, 13]) {
   await sender.send(value);
 }
@@ -233,9 +244,12 @@ await sender.flush();
 console.log(await counter.total());
 ```
 
-`send()` is the backpressure boundary: when `maxInFlight` calls are already
-accepted, it waits for the oldest call to drain before starting another one.
-When producing the next item is expensive, wait explicitly before allocating it:
+`send()` waits when either the call-count window or the encoded parameter-byte
+budget is full. Byte accounting excludes RPC envelopes and transport queues; one
+encoded candidate can wait outside the admitted budget. See the
+[streaming guide](docs/streaming.md) for the exact accounting and server input
+budget. When producing the next item is expensive, wait explicitly before
+allocating it:
 
 ```ts
 await sender.waitForCapacity();
@@ -378,39 +392,47 @@ Middleware and observability:
 
 ## Codegen CLI
 
-Run directly:
+Fetch the verified compiler host once, then compile with read/write permission:
 
 ```sh
-deno task codegen generate --src schema --out generated
-deno task codegen generate --schema schema/foo.capnp --out generated
-deno task codegen generate --request-bin path/to/request.bin --out generated
+mise exec -- deno task compiler:fetch
+mise exec -- deno task codegen generate --src schema --out generated
+mise exec -- deno task codegen generate --schema schema/foo.capnp --out generated
+mise exec -- deno task codegen generate --request-bin path/to/request.bin --out generated
 ```
 
-Install as a `capnp compile` plugin:
+Normal source generation uses `--allow-read --allow-write`, with no network or
+subprocess permission. Saved request and binary stdin/plugin-response modes
+remain available. The source compiler checks the exact Deno 2.6.8 pin because
+worker termination was verified on that engine revision; this restriction does
+not apply to runtime consumers.
+
+Build and verify a standalone compiler with embedded compiler, worker, standard
+schemas, and toolchain receipt:
 
 ```sh
-deno task codegen:install
-capnp compile -I schema -odeno:generated schema/foo.capnp
-```
-
-Compile a standalone `capnpc-deno` binary:
-
-```sh
-deno task codegen:compile
+mise exec -- deno task codegen:compile
+mise exec -- deno task check:compiler-binary
 ./dist/capnpc-deno generate --schema schema/foo.capnp --out generated
 ```
 
-Cross-compile a specific release target:
+On Windows, the default executable is `dist/capnpc-deno.exe`. The standalone
+binary carries its Deno runtime and needs no separate compiler cache. Install or
+remove the command with `deno task codegen:install` and
+`deno task codegen:uninstall` under the pinned Deno version. Run
+`deno task check:compiler-install` to verify isolated install/use/uninstall.
+
+Explicit target/output arguments remain available:
 
 ```sh
 deno task codegen:compile x86_64-pc-windows-msvc dist/capnpc-deno-x86_64-pc-windows-msvc.exe
 ```
 
-GitHub release assets:
-
-- pushing a tag matching `v*` runs `.github/workflows/release.yml`
-- attached binaries include Linux/macOS/Windows targets compiled via
-  `deno compile`
+The release workflow uses five native Linux/macOS/Windows runners to build and
+execute each advertised binary. It publishes the binaries and provenance only
+after the shared validation workflow succeeds for that tag's exact commit.
+Hosted acceptance is tracked in the
+[sprint delivery status](docs/modernization_sprint.md#delivery-status).
 
 Useful options:
 
@@ -427,73 +449,42 @@ Useful options:
 
 ## Development Commands
 
-Fast CI gate:
+After `compiler:fetch`, run the checks appropriate to the change:
 
 ```sh
-just ci-fast
+mise exec -- deno task verify
+mise exec -- deno task test:codegen-e2e
+mise exec -- deno task test:integration
+mise exec -- deno task test:real
+mise exec -- deno task check:package
 ```
 
-Integration gate (socket loopback tests included):
+For runtime-source and cross-implementation work:
 
 ```sh
-just ci-integration
+mise exec -- deno task check:wasm-rebuild
+mise exec -- deno task test:native-interop
 ```
 
-Real-WASM gate:
+The native interop task builds matching Zig and C++ reference peers from pinned
+sources. It needs native build tools; ordinary generation and runtime use do
+not. Compiler fixture maintenance has separate tasks documented in
+[Toolchains](docs/toolchains.md#native-reference-and-fixture-maintenance).
+
+Browser WebTransport and benchmarks are explicit gates:
 
 ```sh
-just ci-real
+mise run test:browser-webtransport
+mise exec -- deno task bench:fast
 ```
 
-Release-candidate gate:
-
-```sh
-just release-check
-```
-
-This runs the fast gate, codegen tests, socket integration, WASM rebuild, smoke
-test, real-WASM tests, and JSR publish dry-run. Prefer the Just wrapper for WASM
-gates because it runs through `mise` and exposes the pinned Zig/Binaryen tools.
-
-Deno task equivalents:
-
-```sh
-deno task verify
-deno task test:integration
-deno task verify:real
-```
-
-See `docs/release_checklist.md` before tagging a release.
-
-Run GitHub Actions locally:
-
-```sh
-# List available CI jobs
-just act-list
-
-# Run CI workflow locally (default event: pull_request)
-just act-ci
-
-# Run a single CI job
-just act-ci-job verify
-
-# Optional: run benchmark gate locally
-just act-bench
-```
-
-Notes:
-
-- `.actrc` pins `act` to `.github/workflows/ci.yml` and maps `ubuntu-latest` to
-  a local Linux container image.
-- `just act-ci` excludes benchmark regression checks by default; run
-  `just act-bench` when you explicitly want that signal.
-- Ensure Docker is running before invoking `act`.
-
-Benchmarks:
-
-```sh
-just ci-bench
-```
+CI and release both call
+[the shared validation workflow](.github/workflows/validation.yml). Its native
+platform matrix, clean rebuild, package checks, browser lane, and benchmark
+regression comparison are the authoritative release gates. `just` retains
+convenience wrappers, but a local Linux `act` run cannot establish native
+macOS/Windows acceptance. See the [release checklist](docs/release_checklist.md)
+and the sprint status before tagging.
 
 ## Repository Map
 
@@ -517,6 +508,7 @@ just ci-bench
 
 ## Docs and Examples
 
+- [Toolchains and artifact delivery](docs/toolchains.md)
 - Docs index: `docs/README.md`
 - Serde guide: `docs/getting_started_serde.md`
 - RPC guide: `docs/getting_started_rpc.md`

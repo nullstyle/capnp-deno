@@ -1,0 +1,237 @@
+name: validation
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  DENO_NO_UPDATE_CHECK: "1"
+  DENO_NO_PROMPT: "1"
+
+jobs:
+  verify:
+    name: Source and generated artifact checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Fetch and verify the pinned compiler package
+        run: deno task compiler:fetch
+      - name: Format check, lint, types, receipts, generated drift, and unit tests
+        run: deno task verify
+
+  native-platform:
+    name: Native ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: capnpc-deno-x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: capnpc-deno-aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: capnpc-deno-x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: capnpc-deno-aarch64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: capnpc-deno-x86_64-pc-windows-msvc.exe
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Fetch and verify the pinned compiler package
+        run: deno task compiler:fetch
+      - name: Compiler API and workspace adapter tests
+        run: deno task test:compiler
+      - name: Source CLI end-to-end tests
+        run: deno task test:codegen-e2e
+      - name: Socket integration tests
+        run: deno task test:integration
+      - name: Real WASM, ownership, runtime receipt, and RPC tests
+        run: deno task test:real
+      - name: Clean consumer package checks
+        run: deno task check:package
+      - name: Build the compiler for this native host
+        run: deno task codegen:compile "${{ matrix.target }}" "dist/${{ matrix.asset }}"
+      - name: Execute the standalone compiler with its receipt and empty PATH/cache
+        run: deno task check:compiler-binary "dist/${{ matrix.asset }}"
+      - name: Install, execute, and uninstall the standalone compiler
+        run: deno task check:compiler-install
+      - name: Upload the tested binary and provenance
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
+  runtime-rebuild:
+    name: Clean runtime rebuild and native interop
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CAPNPC_ZIG_BUILD_TIMEOUT_SECONDS: "1800"
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Install pinned native build tools
+        uses: jdx/mise-action@v3.6.1
+        with:
+          install_args: deno zig github:WebAssembly/binaryen
+          github_token: ${{ github.token }}
+      - name: Fetch and verify the pinned compiler package
+        run: deno task compiler:fetch
+      # Do not restore Zig build outputs: this job proves a clean source rebuild.
+      - name: Rebuild and compare the runtime with its checked-in artifact
+        run: deno task check:wasm-rebuild
+      - name: Source-matched native Zig and C++ interoperability
+        run: deno task test:native-interop
+
+  browser-webtransport:
+    name: Browser WebTransport
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Install pinned browser tools
+        uses: jdx/mise-action@v3.6.1
+        with:
+          install_args: deno node npm:playwright npm:esbuild
+          github_token: ${{ github.token }}
+      - name: Install Chromium and Linux browser dependencies
+        run: playwright install --with-deps chromium
+      - name: Require the browser WebTransport end-to-end test
+        env:
+          CAPNP_DENO_BROWSER_E2E: "1"
+        run: mise run test:browser-webtransport
+
+  bench:
+    name: Benchmark regression checks
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.8
+      - name: Restore previous benchmark results
+        uses: actions/cache/restore@v4.3.0 # actions/cache v4
+        with:
+          path: bench/results.json
+          key: bench-results-v2-ubuntu24-deno2.6.8-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            bench-results-v2-ubuntu24-deno2.6.8-${{ github.ref_name }}-
+            bench-results-v2-ubuntu24-deno2.6.8-main-
+
+      - name: Stash previous results
+        run: |
+          if [ -f bench/results.json ]; then
+            mkdir -p bench/previous
+            mv bench/results.json bench/previous/results.json
+            echo "Restored previous benchmark results."
+          else
+            echo "No previous benchmark results found."
+          fi
+
+      - name: Run Deno benchmarks
+        run: deno task bench:fast
+
+      - name: Run benchmark regression tests
+        run: deno test --no-check --allow-env=CI --allow-write=bench/results.json --allow-run=git bench/regression_test.ts
+
+      - name: Upload benchmark results artifact
+        if: always() && env.ACT != 'true'
+        uses: actions/upload-artifact@v4.6.2 # actions/upload-artifact v4
+        with:
+          name: bench-results
+          path: bench/results.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Compare against previous results
+        if: always()
+        run: |
+          if [ ! -f bench/previous/results.json ] || [ ! -f bench/results.json ]; then
+            echo "No previous or current results to compare, skipping."
+            exit 0
+          fi
+          # shellcheck disable=SC2016 # JavaScript template strings stay literal.
+          deno eval '
+            const prev = JSON.parse(Deno.readTextFileSync("bench/previous/results.json"));
+            const curr = JSON.parse(Deno.readTextFileSync("bench/results.json"));
+            console.log(`Comparing: ${prev.commit?.slice(0,8) ?? "unknown"} -> ${curr.commit?.slice(0,8) ?? "unknown"}`);
+            console.log("---");
+            const prevMap = new Map(prev.results.map((r: {name: string, opsPerSec: number}) => [r.name, r.opsPerSec]));
+            let regressions = 0;
+            for (const r of curr.results) {
+              const prevOps = prevMap.get(r.name);
+              if (prevOps == null) {
+                console.log(`  ${r.name}: NEW (${r.opsPerSec.toFixed(0)} ops/s)`);
+                continue;
+              }
+              const ratio = r.opsPerSec / prevOps;
+              const pct = ((ratio - 1) * 100).toFixed(1);
+              const arrow = ratio >= 1 ? "+" : "";
+              console.log(`  ${r.name}: ${prevOps.toFixed(0)} -> ${r.opsPerSec.toFixed(0)} ops/s (${arrow}${pct}%)`);
+              if (ratio < 0.5) {
+                console.log(`::warning::Benchmark "${r.name}" regressed by >50%: ${prevOps.toFixed(0)} -> ${r.opsPerSec.toFixed(0)} ops/s (${arrow}${pct}%)`);
+                regressions++;
+              }
+            }
+            if (regressions > 0) {
+              console.log(`\n${regressions} benchmark(s) regressed by >50%.`);
+              Deno.exit(1);
+            } else {
+              console.log("\nNo significant regressions detected.");
+            }
+          '
+
+      - name: Save benchmark results to cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && hashFiles('bench/results.json') != ''
+        uses: actions/cache/save@v4.3.0 # actions/cache v4
+        with:
+          path: bench/results.json
+          key: bench-results-v2-ubuntu24-deno2.6.8-${{ github.ref_name }}-${{ github.sha }}

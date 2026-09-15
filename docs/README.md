@@ -2,6 +2,7 @@
 
 ## Active Guides
 
+- [Toolchains and artifact delivery](toolchains.md)
 - [Modernization sprint and verified baseline](modernization_sprint.md)
 - [capnp-wasm upstream survey](capnp_wasm_delta_survey.md)
 - `docs/getting_started_serde.md`
