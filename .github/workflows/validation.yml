@@ -66,19 +66,28 @@ jobs:
         run: deno task compiler:fetch
       - name: Compiler API and workspace adapter tests
         run: deno task test:compiler
+      # Independent checks continue to report failures; the job still fails and
+      # artifact upload/release requires every preceding check to succeed.
       - name: Source CLI end-to-end tests
+        if: ${{ !cancelled() }}
         run: deno task test:codegen-e2e
       - name: Socket integration tests
+        if: ${{ !cancelled() }}
         run: deno task test:integration
       - name: Real WASM, ownership, runtime receipt, and RPC tests
+        if: ${{ !cancelled() }}
         run: deno task test:real
       - name: Clean consumer package checks
+        if: ${{ !cancelled() }}
         run: deno task check:package
       - name: Build the compiler for this native host
+        if: ${{ !cancelled() }}
         run: deno task codegen:compile "${{ matrix.target }}" "dist/${{ matrix.asset }}"
       - name: Execute the standalone compiler with its receipt and empty PATH/cache
+        if: ${{ !cancelled() }}
         run: deno task check:compiler-binary "dist/${{ matrix.asset }}"
       - name: Install, execute, and uninstall the standalone compiler
+        if: ${{ !cancelled() }}
         run: deno task check:compiler-install
       - name: Upload the tested binary and provenance
         uses: actions/upload-artifact@v4.6.2
