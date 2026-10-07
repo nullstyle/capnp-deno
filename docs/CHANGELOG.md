@@ -6,6 +6,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Vendored capnp-zig moved to the family's coordinated set: tag `v0.21.0`
+  (commit `3490a77e1296dfd5adce6b15f60d12a37abce4d9`, up from the 0.18.0-era
+  commit `295ff5e`), and the Zig pin moved from the retired
+  `0.17.0-dev.1683+5ceec001b` snapshot to tagged `0.17.0` in `mise.toml` and
+  [the runtime pin](../tools/runtime-toolchain.json). The rebuilt
+  `generated/capnp_deno.wasm` keeps ABI version 1 with feature bits 0–9; RPC
+  wire fixtures are byte-identical. `test:native-interop` passes the capnp-zig
+  module to `zig build-exe` by hand, so it now supplies the
+  `capnp_build_options` module that capnp-zig v0.21.0 requires on Linux/macOS;
+  the local `tools/gen_rpc_fixtures` build graph creates the same options
+  module.
+
 ## [0.5.0] - 2026-08-15
 
 ### Breaking

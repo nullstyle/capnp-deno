@@ -1,7 +1,7 @@
 # capnp-zig integration and ABI ownership
 
-Updated: 2026-09-15 UTC. The evaluated runtime source is
-`vendor/capnp-zig@295ff5ea766bea3383485847a89b81884c61f969`. The
+Updated: 2026-10-07 UTC. The evaluated runtime source is
+`vendor/capnp-zig@3490a77e1296dfd5adce6b15f60d12a37abce4d9` (tag `v0.21.0`). The
 [runtime pin](../tools/runtime-toolchain.json) is authoritative for the source,
 Zig and Binaryen versions, and build flags. The
 [artifact receipt](../generated/capnp_deno.provenance.json) records the exact
