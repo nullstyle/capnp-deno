@@ -1,9 +1,13 @@
 # Level-3 three-party handoff over the WASM host ABI — proposal
 
-Status: proposal for discussion with capnp-zig. Nothing here is implemented,
-promised as a Stable API, or implied by the current `generated/capnp_deno.wasm`
-(ABI version 1, feature bits 0–9). The runtime source is the vendored capnp-zig
-`v0.21.0` (`3490a77e…`); symbols below are verified against that tag.
+Status: **the v1 surface is implemented upstream** in capnp-zig commit `50e5e6d`
+(feature bit `10`, `main` after `v0.21.0`; see capnp-zig's
+`docs/wasm_host_abi.md` and its changelog). The
+[Implementation deltas](#implementation-deltas) section records where the
+shipped design differs from the original proposal. Nothing is exposed through
+`@nullstyle/capnp` yet; the Deno-side wrappers below remain the plan for that
+phase. The runtime source baseline is the vendored capnp-zig `v0.21.0`
+(`3490a77e…`); symbols below are verified against that tag.
 
 ## Why
 
@@ -185,3 +189,43 @@ cover the Deno↔Deno loopback using two module-local peers.
 - Whether `FEATURE_L3_HANDOFF` should also gate a `capnp_schema_manifest_json`
   addition naming the L3 wire messages, so generated TypeScript can assert
   schema coverage at bind time.
+
+## Implementation deltas (v1, capnp-zig `50e5e6d`)
+
+Reading the origination internals settled the open questions and simplified the
+surface considerably:
+
+- **No `VatNetwork` host-call kinds are needed.** Upstream `Peer.sendProvide`
+  takes the `ThirdPartyToAwait` recipient blob and the `ThirdPartyToContact`
+  bytes as plain arguments — the peer never calls the network during
+  origination. The Deno host mints and resolves tokens entirely host-side (this
+  repository already owns the token format), so `L3_MINT_INTRODUCTION` and
+  `L3_CONNECT_TO_INTRODUCED` from the proposal are unnecessary; only the
+  embedder-side introducer remains.
+- **The pickup-handler export is deferred.** Upstream auto-pickup requires
+  `attachVatNetwork` and resolves connections synchronously inside inbound frame
+  processing, which a wasm module cannot do. The Deno replacement is the
+  host-driven path: TS observes inbound `thirdPartyHosted` descriptors and
+  originates the Accept itself on the connection it resolved — exactly the
+  `acceptProvision` flow the Deno API section describes.
+- **The event channel is a dedicated owned-output pop**
+  (`capnp_peer_pop_l3_event`), not host-call-bridge notifications. Kinds 1/2
+  carry the complete inbound RPC message byte-identically (Return plus cap-table
+  descriptors), so the existing TS wire parser reads capability placement; kind
+  3 carries an exception reason for synthetic Returns such as the shutdown
+  drain. Await events carry question id 0 (parked questions have no wire id
+  until adoption); correlate them by frame content.
+- **`sendProvide` v1 targets `importedCap` only**; the retained-answer and
+  promised-answer target forms are deferred (they need no new feature bit once
+  added).
+- **`sendThirdPartyAnswer` v1 auto-allocates** the callee-chosen answer id and
+  returns it; the `WithId` form is deferred.
+- **Exactly-once delivery is defensively guarded** (a `delivered` flag per
+  origination): the upstream Return machinery can leave a question reachable
+  after its Return (a `noFinishNeeded` Return stays finishable) and the shutdown
+  drain re-delivers. Budgets: 64 outstanding origins, 256 queued events, 4 MiB
+  event bytes.
+
+The rollout's step 1 (upstream implementation + ABI tests) is complete;
+`zig build test` is 245/245 steps green upstream. Step 2 (vendor bump and
+artifact rebuild) waits on the next capnp-zig release tag.
