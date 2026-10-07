@@ -972,7 +972,7 @@ Deno.test("crossfile: schema layout keeps same-basename modules in their directo
 });
 
 // ---------------------------------------------------------------------------
-// Cross-file references to NESTED foreign types fail loudly
+// Cross-file references to NESTED foreign types
 // ---------------------------------------------------------------------------
 
 const HOIST_REQUEST =
@@ -980,34 +980,53 @@ const HOIST_REQUEST =
 const HOIST_OK_REQUEST =
   "tests/fixtures/codegen_requests/crossfile_hoist_ok_request.b64";
 
-Deno.test("crossfile: referencing a nested foreign type is a loud emitter error", async () => {
-  // Uses.direct is typed Lib.Outer.Inner; the owning module keeps nested
-  // declarations module-private, so this used to degrade to a bare
-  // unimported name plus an `undefined as unknown as` default.
-  const request = parseCodeGeneratorRequest(
-    await decodeFixture(HOIST_REQUEST),
-  );
-  let thrown: unknown = null;
-  try {
-    generateTypescriptFiles(request);
-  } catch (error) {
-    thrown = error;
-  }
-  assert(thrown instanceof Error, "expected generation to throw");
-  assertEquals((thrown as Error).name, "CodegenEmitError");
-  const message = (thrown as Error).message;
+Deno.test("crossfile: nested foreign types resolve through owning-module exports", async () => {
+  // Uses.direct is typed Lib.Outer.Inner. The request-wide pre-pass marks
+  // exactly the cross-file-referenced nested declarations exported in the
+  // owning module (flattened naming), so the importer lowers the type name
+  // and the descriptor through imports instead of failing; nested
+  // declarations nobody references cross-file (Outer.Kind, referenced only
+  // inside lib itself) stay module-private.
+  const generated = await generateFromFixture(HOIST_REQUEST);
+  const lib = fileByPath(generated, "lib_types.ts");
+  const consumer = fileByPath(generated, "consumer_types.ts");
   assert(
-    message.includes("cross-file reference to nested type Outer.Inner") &&
-      message.includes("tests/fixtures/schemas/crossfile/hoist/lib.capnp") &&
-      message.includes("hoist the type to the top level"),
-    `expected an actionable nested-type error, got: ${message}`,
+    lib.contents.includes("export interface Inner {") &&
+      lib.contents.includes(
+        "export const InnerStruct: StructDescriptor<Inner> = {",
+      ),
+    "expected the owning module to export the cross-file-referenced nested struct",
+  );
+  assert(
+    !lib.contents.includes("export type Kind") &&
+      !lib.contents.includes("export const KindValues") &&
+      lib.contents.includes("const KindValues = "),
+    "expected same-file-only nested declarations to stay module-private",
+  );
+  assert(
+    consumer.contents.includes(
+      'import type { Inner } from "./lib_types.ts";\n',
+    ) &&
+      consumer.contents.includes(
+        'import { InnerStruct } from "./lib_types.ts";\n',
+      ) &&
+      consumer.contents.includes("  direct: Inner;\n"),
+    "expected the nested foreign struct to resolve through imports",
+  );
+  const usesStruct = consumer.contents.slice(
+    consumer.contents.indexOf("const UsesStruct: StructDescriptor<Uses> = {"),
+    consumer.contents.indexOf("export const UsesCodec"),
+  );
+  assert(
+    usesStruct.includes('{ kind: "struct", get: () => InnerStruct }'),
+    "expected the nested foreign descriptor behind a deferred getter",
   );
 });
 
 Deno.test("crossfile: top-level foreign types with nested members keep working", async () => {
   // Holder.outer references only the exported top-level Outer; traversing
   // Outer's own nested Inner/Kind members (walker planning, defaults) must
-  // not trip the nested-type error.
+  // not export them or otherwise change the top-level import path.
   const generated = await generateFromFixture(HOIST_OK_REQUEST);
   const holder = fileByPath(generated, "toplevel_consumer_types.ts");
   assert(

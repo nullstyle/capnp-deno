@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Cross-file references to nested types (`:Lib.Outer.Inner`) now generate
+  working output: a request-wide pre-pass marks exactly the nested declarations
+  that another schema file references as exported in the owning module (under
+  their flattened, disambiguated names), so importing modules lower the type
+  name and descriptor through ordinary cross-file imports and enum mirrors.
+  Nested declarations nobody references across files stay module-private, so
+  untouched schemas generate byte-identical output. Previously such references
+  failed loudly with a hoist suggestion.
+
 ### Changed
 
 - The pinned compiler host moved from `capnp-wasm-compiler-host 0.1.0-rc.3` to

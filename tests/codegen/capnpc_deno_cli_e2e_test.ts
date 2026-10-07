@@ -655,39 +655,96 @@ Deno.test("capnpc-deno CLI e2e keeps same-basename imports distinct in both layo
   }
 });
 
-Deno.test("capnpc-deno CLI e2e fails loudly on cross-file nested type references", async () => {
-  // consumer.capnp types a field as Lib.Outer.Inner; the owning module keeps
-  // nested declarations module-private, so the CLI must abort with an
-  // actionable error instead of silently emitting a bare unimported name.
+Deno.test("capnpc-deno CLI e2e resolves cross-file nested type references", async () => {
+  // consumer.capnp types a field as Lib.Outer.Inner; the owning module now
+  // exports exactly the nested declarations another file references, so the
+  // CLI emits importing modules that type-check and whose codecs round-trip
+  // through the imported nested descriptor (previously a loud hoist error).
   const tempRoot = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "capnpc_deno_cli_e2e_hoist_" }),
   );
   try {
     await Deno.copyFile(HOIST_LIB_SCHEMA, `${tempRoot}/lib.capnp`);
     await Deno.copyFile(HOIST_CONSUMER_SCHEMA, `${tempRoot}/consumer.capnp`);
-
-    let failure: Error | null = null;
-    try {
-      await runCodegenCli(
-        [
-          "--schema",
-          "lib.capnp",
-          "--schema",
-          "consumer.capnp",
-          "--out",
-          "generated",
-        ],
-        tempRoot,
-      );
-    } catch (error) {
-      failure = error as Error;
-    }
-    assert(failure !== null, "expected the codegen CLI run to fail");
+    await runCodegenCli(
+      [
+        "--schema",
+        "lib.capnp",
+        "--schema",
+        "consumer.capnp",
+        "--out",
+        "generated",
+      ],
+      tempRoot,
+    );
+    const lib = await Deno.readTextFile(`${tempRoot}/generated/lib_types.ts`);
     assert(
-      failure.message.includes(
-        "cross-file reference to nested type Outer.Inner",
-      ) && failure.message.includes("hoist the type to the top level"),
-      `expected an actionable nested-type error, got: ${failure.message}`,
+      lib.includes("export interface Inner {") &&
+        !lib.includes("export type Kind") &&
+        !lib.includes("export const KindValues"),
+      "expected the owning module to export Inner but keep unreferenced Kind private",
+    );
+    await Deno.writeTextFile(
+      `${tempRoot}/probe_nested.ts`,
+      [
+        'import { Uses, UsesCodec } from "./generated/consumer_types.ts";',
+        "",
+        "const uses: Uses = { direct: { value: 7 } };",
+        "const decoded = UsesCodec.decode(UsesCodec.encode(uses));",
+        "if (decoded.direct.value !== 7) throw new Error(`round trip mismatch`);",
+        "export const value: number = decoded.direct.value;",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      `${tempRoot}/deno.json`,
+      JSON.stringify({
+        imports: {
+          "@nullstyle/capnp/encoding": ENCODING_RUNTIME.href,
+          "@nullstyle/capnp/rpc": RPC_RUNTIME.href,
+        },
+        compilerOptions: { strict: true },
+      }),
+    );
+    const check = new Deno.Command(Deno.execPath(), {
+      args: [
+        "check",
+        "--config",
+        `${tempRoot}/deno.json`,
+        `${tempRoot}/generated/mod.ts`,
+        `${tempRoot}/probe_nested.ts`,
+      ],
+      cwd: tempRoot,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const checkOutput = await check.output();
+    assert(
+      checkOutput.success,
+      `expected the nested-reference bundle and probe to type-check: ${
+        new TextDecoder().decode(checkOutput.stderr).trimEnd()
+      }`,
+    );
+    const run = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--config",
+        `${tempRoot}/deno.json`,
+        "--allow-read",
+        `${tempRoot}/probe_nested.ts`,
+      ],
+      cwd: tempRoot,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const runOutput = await run.output();
+    assert(
+      runOutput.success,
+      `expected the cross-file nested codec round-trip to pass: ${
+        new TextDecoder().decode(runOutput.stderr).trimEnd()
+      }`,
     );
   } finally {
     await Deno.remove(tempRoot, { recursive: true });

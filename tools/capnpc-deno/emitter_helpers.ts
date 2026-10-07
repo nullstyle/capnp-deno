@@ -137,6 +137,7 @@ function assignTypeNames(nodes: NodeModel[]): Map<bigint, string> {
 export function collectLocalTypes(
   fileNode: NodeModel,
   nodeById: Map<bigint, NodeModel>,
+  crossFileNestedTypeIds?: ReadonlySet<bigint>,
 ): { enumInfos: EnumInfo[]; structInfos: StructInfo[] } {
   const prefix = `${fileNode.displayName}:`;
   const exportedIds = new Set(fileNode.nestedNodes.map((nested) => nested.id));
@@ -156,6 +157,14 @@ export function collectLocalTypes(
   }
   for (const typeId of methodStructIds) {
     exportedIds.add(typeId);
+  }
+  // Nested types another schema file references become part of this module's
+  // public surface so importers can reach them; untouched nested types stay
+  // module-private.
+  if (crossFileNestedTypeIds) {
+    for (const typeId of crossFileNestedTypeIds) {
+      exportedIds.add(typeId);
+    }
   }
   localEnums.sort((a, b) => a.displayName.localeCompare(b.displayName));
   localStructs.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -296,6 +305,69 @@ export interface ModuleIndex {
 }
 
 /**
+ * Node ids of enum/struct/interface types referenced from a different schema
+ * file than the one owning them.
+ *
+ * Only these force the owning module to export a nested type (see
+ * {@link collectLocalTypes}); every reference position the emitters lower
+ * through {@link ModuleImportCollector.crossFileTypeReference} must be walked
+ * here, or that collector keeps rejecting the missed shape as a loud
+ * unsupported reference.
+ */
+export function collectCrossFileNestedTypeIds(
+  nodeById: Map<bigint, NodeModel>,
+): Set<bigint> {
+  const fileIdByNode = new Map<bigint, bigint>();
+  for (const file of nodeById.values()) {
+    if (file.kind !== "file") continue;
+    const prefix = `${file.displayName}:`;
+    for (const node of nodeById.values()) {
+      if (node.displayName.startsWith(prefix)) {
+        fileIdByNode.set(node.id, file.id);
+      }
+    }
+  }
+  const referenced = new Set<bigint>();
+  const visitType = (owner: bigint, type: TypeModel): void => {
+    if (type.kind === "list") {
+      visitType(owner, type.elementType);
+      return;
+    }
+    if (
+      type.kind !== "enum" && type.kind !== "struct" &&
+      type.kind !== "interface"
+    ) {
+      return;
+    }
+    const targetFile = fileIdByNode.get(type.typeId);
+    if (targetFile !== undefined && targetFile !== fileIdByNode.get(owner)) {
+      referenced.add(type.typeId);
+    }
+  };
+  const visitTarget = (owner: bigint, typeId: bigint): void => {
+    const targetFile = fileIdByNode.get(typeId);
+    if (targetFile !== undefined && targetFile !== fileIdByNode.get(owner)) {
+      referenced.add(typeId);
+    }
+  };
+  for (const node of nodeById.values()) {
+    if (node.kind === "struct" && node.structNode) {
+      for (const field of node.structNode.fields) {
+        if (field.slot) visitType(node.id, field.slot.type);
+        if (field.group) visitTarget(node.id, field.group.typeId);
+      }
+    }
+    if (node.kind === "interface" && node.interfaceNode) {
+      for (const method of node.interfaceNode.methods) {
+        visitTarget(node.id, method.paramStructTypeId);
+        visitTarget(node.id, method.resultStructTypeId);
+      }
+    }
+  }
+  return referenced;
+}
+
+/**
  * Build the {@link ModuleIndex} for a request.
  *
  * Per-file names come from the exact same collection + naming pass the
@@ -313,13 +385,18 @@ export function buildModuleIndex(
   for (const requested of request.requestedFiles) {
     filenameByFileId.set(requested.id, requested.filename);
   }
+  const crossFileNestedTypeIds = collectCrossFileNestedTypeIds(nodeById);
 
   const byId = new Map<bigint, ModuleIndexEntry>();
   const byFileId = new Map<bigint, ModuleFileTypes>();
   for (const node of request.nodes) {
     if (node.kind !== "file") continue;
     const schemaFilename = filenameByFileId.get(node.id) ?? node.displayName;
-    const { enumInfos, structInfos } = collectLocalTypes(node, nodeById);
+    const { enumInfos, structInfos } = collectLocalTypes(
+      node,
+      nodeById,
+      crossFileNestedTypeIds,
+    );
     const interfaceInfos = collectLocalInterfaces(node, nodeById);
     byFileId.set(node.id, { enumInfos, structInfos, interfaceInfos });
     for (const info of enumInfos) {
@@ -430,14 +507,15 @@ export class ModuleImportCollector {
    * Like {@link crossFileEntry}, but for positions that must REFERENCE the
    * foreign type in emitted output (type names, descriptors, defaults).
    *
-   * A cross-file reference to a NESTED foreign struct/enum cannot be lowered
-   * correctly: the owning module only exports its top-level declarations (and
-   * method param/result structs), so the reference would degrade to a bare
-   * unimported name. Instead of emitting silently-broken output this throws a
-   * loud {@link CodegenEmitError}. Probe-style callers (capability walker
-   * planning) keep using {@link crossFileEntry}, which returns `null` for
-   * these entries, because merely traversing a foreign struct's fields is
-   * fine. Unknown ids still return `null` (callers keep their fallbacks).
+   * A cross-file reference to a NESTED foreign struct/enum resolves when the
+   * pre-pass ({@link collectCrossFileNestedTypeIds}) marked it exported in the
+   * owning module, which is every reference position the emitters lower. If a
+   * shape slips past that pre-pass, the entry stays unexported and this throws
+   * a loud {@link CodegenEmitError} rather than emitting a bare unimported
+   * name. Probe-style callers (capability walker planning) keep using
+   * {@link crossFileEntry}, which returns `null` for these entries, because
+   * merely traversing a foreign struct's fields is fine. Unknown ids still
+   * return `null` (callers keep their fallbacks).
    */
   crossFileTypeReference(id: bigint): ModuleIndexEntry | null {
     const entry = this.#moduleIndex.byId.get(id);
