@@ -6,6 +6,36 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-07
+
+### Added
+
+- Schema compilation runs through the verified public capnp-wasm compiler host
+  (`0.1.0-rc.3`, Cap'n Proto 2.0-dev frontend) in a bounded worker: no PATH
+  `capnp`, Python, Wasmtime, or network access during ordinary generation, only
+  read/write permission. Ordered import roots and source-prefix semantics are
+  preserved, and output staging keeps existing files on compiler or emitter
+  failure. Saved `--request-bin`, binary-stdin plugin, config, and layout modes
+  remain supported; compiler acquisition is the separate `compiler:fetch` step.
+- Streaming parameters are admitted by exact encoded bytes: each item is
+  serialized once and its parameter-message length reserved before a transport
+  assigns a question, with at most one waiting preparation candidate and a
+  separate retained Call-frame byte budget on the server. Clients bound
+  per-question callback records after abort, timeout, or an uncertain write via
+  the new `maxOutstandingParamCapQuestions` option (default 4,096). See
+  [Streaming RPC](streaming.md).
+- The runtime WASM artifact now ships with a provenance receipt
+  (`generated/capnp_deno.provenance.json`) recording source revision, Zig and
+  Binaryen versions, optimization, hash, ABI, exports, and features;
+  `deno task check:wasm` verifies it and `check:wasm-rebuild` proves an isolated
+  clean rebuild reproduces the checked-in bytes.
+- A standing native interop runner (`deno task test:native-interop`) builds
+  source-matched Zig and C++ reference peers from the pinned vendor tree and
+  checks a four-way matrix (Deno↔Zig over framed pipes, Deno↔C++ over TCP):
+  unary calls, callbacks, returned capabilities, pending-call cancellation with
+  Finish/Release cleanup, error recovery, streaming barriers, and
+  same-capability recovery.
+
 ### Changed
 
 - Vendored capnp-zig moved to the family's coordinated set: tag `v0.21.0`
@@ -19,6 +49,36 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   `capnp_build_options` module that capnp-zig v0.21.0 requires on Linux/macOS;
   the local `tools/gen_rpc_fixtures` build graph creates the same options
   module.
+- Source schema compilation and compiler builds require exactly Deno 2.6.8
+  (worker termination was verified on that engine); the published runtime needs
+  Deno 2.6+. See [Toolchains](toolchains.md) for the engine contract and the
+  Windows WebTransport IPv6 endpoint requirement.
+- CI and releases share one reusable validation workflow: compiler, runtime, and
+  package checks on Linux x86_64/arm64, macOS x86_64/arm64, and Windows x86_64,
+  native compiler binaries executed on each host, a clean Linux runtime rebuild,
+  native interop, mandatory browser WebTransport, and benchmark budgets. Release
+  tags must equal `v` plus the `deno.json` version.
+
+### Fixed
+
+- Canceled pending calls now retire with exactly one terminal Return and settle
+  their callback grants once; a subsequent call succeeds on the same connection.
+  Valid native `Return(canceled)` messages are accepted, bootstrap answers
+  already produced by WASM are mirrored before host dispatch, and answer-table
+  overflow closes instead of publishing unroutable grants.
+- An ordinary failed call no longer poisons later streaming work through the
+  generated server path (adopted from the reviewed native Zig generator fix).
+- Wire handling now covers the observed double-far, empty-struct, and malformed
+  pointer gaps: nonzero-offset double-far struct tags are rejected like WASM's
+  untyped clone, UTF-8/NUL text is validated, and cyclic/amplified copies are
+  rejected without settling the call or prematurely releasing parameter grants.
+- WASM ownership defects: borrowed error text is no longer freed, zero-length
+  output buffers no longer convert a legitimate free into `InvalidFree`, wrapper
+  and serde scratch allocations have explicit disposal paths, and closing one
+  wrapper preserves other users of the shared module (2,000-cycle soak tests).
+- Generic transports that provide `subscribeClose` are now supervised for
+  service disposal instead of only the concrete TCP/WebSocket/WebTransport
+  classes; service handles detach their close subscription exactly once.
 
 ## [0.5.0] - 2026-08-15
 
