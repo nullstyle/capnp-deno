@@ -196,7 +196,12 @@ try {
     `-Mroot=${join(fixture, "endpoint.zig")}`,
     "--dep",
     "capnpc-zig",
+    "--dep",
+    "capnp_build_options",
     `-Mcapnpc-zig=${join(source, "src/lib.zig")}`,
+    `-Mcapnp_build_options=${
+      join(source, "tests/fixtures/capnp_build_options.zig")
+    }`,
     "--dep",
     "capnpc-zig",
     `-Mgenerated=${join(stage, "interop.zig")}`,

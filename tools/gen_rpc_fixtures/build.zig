@@ -17,6 +17,18 @@ pub fn build(b: *std.Build) void {
     });
     core_module.addImport("capnpc-zig", core_module);
     core_module.addImport("capnpc-zig-core", core_module);
+    // capnp-zig >= 0.21.0 reads the fd-passing build option through this
+    // module (upstream's build creates the same options module from
+    // `-Dfd-passing`); a native compile that reaches the RPC runtime fails
+    // without it.
+    const capnp_build_options = b.addOptions();
+    capnp_build_options.addOption(bool, "fd_passing", true);
+    core_module.addImport(
+        "capnp_build_options",
+        b.createModule(.{
+            .root_source_file = capnp_build_options.getOutput(),
+        }),
+    );
 
     const fixture_tool_module = b.createModule(.{
         .root_source_file = vendor_root.path(b, "tests/rpc/support/rpc_fixture_tool.zig"),
