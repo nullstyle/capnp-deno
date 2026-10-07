@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "denoVersion": "2.6.8",
-  "version": "0.1.0-rc.3",
-  "sourceCommit": "a5ccaae128665914d3878d83908bd5ddbece58ea",
-  "sourceSha256": "ff2220550ecbe2624dd4719a4858b069ca43436e9954c69224e255b77517c0a4",
+  "version": "0.1.0-rc.5",
+  "sourceCommit": "f6a9509211ff1782a954b51538a77ae5b30e7330",
+  "sourceSha256": "e7123929e64c3d14ce0902ef5a09a5208176739bd276c2d91b45004fa0b3a977",
   "compilerRevision": "851c45bb39c34c3f20f9d9ebe9f34a7e39109b6f",
   "archive": {
-    "url": "https://github.com/nullstyle/capnpc-wasm/releases/download/capnp-wasm-compiler-host-v0.1.0-rc.3/capnp-wasm-compiler-host-0.1.0-rc.3.tgz",
-    "sha256": "ca8dfa0033e417e1db0522f2d1c28ccfeda4d42c18ae160de3a26d8a763521ec",
-    "bytes": 945229
+    "url": "https://github.com/nullstyle/capnpc-wasm/releases/download/capnpc-wasm-v0.1.0-rc.5/capnpc-wasm-0.1.0-rc.5.tgz",
+    "sha256": "84c80737cdd26d2ff3d8725da52cf16b9313d24d0d93d379ced0a2bb8066b911",
+    "bytes": 3944974
   },
-  "manifestSha256": "322fa3148ec3cb7e31454b910a5e8d831a3bf1ec2635b5a8c5794c10a66077ce",
-  "compilerSha256": "5429b7277b18b6e3f65430068ac41ac327ef8dd359603955f16ec576e0c3a14a",
+  "manifestSha256": "6e439c23cfc7a0478a0a02007274b66a91a092d4c6a1a72a93670d5e1b55d25e",
+  "compilerSha256": "22aee10286233907d8982ade15978567d3e8868e1808e7e9dad2cf0a10d22c10",
   "includeSha256": "97c87a6cabc07b477f763c816e2a402678e628bffee885bda9d1616b33b44aec"
 }

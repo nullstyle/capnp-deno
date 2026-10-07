@@ -26,16 +26,18 @@ export interface CompileSchemasOptions extends WorkspaceOptions {
 }
 interface WorkerCompiler {
   compile(
-    workspace: SchemaWorkspace,
+    request: SchemaWorkspace & { generators: readonly string[] },
     options: { signal?: AbortSignal; timeoutMs: number },
   ): Promise<{ request: Uint8Array }>;
   dispose(): void;
 }
 interface CompilerHost {
-  supportedDenoWorkerVersion: string;
   createWorkerCompiler(
     url: URL | string,
-    modules: { compiler: Uint8Array; generators: Record<string, never> },
+    modules: {
+      compiler: Uint8Array;
+      generators: Partial<Record<string, Uint8Array>>;
+    },
     options: { limits?: Partial<CompilerLimits> },
   ): Promise<WorkerCompiler>;
 }
@@ -57,21 +59,15 @@ export async function createSchemaCompiler(
   limits?: Partial<CompilerLimits>,
 ): Promise<SchemaCompiler> {
   const pin = await readCompilerPin();
-  if (Deno.version.deno !== pin.denoVersion) {
-    throw new SchemaCompileError(
-      `bounded code generation requires Deno ${pin.denoVersion}; running ${Deno.version.deno}. Use mise exec -- deno task codegen or install the pinned compiled CLI.`,
-    );
-  }
   const manifest = await verifyCompilerPackage(COMPILER_PACKAGE_ROOT, pin);
   // Dynamic loading keeps ordinary runtime/type checking independent of acquired assets.
+  // The host SDK (capnpc-wasm 0.1.0-rc.5 and newer) admits engines itself:
+  // every guest runs with in-guest interruption checks, so a timeout or abort
+  // stops the guest at its own deadline on every Deno release rather than
+  // relying on Worker.terminate().
   const host = await import(
     new URL("typescript/mod.js", COMPILER_PACKAGE_ROOT).href
   ) as CompilerHost;
-  if (host.supportedDenoWorkerVersion !== pin.denoVersion) {
-    throw new SchemaCompileError(
-      "compiler host and Deno toolchain pins disagree",
-    );
-  }
   const compiler = await Deno.readFile(
     compilerAssetURL("wasm/capnp.wasm"),
   );
@@ -125,13 +121,18 @@ export async function createSchemaCompiler(
           { ...options, limits, signal: controller.signal },
         );
         controller.signal.throwIfAborted();
-        return (await worker.compile(workspace, {
-          signal: controller.signal,
-          timeoutMs: Math.max(
-            1,
-            Math.floor(timeoutMs - (performance.now() - started)),
-          ),
-        })).request;
+        return (await worker.compile(
+          // An empty generator list compiles to a CodeGeneratorRequest only,
+          // which this repository's parser/emitter consumes directly.
+          { ...workspace, generators: [] },
+          {
+            signal: controller.signal,
+            timeoutMs: Math.max(
+              1,
+              Math.floor(timeoutMs - (performance.now() - started)),
+            ),
+          },
+        )).request;
       } catch (cause) {
         if (controller.signal.aborted) throw controller.signal.reason;
         if (

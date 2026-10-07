@@ -14,9 +14,11 @@ requirements, and maintenance-only native tools. Pins live in
 `tools/compiler_toolchain.json`, `tools/runtime-toolchain.json`, and
 `mise.toml`.
 
-Use `mise exec -- deno` for repository tasks. Source compilation and compiler
-builds require exactly Deno 2.6.8 because worker termination was verified on
-that engine version. Runtime consumers require Deno 2.6+.
+Use `mise exec -- deno` for repository tasks. Source schema compilation runs on
+any Deno engine the pinned compiler host admits (its guests stop themselves at
+their deadline; verified on 2.6.8 and 2.9.7). Release CLI binaries still build
+on the exact `mise.toml` Deno for reproducibility. Runtime consumers require
+Deno 2.6+.
 
 Acquire compiler assets with `deno task compiler:fetch` before generation or
 compiler validation. Normal source generation runs with read/write permission;

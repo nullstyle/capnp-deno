@@ -287,41 +287,6 @@ Deno.test("compiler explicit source discovery bounds traversal before collecting
   }
 });
 
-Deno.test("compiler engine terminates CPU execution within its documented grace", async () => {
-  const child = new Deno.Command(Deno.execPath(), {
-    args: [
-      "run",
-      "--no-config",
-      "--no-prompt",
-      new URL("./worker_termination_probe.ts", import.meta.url).href,
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill("SIGKILL");
-    } catch { /* already exited */ }
-  }, 8000);
-  try {
-    const result = await child.output();
-    assert(
-      !timedOut && result.success,
-      `worker CPU termination failed: ${
-        new TextDecoder().decode(result.stderr)
-      }`,
-    );
-    const counter = JSON.parse(new TextDecoder().decode(result.stdout));
-    assert(BigInt(counter.before) > 0n);
-    assert(BigInt(counter.afterThree) >= BigInt(counter.before));
-    assertEquals(counter.afterThree, counter.afterFour);
-  } finally {
-    clearTimeout(timeout);
-  }
-});
-
 async function inventory(
   directory: string,
   prefix = "",

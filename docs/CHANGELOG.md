@@ -6,6 +6,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The pinned compiler host moved from `capnp-wasm-compiler-host 0.1.0-rc.3` to
+  the full `capnpc-wasm 0.1.0-rc.5` SDK package (same Cap'n Proto 2.0-dev
+  frontend revision; identical standard includes; verified generated output is
+  unchanged). Source schema compilation no longer requires exactly Deno 2.6.8:
+  host rc.5 instruments guests with in-guest interruption checks, so timeouts
+  and aborts stop the guest at its deadline on every admitted engine (verified
+  on Deno 2.6.8 and 2.9.7). The pin's `denoVersion` now records only the engine
+  that builds the standalone `capnpc-deno` CLI for reproducible release
+  binaries. The standalone CLI embeds the full SDK package (66 files, including
+  the other language generator modules, embedded as opaque bytes). The obsolete
+  engine-termination-grace regression was removed with the contract it codified;
+  engine `terminate()` behavior is tracked by capnp-wasm's upstream canary.
+
 ## [0.6.0] - 2026-10-07
 
 ### Added

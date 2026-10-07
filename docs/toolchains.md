@@ -14,23 +14,27 @@ build a compiler.
 
 ## Versions and worker cancellation
 
-Source schema compilation and compiler builds require **exactly Deno 2.6.8**.
-Use `mise exec -- deno` in this checkout. The compiler-host package is currently
-`0.1.0-rc.3`, built around Cap'n Proto 2.0-dev. The
+Use `mise exec -- deno` in this checkout; the repository's `mise.toml` pins Deno
+`2.6.8` as the engine its own tasks and release binaries are built and tested
+on. The compiler-host package is currently `capnpc-wasm 0.1.0-rc.5` (the full
+SDK flavor), built around Cap'n Proto 2.0-dev. The
 [compiler pin](../tools/compiler_toolchain.json) is authoritative for the public
 archive URL, producer revision, compiler revision, byte length, and SHA-256
 identities; avoid maintaining copies of its hashes in instructions.
 
-The exact Deno requirement follows a real non-yielding WASM worker test. Deno
-2.6.8 allows a **two-second engine termination grace** after termination is
-requested. The host rejects a timed-out or canceled job, then waits **2.1
-seconds per compiler client** before starting a replacement worker. A rejected
-promise is not proof that guest execution stopped immediately. This restart
-spacing prevents that client from accumulating still-running workers during the
-engine grace; it is not a global bound across independent compiler clients.
-Other Deno versions fail before bounded worker compilation begins until their
-termination behavior is verified. The normal runtime has no compiler-worker
-version restriction.
+**Source schema compilation no longer requires an exact Deno engine.** Through
+host `0.1.0-rc.3` the bounded worker relied on `Worker.terminate()`, which only
+Deno 2.6.8 ever honored, so codegen required exactly that engine. Host rc.5 and
+newer instrument every guest with in-guest interruption checks: a timeout or
+abort stops the guest itself at its deadline in every admitted engine, and
+`terminate()` is only a fallback. `createSchemaCompiler` therefore admits any
+Deno release the host SDK admits (verified locally on 2.6.8 and 2.9.7; the
+engines must validate standardized Wasm exception handling, approximately Deno
+2.3+). The pin's `denoVersion` now records only the engine that builds the
+standalone `capnpc-deno` CLI, keeping release binaries reproducible; CI and
+`codegen:compile` still run on the `mise.toml` pin. Engine `terminate()`
+behavior itself is tracked upstream by capnp-wasm's termination canary
+([evidence](https://github.com/nullstyle/capnpc-wasm/blob/main/docs/deno-worker-termination.md)).
 
 A reusable compiler accepts one active job at a time. Its timeout covers both
 workspace acquisition and guest execution. Call `dispose()` after the last job;

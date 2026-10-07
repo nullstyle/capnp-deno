@@ -39,7 +39,8 @@ export function compilerAssetURL(
   root = COMPILER_PACKAGE_ROOT,
 ): URL {
   return new URL(
-    root.href === COMPILER_BUNDLE_ROOT.href && path === "wasm/capnp.wasm"
+    root.href === COMPILER_BUNDLE_ROOT.href && path.startsWith("wasm/") &&
+      path.endsWith(".wasm")
       ? `${path}.bin`
       : path,
     root,
@@ -106,7 +107,7 @@ async function verifyFiles(
   const manifest: CompilerManifest = JSON.parse(decoder.decode(bytes));
   if (
     manifest.format !== 1 ||
-    manifest.name !== "@nullstyle/capnp-wasm-compiler-host" ||
+    manifest.name !== "@nullstyle/capnpc-wasm" ||
     manifest.version !== pin.version ||
     manifest.source.commit !== pin.sourceCommit || manifest.source.dirty ||
     manifest.source.sha256 !== pin.sourceSha256 ||
@@ -167,8 +168,8 @@ export async function verifyCompilerPackage(
         throw new Error("compiler package exceeds size limit");
       }
       const logicalName = root.href === COMPILER_BUNDLE_ROOT.href &&
-          name === "wasm/capnp.wasm.bin"
-        ? "wasm/capnp.wasm"
+          name.startsWith("wasm/") && name.endsWith(".wasm.bin")
+        ? name.slice(0, -".bin".length)
         : name;
       if (files.has(logicalName)) throw new Error("duplicate compiler asset");
       files.set(logicalName, await Deno.readFile(join(path, name)));
