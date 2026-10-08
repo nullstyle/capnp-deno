@@ -8,6 +8,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- The autonomous three-party handoff now also passes under real session stacks:
+  a new real-wasm test wires the same Provide→shared-index→Accept loop across
+  five `RpcSession` instances with in-memory transports, with every frame
+  crossing `pumpInboundFrame` (the wasm peer pump that drains outbound frames
+  and L3 events in order) rather than hand-pushed peer frames. Originated
+  control messages drain through the same outbound path the session pump uses
+  after each inbound frame.
+
 - **Host answer cancellation over the runtime's L3 exports (feature bit 12).**
   The vendored capnp-zig moves to `fe6634d…` (main after v0.23.0), which exposes
   the answer-finished seam: `WasmAbi` gains `setAnswerFinishedHandler` (a Finish

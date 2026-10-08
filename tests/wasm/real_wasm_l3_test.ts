@@ -19,6 +19,8 @@ import {
   WASM_FEATURE_L3_HANDOFF,
   WasmPeer,
 } from "../../src/advanced.ts";
+import { RpcSession } from "../../src/rpc/session/session.ts";
+import type { RpcTransport } from "../../src/rpc/transports/internal/transport.ts";
 import { decodeRpcMessageTag } from "../../src/rpc/wire/decode.ts";
 import { decodeReturnFrame } from "../../src/rpc/wire/decode.ts";
 import { assert, assertBytes, assertEquals } from "../test_utils.ts";
@@ -28,6 +30,26 @@ import { assert, assertBytes, assertEquals } from "../test_utils.ts";
 const RPC_MESSAGE_TAG_PROVIDE = 10;
 const RPC_MESSAGE_TAG_ACCEPT = 11;
 const RPC_MESSAGE_TAG_THIRD_PARTY_ANSWER = 14;
+
+class MockTransport implements RpcTransport {
+  readonly sent: Uint8Array[] = [];
+  #onFrame: ((frame: Uint8Array) => void | Promise<void>) | null = null;
+
+  start(onFrame: (frame: Uint8Array) => void | Promise<void>): void {
+    this.#onFrame = onFrame;
+  }
+
+  send(frame: Uint8Array): void {
+    this.sent.push(new Uint8Array(frame));
+  }
+
+  close(): void {}
+
+  async emit(frame: Uint8Array): Promise<void> {
+    if (!this.#onFrame) throw new Error("transport not started");
+    await this.#onFrame(frame);
+  }
+}
 
 async function assertRejects(
   promise: () => Promise<unknown>,
@@ -388,4 +410,85 @@ Deno.test("answer cancellation: sendReturnCanceled refuses before the caller fin
     }
     assert(refused, "expected AnswerNotFinished");
   });
+});
+
+Deno.test("l3 session flow: the autonomous handoff works through RpcSession pumps", async () => {
+  // The same three-vat topology as the raw-peer autonomous test, but every
+  // frame crosses RpcSession pumps (pumpInboundFrame -> wasm peer -> drained
+  // outbound + L3 events) over in-memory wires - the wiring session stacks
+  // use. A frame switch plays the vat network between the sessions.
+  const { peer: seed } = await instantiatePeer(wasmPath, {}, {
+    expectedVersion: 1,
+    requireVersionExport: true,
+  });
+  const mkPeer = (): WasmPeer => WasmPeer.create(seed.abi);
+
+  const bToCTransport = new MockTransport();
+  const bToC = new RpcSession(mkPeer(), bToCTransport);
+  const bToATransport = new MockTransport();
+  const bToA = new RpcSession(mkPeer(), bToATransport);
+  const wireBC = new MockTransport();
+  const wireAC = new MockTransport();
+
+  // VatC: two sessions attached to one provision index.
+  const cToB = new RpcSession(mkPeer(), wireBC);
+  const cToA = new RpcSession(mkPeer(), wireAC);
+  // VatA's session toward VatC.
+  const aToCTransport = new MockTransport();
+  const aToC = new RpcSession(mkPeer(), aToCTransport);
+
+  const sessions = [bToC, bToA, cToB, cToA, aToC];
+  try {
+    for (const session of sessions) await session.start();
+
+    const index = seed.abi.createProvisionIndex();
+    seed.abi.attachProvisionIndex(cToB.peer.handle, index);
+    seed.abi.attachProvisionIndex(cToA.peer.handle, index);
+    // VatC hosts the capability the handoff names (bootstrap stub export).
+    cToB.peer.abi.setBootstrapStubWithId(cToB.peer.handle);
+
+    const tokens = mintHandoffTokens();
+    provideCapability(bToC.peer, bToA.peer, 0, {
+      recipient: tokens.toAwait,
+      contact: tokens.contact,
+    });
+    // The Provide leaves the peer's outbound queue to the transport (the
+    // session pump drains this queue after every inbound frame; an
+    // originated control message drains the same way).
+    const drainTo = (peer: WasmPeer, transport: MockTransport): void => {
+      for (const frame of peer.drainOutgoingFrames().frames) {
+        transport.send(frame);
+      }
+    };
+    drainTo(bToC.peer, bToCTransport);
+    assertEquals(bToCTransport.sent.length, 1);
+    // The switch delivers it to VatC's C<->B session, which registers the
+    // provision into the shared index.
+    await wireBC.emit(bToCTransport.sent.shift()!);
+
+    let questionId = -1;
+    const accepted = acceptProvision(aToC.peer, tokens.toAwait, {
+      onQuestionId: (id) => (questionId = id),
+    });
+    drainTo(aToC.peer, aToCTransport);
+    assertEquals(aToCTransport.sent.length, 1);
+    const acceptFrame = aToCTransport.sent.shift()!;
+    assertEquals(decodeRpcMessageTag(acceptFrame), RPC_MESSAGE_TAG_ACCEPT);
+
+    // The switch carries the Accept to VatC's C<->A session; the shared
+    // index answers it and the answer flows back through the pump.
+    await wireAC.emit(acceptFrame);
+    assertEquals(wireAC.sent.length, 1);
+    const answer = wireAC.sent.shift()!;
+    const decodedAnswer = decodeReturnFrame(answer);
+    assert(decodedAnswer.kind === "results");
+    assertEquals(decodedAnswer.answerId, questionId);
+    assert(decodedAnswer.capTable.length >= 1);
+
+    await aToCTransport.emit(answer);
+    const result = await accepted;
+    assert(result.capabilityIndex >= 0);
+  } finally {
+    for (const session of sessions) await session.close();
+  }
 });
