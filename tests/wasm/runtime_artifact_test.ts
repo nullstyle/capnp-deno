@@ -43,10 +43,10 @@ Deno.test("runtime receipt verifies the shipped module and pinned ABI", async ()
   const { bytes, receipt, pin } = await fixture();
   await verifyRuntime(bytes, receipt, pin);
   assertEquals(receipt.abi.version, 1);
-  // Feature bits 0-11: bits 10-11 (experimental L3 handoff origination and
-  // vat hosting) were added additively after the v0.21.0 runtime; ABI stays
+  // Feature bits 0-12: bits 10-12 (experimental L3 handoff origination, vat
+  // hosting, and host answer cancellation) were added additively; ABI stays
   // version 1.
-  assertEquals(receipt.abi.features[0], 4095);
+  assertEquals(receipt.abi.features[0], 8191);
 });
 
 Deno.test("runtime receipt rejects damaged bytes before WASM compilation", async () => {
@@ -74,7 +74,7 @@ Deno.test("runtime receipt detects incorrect ABI and export inventories", async 
     () => verifyRuntime(bytes, receipt, pin),
     "ABI/export receipt",
   );
-  receipt.abi.features[0] = 4095;
+  receipt.abi.features[0] = 8191;
   receipt.exports.pop();
   await assertRejects(
     () => verifyRuntime(bytes, receipt, pin),

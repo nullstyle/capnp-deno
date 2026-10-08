@@ -7,6 +7,7 @@ import {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
   encodeCallRequestFrame,
+  encodeFinishFrame,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
   handoffCompletionFromContact,
@@ -14,6 +15,7 @@ import {
   mintHandoffTokens,
   provideCapability,
   sendThirdPartyAnswer,
+  WASM_EVENT_KIND_ANSWER_FINISHED,
   WASM_FEATURE_L3_HANDOFF,
   WasmPeer,
 } from "../../src/advanced.ts";
@@ -306,4 +308,84 @@ Deno.test("l3 live flow: a shared provision index lets VatC answer the Accept it
       bToC.abi.freeProvisionIndex(index);
     }
   }, 5);
+});
+
+Deno.test("answer cancellation: caller Finish surfaces a kind-4 event and sendReturnCanceled answers", async () => {
+  await withModule(([server]) => {
+    assert(
+      server.abi.capabilities.hasAnswerCancellation,
+      "expected the checked-in runtime to advertise answer cancellation (bit 12)",
+    );
+    server.abi.setAnswerFinishedHandler(server.handle, true);
+
+    // An inbound Call the host never answers: bootstrap import target.
+    const questionId = 9;
+    server.pushFrame(encodeCallRequestFrame({
+      questionId,
+      targetImportedCap: 0,
+      interfaceId: 0xa100n,
+      methodId: 3,
+    }));
+    const hostCall = server.abi.popHostCall(server.handle);
+    assert(hostCall !== null, "expected the call queued for the host");
+
+    // The caller gives up: Finish (release result caps) before any Return.
+    // Subscribe before the push: pushFrame drains L3 events in pump order.
+    const events: number[] = [];
+    const unsubscribe = server.addL3EventListener((event) => {
+      if (event.kind === WASM_EVENT_KIND_ANSWER_FINISHED) {
+        events.push(
+          new DataView(
+            event.payload.buffer,
+            event.payload.byteOffset,
+            event.payload.byteLength,
+          ).getUint32(0, true),
+        );
+      }
+    });
+    server.pushFrame(
+      encodeFinishFrame({ questionId, releaseResultCaps: true }),
+    );
+    unsubscribe();
+    assertEquals(events.length, 1);
+    assertEquals(events[0], questionId);
+
+    // Answering emits exactly the Return{canceled} frame.
+    server.abi.sendReturnCanceled(server.handle, questionId);
+    const answer = server.popOutgoingFrame();
+    assert(answer !== null, "expected the canceled Return");
+    const decoded = decodeReturnFrame(answer);
+    assert(decoded.kind === "canceled");
+    assertEquals(decoded.answerId, questionId);
+
+    // The id is spent: a second cancel refuses.
+    let refused = false;
+    try {
+      server.abi.sendReturnCanceled(server.handle, questionId);
+    } catch {
+      refused = true;
+    }
+    assert(refused, "expected the second cancel to refuse");
+  });
+});
+
+Deno.test("answer cancellation: sendReturnCanceled refuses before the caller finishes", async () => {
+  await withModule(([server]) => {
+    server.abi.setAnswerFinishedHandler(server.handle, true);
+    server.pushFrame(encodeCallRequestFrame({
+      questionId: 4,
+      targetImportedCap: 0,
+      interfaceId: 0xa100n,
+      methodId: 3,
+    }));
+    const hostCall = server.abi.popHostCall(server.handle);
+    assert(hostCall !== null);
+    let refused = false;
+    try {
+      server.abi.sendReturnCanceled(server.handle, 4);
+    } catch (error) {
+      refused = String(error).includes("AnswerNotFinished");
+    }
+    assert(refused, "expected AnswerNotFinished");
+  });
 });

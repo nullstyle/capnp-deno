@@ -127,14 +127,14 @@ try {
   ]);
   const bytes = await Deno.readFile(binary);
   const receipt = await describeRuntime(bytes, pin);
-  // Feature bits 0–11 (bit 10 = experimental L3 handoff origination, bit 11 =
-  // experimental L3 vat hosting, both added after capnp-zig v0.21.0). The gate
+  // Feature bits 0–12 (bits 10–12 = experimental L3 handoff origination, L3
+  // vat hosting, and host answer cancellation). The gate
   // is reviewed on every additive bit: the ABI stays version 1 with no
   // removals, and hosts that ignore the new bits see the same surface.
   if (
     receipt.abi.version !== 1 || receipt.abi.minimum !== 1 ||
     receipt.abi.maximum !== 1 ||
-    receipt.abi.features[0] !== 4095 || receipt.abi.features[1] !== 0
+    receipt.abi.features[0] !== 8191 || receipt.abi.features[1] !== 0
   ) {
     throw new Error(
       "runtime ABI changed; review compatibility before updating its artifact",

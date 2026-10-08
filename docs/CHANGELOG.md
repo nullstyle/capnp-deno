@@ -8,6 +8,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- **Host answer cancellation over the runtime's L3 exports (feature bit 12).**
+  The vendored capnp-zig moves to `fe6634d…` (main after v0.23.0), which exposes
+  the answer-finished seam: `WasmAbi` gains `setAnswerFinishedHandler` (a Finish
+  from the caller of a host-handed, unanswered call delivers a
+  `WASM_EVENT_KIND_ANSWER_FINISHED` event whose payload is the 4-byte answer id,
+  drained in pump order like the L3 events) and `sendReturnCanceled` (answers
+  with `Return{canceled}`, fails the calls pipelined on that answer, and frees
+  the caller's question id; refuses with `AnswerNotFinished` before the caller
+  finishes and `AnswerNotOwed` once any Return went out). The rebuilt artifact
+  advertises feature bits 0–12 (8191; 49 exports, `d0312c8e…`), and the reviewed
+  ABI gates widened accordingly. Real-wasm tests cover the kind-4 event for a
+  caller-side cancel, the canceled Return frame, the spent-id refusal, and the
+  not-yet-finished refusal. Wiring the events into `RpcServerBridge` handler
+  abort signals remains follow-up work.
+
 - Vendored capnp-zig advanced to tag `v0.23.0` (`aca9824…`), picking up the RPC
   correctness release: loopback calls now route the peer's own capabilities
   (fixing wrong-object routing and a wire-reference leak that could free a live

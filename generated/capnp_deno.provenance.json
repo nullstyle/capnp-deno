@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "toolchain": {
     "schemaVersion": 1,
-    "capnpZigCommit": "aca9824a30c2f362b9257cb9a38ad0816ce29743",
+    "capnpZigCommit": "fe6634d27393afcabb11dddd2934bff7c55bb212",
     "zigVersion": "0.17.0",
     "buildStep": "wasm-host",
     "optimization": "ReleaseSmall",
@@ -15,15 +15,15 @@
   },
   "artifact": {
     "filename": "capnp_deno.wasm",
-    "sha256": "46cd8fe1cde2d5101afa4890bdbc829fe00e969a1688b90be8ab2d58458deded",
-    "bytes": 317677
+    "sha256": "d0312c8e06077a16f363fed31d9791e4a5f2e27f3d8de529329d815ea252c096",
+    "bytes": 318353
   },
   "abi": {
     "version": 1,
     "minimum": 1,
     "maximum": 1,
     "features": [
-      4095,
+      8191,
       0
     ]
   },
@@ -161,7 +161,15 @@
       "kind": "function"
     },
     {
+      "name": "capnp_peer_send_return_canceled",
+      "kind": "function"
+    },
+    {
       "name": "capnp_peer_send_third_party_answer",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_set_answer_finished_handler",
       "kind": "function"
     },
     {

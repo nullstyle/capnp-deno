@@ -1,9 +1,9 @@
 # capnp-zig integration and ABI ownership
 
 Updated: 2026-10-07 UTC. The evaluated runtime source is
-`vendor/capnp-zig@aca9824a30c2f362b9257cb9a38ad0816ce29743` (tag `v0.23.0`). The
-[runtime pin](../tools/runtime-toolchain.json) is authoritative for the source,
-Zig and Binaryen versions, and build flags. The
+`vendor/capnp-zig@fe6634d27393afcabb11dddd2934bff7c55bb212` (main after
+`v0.23.0`). The [runtime pin](../tools/runtime-toolchain.json) is authoritative
+for the source, Zig and Binaryen versions, and build flags. The
 [artifact receipt](../generated/capnp_deno.provenance.json) records the exact
 WASM bytes, ABI, exports, and features; verify it with `deno task check:wasm`.
 

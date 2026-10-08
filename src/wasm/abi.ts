@@ -135,6 +135,11 @@ export interface CapnpWasmExports {
   capnp_provision_index_free?(index: number): void;
   capnp_peer_attach_provision_index?(peer: number, index: number): number;
   capnp_peer_detach_provision_index?(peer: number): number;
+  capnp_peer_set_answer_finished_handler?(
+    peer: number,
+    enabled: number,
+  ): number;
+  capnp_peer_send_return_canceled?(peer: number, answer_id: number): number;
   capnp_peer_set_bootstrap_stub?(peer: number): number;
   capnp_peer_set_bootstrap_stub_with_id?(
     peer: number,
@@ -196,6 +201,7 @@ export interface WasmAbiCapabilities {
   hasSchemaManifest: boolean;
   hasL3Handoff: boolean;
   hasL3VatHosting: boolean;
+  hasAnswerCancellation: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
   hasShutdown: boolean;
@@ -234,6 +240,18 @@ export const WASM_FEATURE_L3_HANDOFF = 1n << 10n;
  * VatC role). Added additively after capnp-zig v0.22.0; ABI version stays 1.
  */
 export const WASM_FEATURE_L3_VAT_HOSTING = 1n << 11n;
+
+/**
+ * Feature-flag bit reported via `capnp_wasm_feature_flags_lo/hi` when the
+ * module exposes the experimental host answer cancellation exports:
+ * answer-finished notifications (kind-4 event records) for calls whose
+ * caller Finished before the host answered, and
+ * `capnp_peer_send_return_canceled`. ABI version stays 1.
+ */
+export const WASM_FEATURE_HOST_ANSWER_CANCELLATION = 1n << 12n;
+
+/** Event-record kind: the caller Finished a host-handed, unanswered call. */
+export const WASM_EVENT_KIND_ANSWER_FINISHED = 4;
 
 /**
  * One decoded Level-3 handoff event drained through
@@ -479,6 +497,10 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
       typeof exports.capnp_provision_index_free === "function" &&
       typeof exports.capnp_peer_attach_provision_index === "function" &&
       typeof exports.capnp_peer_detach_provision_index === "function",
+    hasAnswerCancellation:
+      (featureFlags & WASM_FEATURE_HOST_ANSWER_CANCELLATION) !== 0n &&
+      typeof exports.capnp_peer_set_answer_finished_handler === "function" &&
+      typeof exports.capnp_peer_send_return_canceled === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
     hasShutdown: typeof exports.capnp_shutdown === "function",
@@ -647,6 +669,18 @@ export function getCapnpWasmExports(
     exports.capnp_peer_detach_provision_index = expectFunction(
       raw.capnp_peer_detach_provision_index,
       "capnp_peer_detach_provision_index",
+    );
+  }
+  if (raw.capnp_peer_set_answer_finished_handler !== undefined) {
+    exports.capnp_peer_set_answer_finished_handler = expectFunction(
+      raw.capnp_peer_set_answer_finished_handler,
+      "capnp_peer_set_answer_finished_handler",
+    );
+  }
+  if (raw.capnp_peer_send_return_canceled !== undefined) {
+    exports.capnp_peer_send_return_canceled = expectFunction(
+      raw.capnp_peer_send_return_canceled,
+      "capnp_peer_send_return_canceled",
     );
   }
   if (raw.capnp_peer_set_bootstrap_stub !== undefined) {
@@ -1519,6 +1553,70 @@ export class WasmAbi {
     const ok = fn(peer, index);
     if (ok !== 1) {
       this.throwLastError("capnp_peer_attach_provision_index failed");
+    }
+  }
+
+  /**
+   * Enables or disables answer-finished notifications (experimental,
+   * feature bit 12). When enabled, a Finish from the caller of a
+   * host-handed call that has not been answered delivers a kind-4 event
+   * (`WASM_EVENT_KIND_ANSWER_FINISHED`, payload = 4-byte answer id) through
+   * {@link WasmAbi.popL3Event}; answer with
+   * {@link WasmAbi.sendReturnCanceled}. Disabling clears the handler;
+   * queued events remain drainable.
+   *
+   * @param peer - The peer handle.
+   * @param enabled - True to enable, false to disable.
+   * @throws {WasmAbiError} If the exports are missing or the operation fails.
+   */
+  setAnswerFinishedHandler(peer: number, enabled: boolean): void {
+    const fn = this.exports.capnp_peer_set_answer_finished_handler;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_set_answer_finished_handler",
+      );
+    }
+    this.assertAnswerCancellation();
+    this.clearError();
+    const ok = fn(peer, enabled ? 1 : 0);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_set_answer_finished_handler failed");
+    }
+  }
+
+  /**
+   * Answers a call whose caller sent Finish first with `Return{canceled}`
+   * (experimental, feature bit 12), failing the calls pipelined on it and
+   * freeing the caller's question id. Refuses while the caller has not
+   * finished the answer (`AnswerNotFinished`) or once any Return went out
+   * (`AnswerNotOwed`).
+   *
+   * @param peer - The peer handle.
+   * @param answerId - The inbound question id whose caller gave up.
+   * @throws {WasmAbiError} If the exports are missing or the operation fails.
+   */
+  sendReturnCanceled(peer: number, answerId: number): void {
+    const fn = this.exports.capnp_peer_send_return_canceled;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_send_return_canceled",
+      );
+    }
+    this.assertAnswerCancellation();
+    this.assertU32(answerId, "answerId");
+    this.clearError();
+    const ok = fn(peer, answerId);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_send_return_canceled failed");
+    }
+  }
+
+  /** Throws unless the module advertises host answer cancellation. */
+  private assertAnswerCancellation(): void {
+    if (!this.capabilities.hasAnswerCancellation) {
+      throw new WasmAbiError(
+        "wasm module does not advertise host answer cancellation (bit 12)",
+      );
     }
   }
 
