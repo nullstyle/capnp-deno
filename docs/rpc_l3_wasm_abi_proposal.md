@@ -1,17 +1,24 @@
 # Level-3 three-party handoff over the WASM host ABI — proposal
 
-Status: **implemented end to end at the ABI boundary**. capnp-zig `v0.22.0`
-(feature bit `10`; upstream commits `50e5e6d`/`1b894a1`, tag `9de73ba…`) ships
-the wasm exports; the vendored runtime here is that tag; and
-`@nullstyle/capnp/advanced` now exposes the Experimental Deno wrappers
-(`mintHandoffTokens`, `provideCapability`, `acceptProvision`,
-`registerThirdPartyAwait`, `sendThirdPartyAnswer`) with the ABI bindings, the
-per-peer event channel drained in pump order, and real-wasm coverage. The
+Status: **the Deno-side recipient pipeline is complete and live-tested**.
+capnp-zig `v0.22.0` (feature bit `10`; upstream commits `50e5e6d`/`1b894a1`, tag
+`9de73ba…`) ships the wasm exports; the vendored runtime here is that tag;
+`@nullstyle/capnp/advanced` exposes the Experimental Deno wrappers
+(`mintHandoffTokens`, `handoffCompletionFromContact`, `provideCapability`,
+`acceptProvision`, `registerThirdPartyAwait`, `sendThirdPartyAnswer`); and the
+TypeScript wire codec emits and parses `thirdPartyHosted` cap descriptors. A
+real-wasm test drives the whole recipient pipeline through the actual host-call
+relay: originate the Provide, deliver the vine as a `thirdPartyHosted`
+descriptor, decode it on the recipient side, resolve the byte-identical
+completion, and accept on the third connection. The
 [Implementation deltas](#implementation-deltas) section records where the
-shipped design differs from the original proposal. The remaining increment to
-the full live three-party flow is `thirdPartyHosted` cap-descriptor support in
-the TypeScript wire codec (emit on the providing side, resolve on the recipient
-side); nothing here is a Stable API.
+shipped design differs from the original proposal. The remaining gap to a fully
+autonomous flow is VatC-side: one wasm peer's inbound Provide registers its
+provision per-connection, so an Accept arriving on a _different_ connection of
+the same vat needs the vat-level provision registry — either a cross-peer
+registry inside the module (upstream) or host mediation of VatC; the live test
+answers the Accept's Return from the host in the meantime. Nothing here is a
+Stable API.
 
 ## Why
 

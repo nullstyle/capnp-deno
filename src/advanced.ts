@@ -24,6 +24,7 @@ export {
   type AcceptedCapability,
   acceptProvision,
   type AcceptProvisionOptions,
+  handoffCompletionFromContact,
   type HandoffProvideHandle,
   type HandoffTokens,
   L3_EVENT_ACCEPT_RETURN,

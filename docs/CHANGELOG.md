@@ -13,15 +13,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   default host-side introducer), `provideCapability` (originate a handoff across
   two peers of one module), `acceptProvision` (send an Accept and resolve the
   accepted capability's import index from the L3 event channel when its Return
-  arrives), `registerThirdPartyAwait`, and `sendThirdPartyAnswer`. The `WasmAbi`
-  layer gains typed bindings and export discovery for the five wasm exports,
-  `WasmPeer.pushFrame` drains L3 events in pump order and dispatches them to
-  `addL3EventListener` listeners, and the error metadata union gains `l3_*`
-  phases. Real-wasm tests cover the Provide/Accept/ThirdPartyAnswer frames and
-  the accept resolve/reject event paths. The TypeScript wire codec does not yet
-  emit or parse `thirdPartyHosted` cap descriptors, so delivering the vine
-  descriptor to a recipient (and thereby the full live three-party flow) remains
-  the next increment; nothing here is a Stable API.
+  arrives), `registerThirdPartyAwait`, `sendThirdPartyAnswer`, and
+  `handoffCompletionFromContact` (the recipient-side half of the default
+  introducer: rebuilds the byte-identical ThirdPartyCompletion from decoded
+  contact bytes). The `WasmAbi` layer gains typed bindings and export discovery
+  for the five wasm exports, `WasmPeer.pushFrame` drains L3 events in pump order
+  and dispatches them to `addL3EventListener` listeners, and the error metadata
+  union gains `l3_*` phases.
+- The TypeScript wire codec now emits and parses `thirdPartyHosted` capability
+  descriptors: `RpcCapDescriptor` gains optional `vineId`/`contact` fields,
+  `CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED` is exported, the encoder writes the
+  nested `ThirdPartyCapDescriptor` (vine id plus the contact bytes as a root
+  any-pointer) and rejects descriptors without contact bytes, and the decoder
+  surfaces both fields. A real-wasm test drives the full recipient pipeline: the
+  vine is delivered through the actual host-call bridge relay as a
+  `thirdPartyHosted` descriptor, decoded on the recipient side, resolved to a
+  byte-identical completion, and accepted on a third connection, resolving the
+  capability placement from the Return event. Nothing here is a Stable API; the
+  remaining gap to a fully autonomous three-party session flow is VatC-side
+  cross-connection Accept matching, which needs the vat-level provision registry
+  semantics documented in the L3 proposal.
 
 ### Added
 

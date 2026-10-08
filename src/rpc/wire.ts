@@ -10,6 +10,7 @@ export {
   // types / constants
   CAP_DESCRIPTOR_TAG_RECEIVER_HOSTED,
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
   // decode
   decodeBootstrapRequestFrame,
   // pointers

@@ -32,6 +32,7 @@ import {
   CALL_TARGET_POINTER_INDEX,
   CAP_DESCRIPTOR_ID_BYTE_OFFSET,
   CAP_DESCRIPTOR_TAG_BYTE_OFFSET,
+  CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
   EMPTY_STRUCT_MESSAGE,
   EXCEPTION_REASON_POINTER_INDEX,
   FINISH_FLAGS_BYTE_OFFSET,
@@ -76,6 +77,7 @@ import {
   segmentsFromFrame,
 } from "./segments.ts";
 import {
+  decodeByteListPointer,
   decodeStructListPointer,
   decodeStructPointer,
   pointerWordIndex,
@@ -118,13 +120,54 @@ function decodeCapTableFromPayload(
   };
   for (let i = 0; i < capList.elementCount; i += 1) {
     itemRef.startWord = capList.elementsStartWord + (i * stride);
-    capTable.push({
-      tag: readU16InStruct(table, itemRef, CAP_DESCRIPTOR_TAG_BYTE_OFFSET),
-      id: readU32InStruct(table, itemRef, CAP_DESCRIPTOR_ID_BYTE_OFFSET),
-    });
+    const tag = readU16InStruct(table, itemRef, CAP_DESCRIPTOR_TAG_BYTE_OFFSET);
+    const id = readU32InStruct(table, itemRef, CAP_DESCRIPTOR_ID_BYTE_OFFSET);
+    if (tag === CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED) {
+      capTable.push({
+        tag,
+        id,
+        ...decodeThirdPartyHostedDescriptor(table, itemRef),
+      });
+      continue;
+    }
+    capTable.push({ tag, id });
   }
 
   return capTable;
+}
+
+/**
+ * Parse the ThirdPartyCapDescriptor behind a `thirdPartyHosted` descriptor's
+ * pointer slot: `vineId` (data word 0) and the opaque ThirdPartyToContact
+ * bytes (pointer word 0, a Data list).
+ */
+function decodeThirdPartyHostedDescriptor(
+  table: SegmentTable,
+  itemRef: StructRef,
+): { vineId: number; contact: Uint8Array } {
+  const nested = decodeStructPointer(
+    table,
+    pointerWordIndex(itemRef, 0),
+  );
+  if (!nested) {
+    throw new ProtocolError("thirdPartyHosted descriptor pointer is null");
+  }
+  const vineId = readU32InStruct(table, nested, 0);
+  const contactList = decodeByteListPointer(
+    table,
+    pointerWordIndex(nested, 0),
+  );
+  if (!contactList) {
+    throw new ProtocolError("thirdPartyHosted contact pointer is null");
+  }
+  const seg = table.segments[contactList.segmentId];
+  const start = contactList.startWord * 8;
+  return {
+    vineId,
+    contact: new Uint8Array(
+      seg.subarray(start, start + contactList.elementCount),
+    ),
+  };
 }
 
 function decodePromisedAnswerTransform(

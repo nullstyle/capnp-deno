@@ -39,6 +39,7 @@ import {
   CAP_DESCRIPTOR_POINTER_COUNT,
   CAP_DESCRIPTOR_TAG_BYTE_OFFSET,
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
   EMPTY_STRUCT_MESSAGE,
   EXCEPTION_DATA_WORD_COUNT,
   EXCEPTION_POINTER_COUNT,
@@ -360,6 +361,38 @@ function encodeCapTable(
       CAP_DESCRIPTOR_ID_BYTE_OFFSET,
       ensureU32(entry.id, `capTable[${i}].id`),
     );
+    if (entry.tag === CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED) {
+      const vineId = ensureU32(
+        entry.vineId ?? 0,
+        `capTable[${i}].vineId`,
+      );
+      if (entry.contact === undefined) {
+        throw new ProtocolError(
+          `capTable[${i}]: thirdPartyHosted requires contact bytes`,
+          { metadata: { phase: "response_encode" } },
+        );
+      }
+      // ThirdPartyCapDescriptor: one data word (vineId) + one pointer word
+      // (the ThirdPartyToContact any-pointer), hung off the descriptor's
+      // pointer slot. The contact is a Data list (1-byte elements).
+      const nested = builder.allocWords(2);
+      builder.setStructPointer(
+        elemWord + CAP_DESCRIPTOR_DATA_WORD_COUNT,
+        nested,
+        1,
+        1,
+      );
+      builder.writeU32(nested, 0, vineId);
+      const contactWordCount = (entry.contact.byteLength + 7) >>> 3;
+      const contactTarget = builder.allocWords(contactWordCount);
+      builder.writeBytes(contactTarget, 0, entry.contact);
+      builder.setListPointer(
+        nested + 1,
+        contactTarget,
+        2,
+        entry.contact.byteLength,
+      );
+    }
   }
 }
 

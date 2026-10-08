@@ -61,12 +61,35 @@ export interface HandoffTokens {
 export function mintHandoffTokens(): HandoffTokens {
   const nonce = new Uint8Array(16);
   crypto.getRandomValues(nonce);
-  const builder = new MessageBuilder();
-  builder.writeDataPointer(0, nonce);
   return {
-    toAwait: builder.toMessageBytes(),
+    toAwait: handoffCompletionFromContact(nonce),
     contact: new Uint8Array(nonce),
   };
+}
+
+/**
+ * Resolve a ThirdPartyToContact into the ThirdPartyCompletion message to
+ * present in the Accept — the recipient-side half of the default
+ * introducer. `mintHandoffTokens` derives both blobs from one nonce and
+ * serializes them with this exact construction, so the completion produced
+ * here is byte-identical to the toAwait the introducer embedded in the
+ * Provide.
+ *
+ * @param contact - The opaque contact bytes from a decoded
+ *   `thirdPartyHosted` descriptor.
+ * @returns The serialized ThirdPartyCompletion root message.
+ * @example
+ * ```ts
+ * const completion = handoffCompletionFromContact(descriptor.contact);
+ * const accepted = await acceptProvision(peer, completion);
+ * ```
+ */
+export function handoffCompletionFromContact(
+  contact: Uint8Array,
+): Uint8Array {
+  const builder = new MessageBuilder();
+  builder.writeDataPointer(0, contact);
+  return builder.toMessageBytes();
 }
 
 /**

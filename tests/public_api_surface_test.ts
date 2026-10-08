@@ -7,6 +7,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "AbiError",
   "CAP_DESCRIPTOR_TAG_RECEIVER_HOSTED",
   "CAP_DESCRIPTOR_TAG_SENDER_HOSTED",
+  "CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED",
   "CapnpError",
   "CapnpFrameFramer",
   "CircuitBreaker",

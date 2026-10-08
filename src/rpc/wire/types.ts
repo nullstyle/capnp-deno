@@ -90,12 +90,25 @@ export type RpcCallTarget =
     promisedAnswer: RpcPromisedAnswerTarget;
   };
 
+/** Cap descriptor union tag: the capability lives in a third-party vat (level 3). */
+export const CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED = 5 as const;
+
 /** A capability descriptor in a Cap'n Proto RPC payload's capability table. */
 export interface RpcCapDescriptor {
-  /** The descriptor tag (e.g., senderHosted=1, receiverHosted=3). */
+  /** The descriptor tag (e.g., senderHosted=1, receiverHosted=3, thirdPartyHosted=5). */
   tag: number;
-  /** The capability ID (export/import table index). */
+  /** The capability ID (export/import table index). Unused for thirdPartyHosted. */
   id: number;
+  /**
+   * For `thirdPartyHosted` descriptors: the vine export id the recipient
+   * releases when it has picked up (or given up on) the capability.
+   */
+  vineId?: number;
+  /**
+   * For `thirdPartyHosted` descriptors: the opaque ThirdPartyToContact bytes
+   * naming the third-party host and the capability to accept from it.
+   */
+  contact?: Uint8Array;
 }
 
 interface RpcReturnBase {

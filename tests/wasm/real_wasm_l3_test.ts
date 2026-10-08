@@ -4,8 +4,12 @@
 
 import {
   acceptProvision,
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
+  encodeCallRequestFrame,
   encodeReturnExceptionFrame,
   encodeReturnResultsFrame,
+  handoffCompletionFromContact,
   instantiatePeer,
   mintHandoffTokens,
   provideCapability,
@@ -13,9 +17,9 @@ import {
   WASM_FEATURE_L3_HANDOFF,
   WasmPeer,
 } from "../../src/advanced.ts";
-import { CAP_DESCRIPTOR_TAG_SENDER_HOSTED } from "../../src/rpc/wire/mod.ts";
 import { decodeRpcMessageTag } from "../../src/rpc/wire/decode.ts";
-import { assert, assertEquals } from "../test_utils.ts";
+import { decodeReturnFrame } from "../../src/rpc/wire/decode.ts";
+import { assert, assertBytes, assertEquals } from "../test_utils.ts";
 
 // Message union tags from rpc.capnp (the TypeScript codec does not yet
 // model these message kinds, so the constants are local to the tests).
@@ -152,4 +156,79 @@ Deno.test("l3 sendThirdPartyAnswer returns a protocol-range answer id", async ()
       RPC_MESSAGE_TAG_THIRD_PARTY_ANSWER,
     );
   });
+});
+
+Deno.test("l3 live flow: vine delivered as thirdPartyHosted, recipient resolves and accepts", async () => {
+  await withModule(async ([bc, ab, aToC]) => {
+    // VatB originates the handoff across its two connections: the cap lives
+    // on the bc connection (import 0), the recipient is reachable via ab.
+    const tokens = mintHandoffTokens();
+    const handle = provideCapability(bc, ab, 0, {
+      recipient: tokens.toAwait,
+      contact: tokens.contact,
+    });
+    const provideFrame = bc.popOutgoingFrame();
+    assert(
+      provideFrame !== null,
+      "expected the Provide on the cap-host connection",
+    );
+
+    // The recipient asks VatB for the capability; VatB answers through the
+    // host-call bridge with a Return whose cap table carries the vine as a
+    // thirdPartyHosted descriptor.
+    assertEquals(
+      ab.pushFrame(encodeCallRequestFrame({
+        questionId: 5,
+        targetImportedCap: 0,
+        interfaceId: 1n,
+        methodId: 0,
+      })).frames.length,
+      0,
+    );
+    const hostCall = ab.abi.popHostCall(ab.handle);
+    assert(hostCall !== null, "expected VatB to queue the call for the host");
+    ab.abi.respondHostCallReturnFrame(
+      ab.handle,
+      encodeReturnResultsFrame({
+        answerId: hostCall.questionId,
+        capTable: [{
+          tag: CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
+          id: 0,
+          vineId: handle.vineId,
+          contact: tokens.contact,
+        }],
+      }),
+    );
+    const delivered = ab.drainOutgoingFrames().frames;
+    assertEquals(delivered.length, 1);
+    const decoded = decodeReturnFrame(delivered[0]);
+    assert(decoded.kind === "results");
+    const descriptor = decoded.capTable.find((entry) =>
+      entry.tag === CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED
+    );
+    assert(descriptor !== undefined, "expected a thirdPartyHosted descriptor");
+    assertEquals(descriptor.vineId, handle.vineId);
+    assertBytes(
+      descriptor.contact ?? new Uint8Array(0),
+      Array.from(tokens.contact),
+    );
+
+    // The recipient resolves the contact into a completion and accepts it on
+    // its own connection to the cap's host; that host answers with the
+    // capability placement.
+    const completion = handoffCompletionFromContact(descriptor.contact!);
+    assertBytes(completion, Array.from(tokens.toAwait));
+    let questionId = -1;
+    const accepted = acceptProvision(aToC, completion, {
+      onQuestionId: (id) => (questionId = id),
+    });
+    const acceptFrame = aToC.popOutgoingFrame();
+    assert(acceptFrame !== null, "expected the Accept on the third connection");
+    assertEquals(decodeRpcMessageTag(acceptFrame), RPC_MESSAGE_TAG_ACCEPT);
+    aToC.pushFrame(encodeReturnResultsFrame({
+      answerId: questionId,
+      capTable: [{ tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED, id: 9 }],
+    }));
+    assertEquals((await accepted).capabilityIndex, 9);
+  }, 3);
 });

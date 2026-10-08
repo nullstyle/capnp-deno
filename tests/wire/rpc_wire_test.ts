@@ -1,4 +1,6 @@
 import {
+  CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
+  CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
   decodeBootstrapRequestFrame,
   decodeCallRequestFrame,
   decodeFinishFrame,
@@ -20,7 +22,12 @@ import {
   CALL_BOOTSTRAP_CAP_Q2_INBOUND,
   CALL_BOOTSTRAP_CAP_Q2_OUTBOUND,
 } from "../fixtures/rpc_frames.ts";
-import { assertBytes, assertEquals, assertThrows } from "../test_utils.ts";
+import {
+  assert,
+  assertBytes,
+  assertEquals,
+  assertThrows,
+} from "../test_utils.ts";
 
 const MASK_30 = 0x3fff_ffffn;
 
@@ -1640,4 +1647,53 @@ Deno.test("rpc wire decodes multi-segment content with far pointer in nested str
     assertEquals(decoded.capTable.length, 1);
     assertEquals(decoded.capTable[0].id, 8);
   }
+});
+
+Deno.test("rpc wire round-trips a thirdPartyHosted cap descriptor", () => {
+  const contact = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
+  const frame = encodeReturnResultsFrame({
+    answerId: 31,
+    capTable: [
+      { tag: CAP_DESCRIPTOR_TAG_SENDER_HOSTED, id: 4 },
+      {
+        tag: CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
+        id: 0,
+        vineId: 12,
+        contact,
+      },
+    ],
+  });
+  const decoded = decodeReturnFrame(frame);
+  assertEquals(decoded.kind, "results");
+  if (decoded.kind !== "results") return;
+  assertEquals(decoded.capTable.length, 2);
+  assertEquals(decoded.capTable[0].tag, CAP_DESCRIPTOR_TAG_SENDER_HOSTED);
+  assertEquals(decoded.capTable[0].id, 4);
+  assertEquals(decoded.capTable[1].tag, CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED);
+  assertEquals(decoded.capTable[1].vineId, 12);
+  assertBytes(
+    decoded.capTable[1].contact ?? new Uint8Array(0),
+    Array.from(contact),
+  );
+});
+
+Deno.test("rpc wire rejects thirdPartyHosted descriptors without contact bytes", () => {
+  let failure: Error | null = null;
+  try {
+    encodeReturnResultsFrame({
+      answerId: 1,
+      capTable: [{
+        tag: CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED,
+        id: 0,
+        vineId: 3,
+      }],
+    });
+  } catch (error) {
+    failure = error as Error;
+  }
+  assert(failure !== null, "expected encoding to fail");
+  assert(
+    failure.message.includes("requires contact bytes"),
+    `unexpected failure: ${failure.message}`,
+  );
 });

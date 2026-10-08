@@ -32,6 +32,7 @@ export {
   RPC_PROMISED_ANSWER_OP_TAG_NOOP,
   WORD_BYTES,
 } from "./types.ts";
+export { CAP_DESCRIPTOR_TAG_THIRD_PARTY_HOSTED } from "./types.ts";
 export type {
   ByteListRef,
   PointerLocation,
