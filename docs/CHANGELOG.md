@@ -8,6 +8,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The runtime artifact now advertises feature bit 10: the vendored capnp-zig
+  moved to tag `v0.22.0` (`9de73ba…`), whose WASM host ABI exposes the
+  experimental Level-3 three-party handoff origination exports
+  (`capnp_peer_send_provide`, `capnp_peer_send_accept`,
+  `capnp_peer_send_third_party_answer`,
+  `capnp_peer_register_pending_third_party_await`, `capnp_peer_pop_l3_event`).
+  The ABI stays version 1 with no removals — the reviewed feature gate widened
+  from bits 0–9 to bits 0–10 — and nothing in `@nullstyle/capnp` binds the L3
+  exports yet; the Deno-side experimental wrappers remain planned (see
+  [the L3 proposal](rpc_l3_wasm_abi_proposal.md)).
+
 - Cross-file references to nested types (`:Lib.Outer.Inner`) now generate
   working output: a request-wide pre-pass marks exactly the nested declarations
   that another schema file references as exported in the owning module (under

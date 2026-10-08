@@ -1,7 +1,7 @@
 # capnp-zig integration and ABI ownership
 
 Updated: 2026-10-07 UTC. The evaluated runtime source is
-`vendor/capnp-zig@3490a77e1296dfd5adce6b15f60d12a37abce4d9` (tag `v0.21.0`). The
+`vendor/capnp-zig@9de73ba9704b539a63a302dcf77b6f67f5ccd611` (tag `v0.22.0`). The
 [runtime pin](../tools/runtime-toolchain.json) is authoritative for the source,
 Zig and Binaryen versions, and build flags. The
 [artifact receipt](../generated/capnp_deno.provenance.json) records the exact
@@ -17,10 +17,12 @@ does not acquire or execute a schema compiler. See
 rebuild, and standalone compiler commands.
 
 The current runtime advertises ABI version **1**, supported range **1–1**, and
-feature words **1023 / 0**. It has 38 export entries and no imports. The host
-checks version compatibility before allocating scratch and checks optional
-exports and feature bits before using their contracts. Advancing the gitlink
-does not itself extend the WASM interface.
+feature words **2047 / 0** (bit 10 = experimental L3 handoff origination, added
+by capnp-zig v0.22.0). It has 43 export entries and no imports. The host checks
+version compatibility before allocating scratch and checks optional exports and
+feature bits before using their contracts. Advancing the gitlink does not itself
+extend the WASM interface: the TypeScript side binds nothing to the L3 exports
+until the experimental wrappers land.
 
 ## Ownership at the WASM boundary
 

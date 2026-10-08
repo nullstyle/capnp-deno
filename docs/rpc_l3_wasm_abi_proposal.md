@@ -1,13 +1,12 @@
 # Level-3 three-party handoff over the WASM host ABI — proposal
 
-Status: **the v1 surface is implemented upstream** in capnp-zig commit `50e5e6d`
-(feature bit `10`, `main` after `v0.21.0`; see capnp-zig's
-`docs/wasm_host_abi.md` and its changelog). The
+Status: **implemented and released** in capnp-zig `v0.22.0` (feature bit `10`;
+upstream commits `50e5e6d`/`1b894a1`, tag `9de73ba…`). The vendored runtime here
+is that tag and the rebuilt artifact advertises bit 10; the TypeScript side
+binds nothing to the L3 exports yet. The
 [Implementation deltas](#implementation-deltas) section records where the
-shipped design differs from the original proposal. Nothing is exposed through
-`@nullstyle/capnp` yet; the Deno-side wrappers below remain the plan for that
-phase. The runtime source baseline is the vendored capnp-zig `v0.21.0`
-(`3490a77e…`); symbols below are verified against that tag.
+shipped design differs from the original proposal, and the Deno-side wrappers
+below remain the plan for that phase.
 
 ## Why
 

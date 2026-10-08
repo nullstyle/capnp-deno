@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "toolchain": {
     "schemaVersion": 1,
-    "capnpZigCommit": "3490a77e1296dfd5adce6b15f60d12a37abce4d9",
+    "capnpZigCommit": "9de73ba9704b539a63a302dcf77b6f67f5ccd611",
     "zigVersion": "0.17.0",
     "buildStep": "wasm-host",
     "optimization": "ReleaseSmall",
@@ -15,15 +15,15 @@
   },
   "artifact": {
     "filename": "capnp_deno.wasm",
-    "sha256": "b1586996556c5f38c8d5dc64fe21c2e862d2586840c55e26b50142d36b1d29d5",
-    "bytes": 299143
+    "sha256": "e6c1dd6151cf78117f269a58666a2596845cc2e786e16a14fd032931408f2ceb",
+    "bytes": 308208
   },
   "abi": {
     "version": 1,
     "minimum": 1,
     "maximum": 1,
     "features": [
-      1023,
+      2047,
       0
     ]
   },
@@ -109,11 +109,19 @@
       "kind": "function"
     },
     {
+      "name": "capnp_peer_pop_l3_event",
+      "kind": "function"
+    },
+    {
       "name": "capnp_peer_pop_out_frame",
       "kind": "function"
     },
     {
       "name": "capnp_peer_push_frame",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_register_pending_third_party_await",
       "kind": "function"
     },
     {
@@ -129,11 +137,23 @@
       "kind": "function"
     },
     {
+      "name": "capnp_peer_send_accept",
+      "kind": "function"
+    },
+    {
       "name": "capnp_peer_send_finish",
       "kind": "function"
     },
     {
+      "name": "capnp_peer_send_provide",
+      "kind": "function"
+    },
+    {
       "name": "capnp_peer_send_release",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_send_third_party_answer",
       "kind": "function"
     },
     {
