@@ -23,7 +23,11 @@ export interface ErrorMetadata {
     | "capability_resolve"
     | "service_connect"
     | "service_serve"
-    | "transport";
+    | "transport"
+    | "l3_provide"
+    | "l3_return"
+    | "l3_wait"
+    | "l3_await";
   /** Symbolic error type name (e.g. "InvalidInlineCompositePointer", "UnknownQuestion"). */
   errorType?: string;
   /** Raw RPC frame size involved in the failure. */

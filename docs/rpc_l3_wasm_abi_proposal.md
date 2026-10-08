@@ -1,12 +1,17 @@
 # Level-3 three-party handoff over the WASM host ABI — proposal
 
-Status: **implemented and released** in capnp-zig `v0.22.0` (feature bit `10`;
-upstream commits `50e5e6d`/`1b894a1`, tag `9de73ba…`). The vendored runtime here
-is that tag and the rebuilt artifact advertises bit 10; the TypeScript side
-binds nothing to the L3 exports yet. The
+Status: **implemented end to end at the ABI boundary**. capnp-zig `v0.22.0`
+(feature bit `10`; upstream commits `50e5e6d`/`1b894a1`, tag `9de73ba…`) ships
+the wasm exports; the vendored runtime here is that tag; and
+`@nullstyle/capnp/advanced` now exposes the Experimental Deno wrappers
+(`mintHandoffTokens`, `provideCapability`, `acceptProvision`,
+`registerThirdPartyAwait`, `sendThirdPartyAnswer`) with the ABI bindings, the
+per-peer event channel drained in pump order, and real-wasm coverage. The
 [Implementation deltas](#implementation-deltas) section records where the
-shipped design differs from the original proposal, and the Deno-side wrappers
-below remain the plan for that phase.
+shipped design differs from the original proposal. The remaining increment to
+the full live three-party flow is `thirdPartyHosted` cap-descriptor support in
+the TypeScript wire codec (emit on the providing side, resolve on the recipient
+side); nothing here is a Stable API.
 
 ## Why
 

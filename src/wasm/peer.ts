@@ -11,6 +11,7 @@ import {
   getCapnpWasmExports,
   WasmAbi,
   type WasmAbiOptions,
+  type WasmL3Event,
 } from "./abi.ts";
 import { ProtocolError } from "../errors.ts";
 
@@ -39,6 +40,7 @@ export class WasmPeer {
   readonly handle: number;
   #closed = false;
   readonly #ownsAbi: boolean;
+  readonly #l3Listeners = new Set<(event: WasmL3Event) => void>();
 
   private constructor(abi: WasmAbi, handle: number, ownsAbi = false) {
     this.abi = abi;
@@ -123,7 +125,52 @@ export class WasmPeer {
   ): DrainOutFramesResult {
     this.assertOpen();
     this.abi.pushFrame(this.handle, frame);
+    // L3 origination Returns are delivered synchronously inside the wasm
+    // push; drain their events before the outbound frames so listeners see
+    // handoff completion in pump order. Modules without the feature drain
+    // nothing.
+    this.drainL3Events();
     return this.abi.drainOutFrames(this.handle, maxFrames);
+  }
+
+  /**
+   * Drains queued Level-3 handoff events (experimental) and dispatches them
+   * to the listeners registered through {@link WasmPeer.addL3EventListener},
+   * oldest first. Called automatically after each inbound frame; safe to call
+   * directly.
+   *
+   * @returns The number of events dispatched.
+   * @throws {ProtocolError} If the peer is closed.
+   * @throws {WasmAbiError} If the module rejects the drain.
+   */
+  drainL3Events(): number {
+    this.assertOpen();
+    if (!this.abi.capabilities.hasL3Handoff) return 0;
+    let dispatched = 0;
+    for (let event = this.abi.popL3Event(this.handle); event !== null;) {
+      for (const listener of this.#l3Listeners) {
+        listener(event);
+      }
+      dispatched += 1;
+      event = this.abi.popL3Event(this.handle);
+    }
+    return dispatched;
+  }
+
+  /**
+   * Registers a listener for Level-3 handoff events (experimental) drained
+   * from this peer. Listeners must not push frames or close the peer
+   * synchronously; queue work instead.
+   *
+   * @param listener - Called once per drained event.
+   * @returns An unsubscribe function.
+   */
+  addL3EventListener(listener: (event: WasmL3Event) => void): () => void {
+    this.assertOpen();
+    this.#l3Listeners.add(listener);
+    return () => {
+      this.#l3Listeners.delete(listener);
+    };
   }
 
   /**

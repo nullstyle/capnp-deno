@@ -6,6 +6,23 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (Experimental)
+
+- Level-3 three-party capability handoff wrappers over the runtime's L3 exports
+  (feature bit 10), behind `@nullstyle/capnp/advanced`: `mintHandoffTokens` (the
+  default host-side introducer), `provideCapability` (originate a handoff across
+  two peers of one module), `acceptProvision` (send an Accept and resolve the
+  accepted capability's import index from the L3 event channel when its Return
+  arrives), `registerThirdPartyAwait`, and `sendThirdPartyAnswer`. The `WasmAbi`
+  layer gains typed bindings and export discovery for the five wasm exports,
+  `WasmPeer.pushFrame` drains L3 events in pump order and dispatches them to
+  `addL3EventListener` listeners, and the error metadata union gains `l3_*`
+  phases. Real-wasm tests cover the Provide/Accept/ThirdPartyAnswer frames and
+  the accept resolve/reject event paths. The TypeScript wire codec does not yet
+  emit or parse `thirdPartyHosted` cap descriptors, so delivering the vine
+  descriptor to a recipient (and thereby the full live three-party flow) remains
+  the next increment; nothing here is a Stable API.
+
 ### Added
 
 - The runtime artifact now advertises feature bit 10: the vendored capnp-zig

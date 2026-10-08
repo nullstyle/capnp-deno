@@ -96,6 +96,41 @@ export interface CapnpWasmExports {
     cap_id: number,
     reference_count: number,
   ): number;
+  capnp_peer_send_provide?(
+    peer: number,
+    host_of_recipient_peer: number,
+    provided_import_id: number,
+    recipient_ptr: number,
+    recipient_len: number,
+    contact_ptr: number,
+    contact_len: number,
+    out_question_id_ptr: number,
+    out_vine_id_ptr: number,
+  ): number;
+  capnp_peer_send_accept?(
+    peer: number,
+    provision_ptr: number,
+    provision_len: number,
+    embargo_ptr: number,
+    embargo_len: number,
+    out_question_id_ptr: number,
+  ): number;
+  capnp_peer_send_third_party_answer?(
+    peer: number,
+    completion_ptr: number,
+    completion_len: number,
+    out_answer_id_ptr: number,
+  ): number;
+  capnp_peer_register_pending_third_party_await?(
+    peer: number,
+    completion_ptr: number,
+    completion_len: number,
+  ): number;
+  capnp_peer_pop_l3_event?(
+    peer: number,
+    out_ptr_ptr: number,
+    out_len_ptr: number,
+  ): number;
   capnp_peer_set_bootstrap_stub?(peer: number): number;
   capnp_peer_set_bootstrap_stub_with_id?(
     peer: number,
@@ -155,6 +190,7 @@ export interface WasmAbiCapabilities {
   hasLifecycleHelpers: boolean;
   hasBootstrapStubIdentity: boolean;
   hasSchemaManifest: boolean;
+  hasL3Handoff: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
   hasShutdown: boolean;
@@ -173,6 +209,63 @@ export interface WasmAbiCapabilities {
  * `releaseParamCaps = false` on relayed Return frames.
  */
 export const WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION = 1n << 9n;
+
+/**
+ * Feature-flag bit reported via `capnp_wasm_feature_flags_lo/hi` when the
+ * module exposes the experimental Level-3 three-party handoff origination
+ * exports (`capnp_peer_send_provide`, `capnp_peer_send_accept`,
+ * `capnp_peer_send_third_party_answer`,
+ * `capnp_peer_register_pending_third_party_await`,
+ * `capnp_peer_pop_l3_event`). Added additively by the capnp-zig v0.22.0
+ * runtime; ABI version stays 1.
+ */
+export const WASM_FEATURE_L3_HANDOFF = 1n << 10n;
+
+/**
+ * One decoded Level-3 handoff event drained through
+ * {@link WasmAbi.popL3Event}.
+ *
+ * Kinds: `1` = an Accept question's Return (payload is the complete inbound
+ * RPC message, cap-table descriptors included), `2` = an adopted pending
+ * third-party await's Return (same payload shape), `3` = an exception for a
+ * Return the peer synthesized locally (payload is the UTF-8 reason).
+ */
+export interface WasmL3Event {
+  kind: number;
+  questionId: number;
+  payload: Uint8Array;
+}
+
+/** Event record layout constant: kind, questionId, payloadLen header (u32 LE each). */
+const L3_EVENT_HEADER_BYTES = 12;
+
+/**
+ * Decode one owned L3 event record as produced by the module's
+ * `capnp_peer_pop_l3_event`.
+ *
+ * @param record - The raw record bytes.
+ * @returns The decoded event.
+ * @throws {WasmAbiError} If the record is truncated or shorter than its header.
+ */
+export function decodeL3EventRecord(record: Uint8Array): WasmL3Event {
+  if (record.byteLength < L3_EVENT_HEADER_BYTES) {
+    throw new WasmAbiError("truncated l3 event record");
+  }
+  const view = new DataView(
+    record.buffer,
+    record.byteOffset,
+    record.byteLength,
+  );
+  const payloadLen = view.getUint32(8, true);
+  if (record.byteLength !== L3_EVENT_HEADER_BYTES + payloadLen) {
+    throw new WasmAbiError("l3 event record length mismatch");
+  }
+  return {
+    kind: view.getUint32(0, true),
+    questionId: view.getUint32(4, true),
+    payload: record.subarray(L3_EVENT_HEADER_BYTES),
+  };
+}
 
 /**
  * Represents a single host call extracted from the WASM peer's outbound queue.
@@ -360,6 +453,13 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
     hasBootstrapStubIdentity:
       typeof exports.capnp_peer_set_bootstrap_stub_with_id === "function",
     hasSchemaManifest: typeof exports.capnp_schema_manifest_json === "function",
+    hasL3Handoff: (featureFlags & WASM_FEATURE_L3_HANDOFF) !== 0n &&
+      typeof exports.capnp_peer_send_provide === "function" &&
+      typeof exports.capnp_peer_send_accept === "function" &&
+      typeof exports.capnp_peer_send_third_party_answer === "function" &&
+      typeof exports.capnp_peer_register_pending_third_party_await ===
+        "function" &&
+      typeof exports.capnp_peer_pop_l3_event === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
     hasShutdown: typeof exports.capnp_shutdown === "function",
@@ -474,6 +574,36 @@ export function getCapnpWasmExports(
     exports.capnp_peer_send_release = expectFunction(
       raw.capnp_peer_send_release,
       "capnp_peer_send_release",
+    );
+  }
+  if (raw.capnp_peer_send_provide !== undefined) {
+    exports.capnp_peer_send_provide = expectFunction(
+      raw.capnp_peer_send_provide,
+      "capnp_peer_send_provide",
+    );
+  }
+  if (raw.capnp_peer_send_accept !== undefined) {
+    exports.capnp_peer_send_accept = expectFunction(
+      raw.capnp_peer_send_accept,
+      "capnp_peer_send_accept",
+    );
+  }
+  if (raw.capnp_peer_send_third_party_answer !== undefined) {
+    exports.capnp_peer_send_third_party_answer = expectFunction(
+      raw.capnp_peer_send_third_party_answer,
+      "capnp_peer_send_third_party_answer",
+    );
+  }
+  if (raw.capnp_peer_register_pending_third_party_await !== undefined) {
+    exports.capnp_peer_register_pending_third_party_await = expectFunction(
+      raw.capnp_peer_register_pending_third_party_await,
+      "capnp_peer_register_pending_third_party_await",
+    );
+  }
+  if (raw.capnp_peer_pop_l3_event !== undefined) {
+    exports.capnp_peer_pop_l3_event = expectFunction(
+      raw.capnp_peer_pop_l3_event,
+      "capnp_peer_pop_l3_event",
     );
   }
   if (raw.capnp_peer_set_bootstrap_stub !== undefined) {
@@ -994,6 +1124,250 @@ export class WasmAbi {
     const ok = fn(peer, capId, referenceCount);
     if (ok !== 1) {
       this.throwLastError("capnp_peer_send_release failed");
+    }
+  }
+
+  /**
+   * Originates a three-party handoff (experimental, feature bit 10): hand the
+   * capability at import `providedImportId` of `peer` — the connection to the
+   * host of the provided cap — to a third party reachable through
+   * `hostOfRecipientPeer`.
+   *
+   * @param peer - Peer whose connection reaches the host of the provided cap.
+   * @param hostOfRecipientPeer - Peer whose connection reaches the recipient.
+   * @param providedImportId - Import index of the capability on `peer`.
+   * @param recipient - Serialized root any-pointer message (ThirdPartyToAwait).
+   * @param contact - Opaque ThirdPartyToContact bytes.
+   * @returns The held-open Provide question id and the vine export id.
+   * @throws {WasmAbiError} If the L3 exports are missing or the operation fails.
+   */
+  sendProvide(
+    peer: number,
+    hostOfRecipientPeer: number,
+    providedImportId: number,
+    recipient: Uint8Array,
+    contact: Uint8Array,
+  ): { questionId: number; vineId: number } {
+    const fn = this.exports.capnp_peer_send_provide;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_send_provide");
+    }
+    this.assertL3Handoff();
+    this.assertU32(providedImportId, "providedImportId");
+
+    const recipientPtr = this.alloc(recipient.byteLength);
+    const contactPtr = this.alloc(contact.byteLength);
+    const outPtr = this.alloc(8);
+    try {
+      if (recipient.byteLength > 0) {
+        this.bytes().set(recipient, recipientPtr);
+      }
+      if (contact.byteLength > 0) {
+        this.bytes().set(contact, contactPtr);
+      }
+      this.writeU32(outPtr, 0);
+      this.writeU32(outPtr + 4, 0);
+      this.clearError();
+      const ok = fn(
+        peer,
+        hostOfRecipientPeer,
+        providedImportId,
+        recipientPtr,
+        recipient.byteLength,
+        contactPtr,
+        contact.byteLength,
+        outPtr,
+        outPtr + 4,
+      );
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_send_provide failed");
+      }
+      return {
+        questionId: this.readU32(outPtr),
+        vineId: this.readU32(outPtr + 4),
+      };
+    } finally {
+      this.free(recipientPtr, recipient.byteLength);
+      this.free(contactPtr, contact.byteLength);
+      this.free(outPtr, 8);
+    }
+  }
+
+  /**
+   * Picks up a capability a third party provided (experimental, feature
+   * bit 10): sends an Accept on `peer`. The Return arrives as an L3 event
+   * drained through {@link WasmAbi.popL3Event}.
+   *
+   * @param peer - Peer whose connection reaches the host of the provided cap.
+   * @param provision - Serialized root any-pointer (ThirdPartyCompletion).
+   * @param embargo - Optional embargo bytes forwarded verbatim.
+   * @returns The Accept question id.
+   * @throws {WasmAbiError} If the L3 exports are missing or the operation fails.
+   */
+  sendAccept(
+    peer: number,
+    provision: Uint8Array,
+    embargo?: Uint8Array,
+  ): number {
+    const fn = this.exports.capnp_peer_send_accept;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_send_accept");
+    }
+    this.assertL3Handoff();
+    const embargoBytes = embargo ?? new Uint8Array(0);
+    const provisionPtr = this.alloc(provision.byteLength);
+    const embargoPtr = this.alloc(embargoBytes.byteLength);
+    const outPtr = this.alloc(4);
+    try {
+      if (provision.byteLength > 0) {
+        this.bytes().set(provision, provisionPtr);
+      }
+      if (embargoBytes.byteLength > 0) {
+        this.bytes().set(embargoBytes, embargoPtr);
+      }
+      this.writeU32(outPtr, 0);
+      this.clearError();
+      const ok = fn(
+        peer,
+        provisionPtr,
+        provision.byteLength,
+        embargoPtr,
+        embargoBytes.byteLength,
+        outPtr,
+      );
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_send_accept failed");
+      }
+      return this.readU32(outPtr);
+    } finally {
+      this.free(provisionPtr, provision.byteLength);
+      this.free(embargoPtr, embargoBytes.byteLength);
+      this.free(outPtr, 4);
+    }
+  }
+
+  /**
+   * Callee side of a redirected return (experimental, feature bit 10): sends
+   * a ThirdPartyAnswer carrying the completion token on `peer`.
+   *
+   * @param peer - Peer whose connection reaches the results recipient.
+   * @param completion - Serialized root any-pointer (ThirdPartyCompletion).
+   * @returns The callee-allocated answer id (bit 30 set, bit 31 clear).
+   * @throws {WasmAbiError} If the L3 exports are missing or the operation fails.
+   */
+  sendThirdPartyAnswer(peer: number, completion: Uint8Array): number {
+    const fn = this.exports.capnp_peer_send_third_party_answer;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_send_third_party_answer",
+      );
+    }
+    this.assertL3Handoff();
+    const completionPtr = this.alloc(completion.byteLength);
+    const outPtr = this.alloc(4);
+    try {
+      if (completion.byteLength > 0) {
+        this.bytes().set(completion, completionPtr);
+      }
+      this.writeU32(outPtr, 0);
+      this.clearError();
+      const ok = fn(peer, completionPtr, completion.byteLength, outPtr);
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_send_third_party_answer failed");
+      }
+      return this.readU32(outPtr);
+    } finally {
+      this.free(completionPtr, completion.byteLength);
+      this.free(outPtr, 4);
+    }
+  }
+
+  /**
+   * Parks a question that awaits a ThirdPartyAnswer whose completion
+   * serializes byte-identically to `completion` (experimental, feature
+   * bit 10). Its Return arrives as an L3 event.
+   *
+   * @param peer - The awaiting peer.
+   * @param completion - Serialized root any-pointer (ThirdPartyCompletion).
+   * @throws {WasmAbiError} If the L3 exports are missing or the operation fails.
+   */
+  registerPendingThirdPartyAwait(peer: number, completion: Uint8Array): void {
+    const fn = this.exports.capnp_peer_register_pending_third_party_await;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_register_pending_third_party_await",
+      );
+    }
+    this.assertL3Handoff();
+    const completionPtr = this.alloc(completion.byteLength);
+    try {
+      if (completion.byteLength > 0) {
+        this.bytes().set(completion, completionPtr);
+      }
+      this.clearError();
+      const ok = fn(peer, completionPtr, completion.byteLength);
+      if (ok !== 1) {
+        this.throwLastError(
+          "capnp_peer_register_pending_third_party_await failed",
+        );
+      }
+    } finally {
+      this.free(completionPtr, completion.byteLength);
+    }
+  }
+
+  /**
+   * Pops the oldest queued L3 event (experimental, feature bit 10). The
+   * returned record is copied out and the module's allocation is freed, so
+   * the caller owns the bytes without further ABI calls.
+   *
+   * @param peer - The peer to drain.
+   * @returns The decoded event, or null when no event is queued.
+   * @throws {WasmAbiError} If the L3 exports are missing or the operation fails.
+   */
+  popL3Event(peer: number): WasmL3Event | null {
+    const fn = this.exports.capnp_peer_pop_l3_event;
+    if (!fn) {
+      throw new WasmAbiError("missing wasm export: capnp_peer_pop_l3_event");
+    }
+    this.assertL3Handoff();
+    const pairSize = 8;
+    const pairPtr = this.alloc(pairSize);
+    try {
+      this.writeU32(pairPtr, 0);
+      this.writeU32(pairPtr + 4, 0);
+      this.clearError();
+      const hasEvent = fn(peer, pairPtr, pairPtr + 4);
+      if (hasEvent === 0) {
+        const maybeErr = this.takeLastError();
+        if (maybeErr) throw maybeErr;
+        return null;
+      }
+      if (hasEvent !== 1) {
+        throw new WasmAbiError(
+          `unexpected capnp_peer_pop_l3_event result: ${hasEvent}`,
+        );
+      }
+      const ptr = this.readU32(pairPtr);
+      const len = this.readU32(pairPtr + 4);
+      if (ptr === 0 || len === 0) return null;
+      try {
+        const copy = new Uint8Array(this.bytes().subarray(ptr, ptr + len));
+        return decodeL3EventRecord(copy);
+      } finally {
+        this.freeOutBuffer(ptr, len);
+      }
+    } finally {
+      this.free(pairPtr, pairSize);
+    }
+  }
+
+  /** Throws unless the module advertises the L3 handoff feature set. */
+  private assertL3Handoff(): void {
+    if (!this.capabilities.hasL3Handoff) {
+      throw new WasmAbiError(
+        "wasm module does not advertise the L3 handoff feature (bit 10)",
+      );
     }
   }
 
