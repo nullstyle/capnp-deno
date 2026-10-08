@@ -8,6 +8,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- Vendored capnp-zig advanced to tag `v0.23.0` (`aca9824…`), picking up the RPC
+  correctness release: loopback calls now route the peer's own capabilities
+  (fixing wrong-object routing and a wire-reference leak that could free a live
+  capability), loopback Returns no longer escape to the remote on delivery
+  failure, every question gets exactly one terminal under memory pressure/after
+  cancel/for forwarded calls, and pipelined param-capability resolution is
+  verified against the C++, Go, Rust and Python references. The wasm surface is
+  unchanged (feature bits 0–11, 47 exports; `rpc.capnp` untouched, so generated
+  TypeScript is unchanged); the rebuilt artifact is `46cd8fe1…` (317677 bytes).
+  The native interop harness's Zig plugin and runtime both build from the
+  vendored tree, so codegen ABI 2 moves self-consistently.
+
 - Level-3 three-party capability handoff wrappers over the runtime's L3 exports
   (feature bit 10), behind `@nullstyle/capnp/advanced`: `mintHandoffTokens` (the
   default host-side introducer), `provideCapability` (originate a handoff across
@@ -31,8 +43,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   byte-identical completion, and accepted on a third connection, resolving the
   capability placement from the Return event.
 - **The VatC gap is closed: feature bit 11 (L3 vat hosting).** The vendored
-  capnp-zig moves to `72d6d7f…` (main after v0.22.0), which exposes the vat-wide
-  `ProvisionIndex` over the wasm ABI (`capnp_provision_index_new/free`,
+  capnp-zig exposes the vat-wide `ProvisionIndex` over the wasm ABI
+  (`capnp_provision_index_new/free`,
   `capnp_peer_attach_provision_index/detach`). A vat represented by several
   module-local peers attaches them to one index; an inbound Provide then
   registers its provision and an inbound Accept on a sibling connection is

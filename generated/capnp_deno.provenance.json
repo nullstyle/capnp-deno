@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "toolchain": {
     "schemaVersion": 1,
-    "capnpZigCommit": "72d6d7f539f333a035eac4259b6689e5a368fd53",
+    "capnpZigCommit": "aca9824a30c2f362b9257cb9a38ad0816ce29743",
     "zigVersion": "0.17.0",
     "buildStep": "wasm-host",
     "optimization": "ReleaseSmall",
@@ -15,8 +15,8 @@
   },
   "artifact": {
     "filename": "capnp_deno.wasm",
-    "sha256": "892731bba04550bacdb57f06c8b8f3e3d92ad7a11a61a1bff7c292d864d52011",
-    "bytes": 310528
+    "sha256": "46cd8fe1cde2d5101afa4890bdbc829fe00e969a1688b90be8ab2d58458deded",
+    "bytes": 317677
   },
   "abi": {
     "version": 1,
