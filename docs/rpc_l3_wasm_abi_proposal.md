@@ -12,13 +12,17 @@ relay: originate the Provide, deliver the vine as a `thirdPartyHosted`
 descriptor, decode it on the recipient side, resolve the byte-identical
 completion, and accept on the third connection. The
 [Implementation deltas](#implementation-deltas) section records where the
-shipped design differs from the original proposal. The remaining gap to a fully
-autonomous flow is VatC-side: one wasm peer's inbound Provide registers its
-provision per-connection, so an Accept arriving on a _different_ connection of
-the same vat needs the vat-level provision registry — either a cross-peer
-registry inside the module (upstream) or host mediation of VatC; the live test
-answers the Accept's Return from the host in the meantime. Nothing here is a
-Stable API.
+shipped design differs from the original proposal. **The VatC gap is closed**:
+capnp-zig main after v0.22.0 (`72d6d7f…`) exposes the vat-wide `ProvisionIndex`
+over the wasm ABI (feature bit 11 — `capnp_provision_index_new/free`,
+`capnp_peer_attach_provision_index`/`detach`). A vat represented by several
+module-local peers attaches to one index; an inbound Provide registers its
+provision and an inbound Accept on a sibling connection is served by the runtime
+itself. The autonomous test drives the whole loop — Provide registered into the
+shared index, Accept crossing connections, VatC's own capability-bearing answer
+resolving the recipient's wait — with no host-forged Returns. Nothing here is a
+Stable API; the next frontier is the native Zig/C++ three-vat interop matrix and
+wiring the wrappers under real session stacks.
 
 ## Why
 

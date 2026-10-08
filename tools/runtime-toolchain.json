@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capnpZigCommit": "9de73ba9704b539a63a302dcf77b6f67f5ccd611",
+  "capnpZigCommit": "72d6d7f539f333a035eac4259b6689e5a368fd53",
   "zigVersion": "0.17.0",
   "buildStep": "wasm-host",
   "optimization": "ReleaseSmall",

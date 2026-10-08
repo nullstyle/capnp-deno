@@ -232,3 +232,78 @@ Deno.test("l3 live flow: vine delivered as thirdPartyHosted, recipient resolves 
     assertEquals((await accepted).capabilityIndex, 9);
   }, 3);
 });
+
+Deno.test("l3 live flow: a shared provision index lets VatC answer the Accept itself", async () => {
+  // The full autonomous three-party topology: VatC is two module-local peers
+  // (cToB receives the Provide, cToA receives the Accept) attached to one
+  // provision index, so the Accept crossing connections is served by the
+  // runtime — no host-forged Returns anywhere in the flow.
+  await withModule(async ([bToC, bToA, cToB, cToA, aToC]) => {
+    assert(
+      bToC.abi.capabilities.hasL3VatHosting,
+      "expected the checked-in runtime to advertise vat hosting (bit 11)",
+    );
+
+    // VatC hosts the capability: a bootstrap stub publishes an export on the
+    // C<->B connection, which VatB's import 0 names as the provided target.
+    const stubExportId = cToB.abi.setBootstrapStubWithId(cToB.handle);
+    assert(stubExportId >= 0);
+
+    const index = bToC.abi.createProvisionIndex();
+    try {
+      bToC.abi.attachProvisionIndex(cToB.handle, index);
+      bToC.abi.attachProvisionIndex(cToA.handle, index);
+
+      const tokens = mintHandoffTokens();
+      provideCapability(bToC, bToA, 0, {
+        recipient: tokens.toAwait,
+        contact: tokens.contact,
+      });
+
+      // The Provide lands on VatC's C<->B peer and registers into the index.
+      const provideFrame = bToC.popOutgoingFrame();
+      assert(provideFrame !== null);
+      cToB.pushFrame(provideFrame);
+
+      // VatA accepts on its own C<->A connection.
+      let questionId = -1;
+      const accepted = acceptProvision(aToC, tokens.toAwait, {
+        onQuestionId: (id) => (questionId = id),
+      });
+      const acceptFrame = aToC.popOutgoingFrame();
+      assert(acceptFrame !== null);
+      assertEquals(decodeRpcMessageTag(acceptFrame), RPC_MESSAGE_TAG_ACCEPT);
+
+      // The Accept lands on VatC's C<->A peer; the shared index matches the
+      // sibling connection's provision and VatC answers by itself. (pushFrame
+      // drains the peer's outbound frames alongside the L3 events.)
+      const answered = cToA.pushFrame(acceptFrame).frames;
+      assertEquals(
+        answered.length,
+        1,
+        "expected VatC's own answer to the Accept",
+      );
+      const answer = answered[0];
+      const decodedAnswer = decodeReturnFrame(answer);
+      assert(decodedAnswer.kind === "results");
+      assert(
+        decodedAnswer.answerId === questionId,
+        "expected the answer addressed to the Accept question",
+      );
+      assert(decodedAnswer.capTable.length >= 1);
+
+      // The answer returns to VatA and resolves the capability placement.
+      aToC.pushFrame(answer);
+      const result = await accepted;
+      assert(
+        result.capabilityIndex >= 0,
+        "expected the accepted capability import index",
+      );
+    } finally {
+      // Index-first teardown (the documented supported order when live
+      // provisions remain): freeing the index severs both peers' borrowed
+      // back-pointers and neutralizes the still-open provision.
+      bToC.abi.freeProvisionIndex(index);
+    }
+  }, 5);
+});

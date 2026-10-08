@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "toolchain": {
     "schemaVersion": 1,
-    "capnpZigCommit": "9de73ba9704b539a63a302dcf77b6f67f5ccd611",
+    "capnpZigCommit": "72d6d7f539f333a035eac4259b6689e5a368fd53",
     "zigVersion": "0.17.0",
     "buildStep": "wasm-host",
     "optimization": "ReleaseSmall",
@@ -15,15 +15,15 @@
   },
   "artifact": {
     "filename": "capnp_deno.wasm",
-    "sha256": "e6c1dd6151cf78117f269a58666a2596845cc2e786e16a14fd032931408f2ceb",
-    "bytes": 308208
+    "sha256": "892731bba04550bacdb57f06c8b8f3e3d92ad7a11a61a1bff7c292d864d52011",
+    "bytes": 310528
   },
   "abi": {
     "version": 1,
     "minimum": 1,
     "maximum": 1,
     "features": [
-      2047,
+      4095,
       0
     ]
   },
@@ -70,6 +70,14 @@
     },
     {
       "name": "capnp_last_error_ptr",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_attach_provision_index",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_peer_detach_provision_index",
       "kind": "function"
     },
     {
@@ -166,6 +174,14 @@
     },
     {
       "name": "capnp_peer_set_limits",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_provision_index_free",
+      "kind": "function"
+    },
+    {
+      "name": "capnp_provision_index_new",
       "kind": "function"
     },
     {

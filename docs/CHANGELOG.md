@@ -29,10 +29,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   vine is delivered through the actual host-call bridge relay as a
   `thirdPartyHosted` descriptor, decoded on the recipient side, resolved to a
   byte-identical completion, and accepted on a third connection, resolving the
-  capability placement from the Return event. Nothing here is a Stable API; the
-  remaining gap to a fully autonomous three-party session flow is VatC-side
-  cross-connection Accept matching, which needs the vat-level provision registry
-  semantics documented in the L3 proposal.
+  capability placement from the Return event.
+- **The VatC gap is closed: feature bit 11 (L3 vat hosting).** The vendored
+  capnp-zig moves to `72d6d7f…` (main after v0.22.0), which exposes the vat-wide
+  `ProvisionIndex` over the wasm ABI (`capnp_provision_index_new/free`,
+  `capnp_peer_attach_provision_index/detach`). A vat represented by several
+  module-local peers attaches them to one index; an inbound Provide then
+  registers its provision and an inbound Accept on a sibling connection is
+  served by the runtime itself — no host-forged Returns. The rebuilt artifact
+  advertises feature bits 0–11 (4095; 47 exports), the reviewed ABI gates
+  widened accordingly, and `WasmAbi` gains
+  `createProvisionIndex`/`freeProvisionIndex`/`attachProvisionIndex`/
+  `detachProvisionIndex` plus `setBootstrapStubWithId`. The autonomous
+  three-party test proves the full loop: originate the Provide, register it into
+  a shared index on VatC's first peer, accept on VatC's second peer, and resolve
+  the capability placement from VatC's own answer. Nothing here is a Stable API.
 
 ### Added
 

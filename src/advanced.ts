@@ -8,6 +8,7 @@ export {
   getCapnpWasmExports,
   WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION,
   WASM_FEATURE_L3_HANDOFF,
+  WASM_FEATURE_L3_VAT_HOSTING,
   WasmAbi,
   type WasmAbiCapabilities,
   WasmAbiError,

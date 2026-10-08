@@ -1,9 +1,9 @@
 # capnp-zig integration and ABI ownership
 
 Updated: 2026-10-07 UTC. The evaluated runtime source is
-`vendor/capnp-zig@9de73ba9704b539a63a302dcf77b6f67f5ccd611` (tag `v0.22.0`). The
-[runtime pin](../tools/runtime-toolchain.json) is authoritative for the source,
-Zig and Binaryen versions, and build flags. The
+`vendor/capnp-zig@72d6d7f539f333a035eac4259b6689e5a368fd53` (main after
+`v0.22.0`). The [runtime pin](../tools/runtime-toolchain.json) is authoritative
+for the source, Zig and Binaryen versions, and build flags. The
 [artifact receipt](../generated/capnp_deno.provenance.json) records the exact
 WASM bytes, ABI, exports, and features; verify it with `deno task check:wasm`.
 
@@ -17,12 +17,13 @@ does not acquire or execute a schema compiler. See
 rebuild, and standalone compiler commands.
 
 The current runtime advertises ABI version **1**, supported range **1–1**, and
-feature words **2047 / 0** (bit 10 = experimental L3 handoff origination, added
-by capnp-zig v0.22.0). It has 43 export entries and no imports. The host checks
-version compatibility before allocating scratch and checks optional exports and
-feature bits before using their contracts. Advancing the gitlink does not itself
-extend the WASM interface: the TypeScript side binds nothing to the L3 exports
-until the experimental wrappers land.
+feature words **4095 / 0** (bit 10 = experimental L3 handoff origination, bit 11
+= experimental L3 vat hosting, both on main after v0.22.0). It has 47 export
+entries and no imports. The host checks version compatibility before allocating
+scratch and checks optional exports and feature bits before using their
+contracts. Advancing the gitlink does not itself extend the WASM interface: the
+TypeScript side binds nothing to the L3 exports until the experimental wrappers
+land.
 
 ## Ownership at the WASM boundary
 

@@ -131,6 +131,10 @@ export interface CapnpWasmExports {
     out_ptr_ptr: number,
     out_len_ptr: number,
   ): number;
+  capnp_provision_index_new?(): number;
+  capnp_provision_index_free?(index: number): void;
+  capnp_peer_attach_provision_index?(peer: number, index: number): number;
+  capnp_peer_detach_provision_index?(peer: number): number;
   capnp_peer_set_bootstrap_stub?(peer: number): number;
   capnp_peer_set_bootstrap_stub_with_id?(
     peer: number,
@@ -191,6 +195,7 @@ export interface WasmAbiCapabilities {
   hasBootstrapStubIdentity: boolean;
   hasSchemaManifest: boolean;
   hasL3Handoff: boolean;
+  hasL3VatHosting: boolean;
   hasBufFree: boolean;
   hasErrorTake: boolean;
   hasShutdown: boolean;
@@ -220,6 +225,15 @@ export const WASM_FEATURE_HOST_CALL_PARAM_CAP_RETENTION = 1n << 9n;
  * runtime; ABI version stays 1.
  */
 export const WASM_FEATURE_L3_HANDOFF = 1n << 10n;
+
+/**
+ * Feature-flag bit reported via `capnp_wasm_feature_flags_lo/hi` when the
+ * module exposes the experimental Level-3 vat hosting exports: a vat-wide
+ * `ProvisionIndex` that peers attach to, so an Accept arriving on one
+ * connection is served for a Provide received on a sibling connection (the
+ * VatC role). Added additively after capnp-zig v0.22.0; ABI version stays 1.
+ */
+export const WASM_FEATURE_L3_VAT_HOSTING = 1n << 11n;
 
 /**
  * One decoded Level-3 handoff event drained through
@@ -460,6 +474,11 @@ function detectCapabilities(exports: CapnpWasmExports): WasmAbiCapabilities {
       typeof exports.capnp_peer_register_pending_third_party_await ===
         "function" &&
       typeof exports.capnp_peer_pop_l3_event === "function",
+    hasL3VatHosting: (featureFlags & WASM_FEATURE_L3_VAT_HOSTING) !== 0n &&
+      typeof exports.capnp_provision_index_new === "function" &&
+      typeof exports.capnp_provision_index_free === "function" &&
+      typeof exports.capnp_peer_attach_provision_index === "function" &&
+      typeof exports.capnp_peer_detach_provision_index === "function",
     hasBufFree: typeof exports.capnp_buf_free === "function",
     hasErrorTake: typeof exports.capnp_error_take === "function",
     hasShutdown: typeof exports.capnp_shutdown === "function",
@@ -604,6 +623,30 @@ export function getCapnpWasmExports(
     exports.capnp_peer_pop_l3_event = expectFunction(
       raw.capnp_peer_pop_l3_event,
       "capnp_peer_pop_l3_event",
+    );
+  }
+  if (raw.capnp_provision_index_new !== undefined) {
+    exports.capnp_provision_index_new = expectFunction(
+      raw.capnp_provision_index_new,
+      "capnp_provision_index_new",
+    );
+  }
+  if (raw.capnp_provision_index_free !== undefined) {
+    exports.capnp_provision_index_free = expectFunction(
+      raw.capnp_provision_index_free,
+      "capnp_provision_index_free",
+    );
+  }
+  if (raw.capnp_peer_attach_provision_index !== undefined) {
+    exports.capnp_peer_attach_provision_index = expectFunction(
+      raw.capnp_peer_attach_provision_index,
+      "capnp_peer_attach_provision_index",
+    );
+  }
+  if (raw.capnp_peer_detach_provision_index !== undefined) {
+    exports.capnp_peer_detach_provision_index = expectFunction(
+      raw.capnp_peer_detach_provision_index,
+      "capnp_peer_detach_provision_index",
     );
   }
   if (raw.capnp_peer_set_bootstrap_stub !== undefined) {
@@ -1368,6 +1411,136 @@ export class WasmAbi {
       throw new WasmAbiError(
         "wasm module does not advertise the L3 handoff feature (bit 10)",
       );
+    }
+  }
+
+  /**
+   * Publishes a bootstrap-stub export on the peer and returns its export id
+   * (the optional test hook behind `capnp_peer_set_bootstrap_stub_with_id`).
+   *
+   * @param peer - The peer handle.
+   * @returns The minted export id.
+   * @throws {WasmAbiError} If the export is missing or the operation fails.
+   */
+  setBootstrapStubWithId(peer: number): number {
+    const fn = this.exports.capnp_peer_set_bootstrap_stub_with_id;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_set_bootstrap_stub_with_id",
+      );
+    }
+    const outPtr = this.alloc(4);
+    try {
+      this.writeU32(outPtr, 0);
+      this.clearError();
+      const ok = fn(peer, outPtr);
+      if (ok !== 1) {
+        this.throwLastError("capnp_peer_set_bootstrap_stub_with_id failed");
+      }
+      return this.readU32(outPtr);
+    } finally {
+      this.free(outPtr, 4);
+    }
+  }
+
+  /** Throws unless the module advertises the L3 vat hosting feature set. */
+  private assertL3VatHosting(): void {
+    if (!this.capabilities.hasL3VatHosting) {
+      throw new WasmAbiError(
+        "wasm module does not advertise the L3 vat hosting feature (bit 11)",
+      );
+    }
+  }
+
+  /**
+   * Creates a vat-wide provision index (experimental, feature bit 11): peers
+   * of one vat attach to it so an Accept arriving on one connection is
+   * served for a Provide received on a sibling connection. Indices are
+   * bounded (8 per module); free with {@link WasmAbi.freeProvisionIndex}.
+   *
+   * @returns The index handle.
+   * @throws {WasmAbiError} If the vat hosting exports are missing, the index limit is reached, or creation fails.
+   */
+  createProvisionIndex(): number {
+    const fn = this.exports.capnp_provision_index_new;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_provision_index_new",
+      );
+    }
+    this.assertL3VatHosting();
+    this.clearError();
+    const handle = fn();
+    if (handle === 0) {
+      this.throwLastError("capnp_provision_index_new failed");
+    }
+    return handle;
+  }
+
+  /**
+   * Frees a vat-wide provision index created by
+   * {@link WasmAbi.createProvisionIndex}. Attached peers are severed; both
+   * free orders (peers first or index first) are supported. Unknown handles
+   * are ignored.
+   *
+   * @param index - The index handle.
+   */
+  freeProvisionIndex(index: number): void {
+    const fn = this.exports.capnp_provision_index_free;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_provision_index_free",
+      );
+    }
+    this.assertL3VatHosting();
+    this.clearError();
+    fn(index);
+  }
+
+  /**
+   * Attaches a peer to a vat-wide provision index (experimental, feature
+   * bit 11). With an index attached, an inbound Provide registers its
+   * provision and an inbound Accept routes through the shared index,
+   * answering cross-connection handoffs automatically.
+   *
+   * @param peer - The peer handle.
+   * @param index - The index handle.
+   * @throws {WasmAbiError} If either handle is unknown, the peer is already attached, or the peer carries pre-existing handoff state.
+   */
+  attachProvisionIndex(peer: number, index: number): void {
+    const fn = this.exports.capnp_peer_attach_provision_index;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_attach_provision_index",
+      );
+    }
+    this.assertL3VatHosting();
+    this.clearError();
+    const ok = fn(peer, index);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_attach_provision_index failed");
+    }
+  }
+
+  /**
+   * Detaches a peer from its provision index (experimental, feature bit 11).
+   * Fails while live provisions or queued cross-peer accepts remain.
+   *
+   * @param peer - The peer handle.
+   * @throws {WasmAbiError} If the peer is unknown or handoff state remains.
+   */
+  detachProvisionIndex(peer: number): void {
+    const fn = this.exports.capnp_peer_detach_provision_index;
+    if (!fn) {
+      throw new WasmAbiError(
+        "missing wasm export: capnp_peer_detach_provision_index",
+      );
+    }
+    this.assertL3VatHosting();
+    this.clearError();
+    const ok = fn(peer);
+    if (ok !== 1) {
+      this.throwLastError("capnp_peer_detach_provision_index failed");
     }
   }
 
