@@ -31,6 +31,7 @@ import {
   type RpcServerDispatch,
   type RpcServerWasmHost,
 } from "../server/bridge.ts";
+import { WASM_EVENT_KIND_ANSWER_FINISHED } from "../../wasm/abi.ts";
 import {
   CAP_DESCRIPTOR_TAG_SENDER_HOSTED,
   decodeReturnFrame,
@@ -1730,6 +1731,24 @@ export class SessionRpcClientTransport {
       abi: {
         supportsHostCallReturnFrame:
           peer.abi.capabilities.hasHostCallReturnFrame,
+        ...(peer.abi.capabilities.hasAnswerCancellation
+          ? {
+            addAnswerFinishedListener: (listener) =>
+              peer.addL3EventListener((event) => {
+                if (event.kind === WASM_EVENT_KIND_ANSWER_FINISHED) {
+                  listener(
+                    new DataView(
+                      event.payload.buffer,
+                      event.payload.byteOffset,
+                      event.payload.byteLength,
+                    ).getUint32(0, true),
+                  );
+                }
+              }),
+            sendReturnCanceled: (handle, answerId) =>
+              peer.abi.sendReturnCanceled(handle, answerId),
+          }
+          : {}),
         popHostCall: (handle) => peer.abi.popHostCall(handle),
         respondHostCallReturnFrame: (handle, frame) =>
           peer.abi.respondHostCallReturnFrame(handle, frame),

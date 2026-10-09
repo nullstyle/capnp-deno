@@ -8,6 +8,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- **`RpcServerBridge` now acts on caller-side cancels.** When the wasm runtime
+  advertises answer cancellation (feature bit 12), the bridge subscribes to
+  answer-finished events on its first host-call pump: a caller Finish for an
+  unanswered host-handed call marks the dispatch finished, fires the handler's
+  `RpcCallContext.signal` abort (so handlers stop work), and answers the peer
+  with `Return{canceled}`, freeing the caller's question id; the late handler
+  response is then discarded. The `SessionRpcClientTransport` local pump wires
+  the peer's kind-4 events into the bridge automatically; hosts without bit 12
+  keep today's behavior. An end-to-end real-wasm test covers the full loop: call
+  → handler blocks → client Finish → handler abort observed → canceled Return on
+  the wire.
+
 - The autonomous three-party handoff now also passes under real session stacks:
   a new real-wasm test wires the same Provide→shared-index→Accept loop across
   five `RpcSession` instances with in-memory transports, with every frame

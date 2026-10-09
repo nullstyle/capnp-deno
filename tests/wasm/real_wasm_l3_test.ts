@@ -19,6 +19,10 @@ import {
   WASM_FEATURE_L3_HANDOFF,
   WasmPeer,
 } from "../../src/advanced.ts";
+import {
+  RpcServerBridge,
+  type RpcServerWasmHost,
+} from "../../src/rpc/server/bridge.ts";
 import { RpcSession } from "../../src/rpc/session/session.ts";
 import type { RpcTransport } from "../../src/rpc/transports/internal/transport.ts";
 import { decodeRpcMessageTag } from "../../src/rpc/wire/decode.ts";
@@ -68,6 +72,113 @@ async function assertRejects(
 }
 
 const wasmPath = new URL("../../generated/capnp_deno.wasm", import.meta.url);
+
+Deno.test("answer cancellation: bridge aborts the handler and answers canceled when the caller finishes first", async () => {
+  // End-to-end over the session pump: a client calls a local server through
+  // the wasm peer; the handler never returns; the client cancels (Finish);
+  // the bridge receives the kind-4 event, aborts the handler's signal, and
+  // the peer answers Return{canceled} — which the client-side pump retires.
+  const { peer: seed } = await instantiatePeer(wasmPath, {}, {
+    expectedVersion: 1,
+    requireVersionExport: true,
+  });
+  assert(seed.abi.capabilities.hasAnswerCancellation);
+  seed.abi.setAnswerFinishedHandler(seed.handle, true);
+
+  const clientTransport = new MockTransport();
+  const session = new RpcSession(seed, clientTransport);
+  let observedAbort: unknown = null;
+  let responded = 0;
+  const bridge = new RpcServerBridge();
+  // The handler blocks until canceled, so the pump must not await its
+  // completion (production runtimes enable this same mode).
+  bridge.setAsyncHostCallDispatch(true);
+  try {
+    await session.start();
+
+    bridge.exportCapability(
+      {
+        interfaceId: 0xa100n,
+        dispatch: async (_methodId, _params, ctx) => {
+          observedAbort = await new Promise((resolve) => {
+            ctx.signal.addEventListener(
+              "abort",
+              () => resolve(ctx.signal.reason),
+              { once: true },
+            );
+          });
+          return new Uint8Array(0);
+        },
+      },
+      { capabilityIndex: 0 },
+    );
+    void responded;
+
+    const wasmHost: RpcServerWasmHost = {
+      handle: seed.handle,
+      abi: {
+        popHostCall: (handle) => seed.abi.popHostCall(handle),
+        respondHostCallResults: () => {},
+        respondHostCallException: () => {},
+        addAnswerFinishedListener: (listener) =>
+          seed.addL3EventListener((event) => {
+            if (event.kind === WASM_EVENT_KIND_ANSWER_FINISHED) {
+              listener(
+                new DataView(
+                  event.payload.buffer,
+                  event.payload.byteOffset,
+                  event.payload.byteLength,
+                ).getUint32(0, true),
+              );
+            }
+          }),
+        sendReturnCanceled: (handle, answerId) =>
+          seed.abi.sendReturnCanceled(handle, answerId),
+      },
+    };
+
+    // The client's Call enters the peer; the bridge pumps it.
+    clientTransport.send(encodeCallRequestFrame({
+      questionId: 1,
+      targetImportedCap: 0,
+      interfaceId: 0xa100n,
+      methodId: 0,
+    }));
+    await clientTransport.emit(clientTransport.sent.shift()!);
+    await bridge.pumpWasmHostCalls(wasmHost);
+    assertEquals(
+      seed.abi.popHostCall(seed.handle),
+      null,
+      "call was handed to the bridge",
+    );
+
+    // The client cancels: Finish before the handler answered.
+    clientTransport.send(
+      encodeFinishFrame({ questionId: 1, releaseResultCaps: true }),
+    );
+    await clientTransport.emit(clientTransport.sent.shift()!);
+
+    // The handler observed its abort; the peer answered Return{canceled}
+    // (pumpInboundFrame drained it to the transport, like any Return).
+    assert(observedAbort !== null, "expected the handler abort signal to fire");
+    assertEquals(responded, 0);
+    const answer = clientTransport.sent.find((frame) => {
+      try {
+        return decodeReturnFrame(frame).kind === "canceled";
+      } catch {
+        return false;
+      }
+    });
+    assert(answer !== undefined, "expected the canceled Return");
+    const decoded = decodeReturnFrame(answer);
+    assert(decoded.kind === "canceled");
+    assertEquals(decoded.answerId, 1);
+    responded += 1;
+  } finally {
+    await bridge.close();
+    await session.close();
+  }
+});
 
 async function withModule(
   run: (peers: WasmPeer[]) => void | Promise<void>,

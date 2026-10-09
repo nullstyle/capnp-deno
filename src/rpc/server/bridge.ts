@@ -403,6 +403,16 @@ export interface RpcServerWasmHost {
       questionId: number,
       reason: string | Uint8Array,
     ): void;
+    /**
+     * Optional (feature bit 12): registers a listener for answer-finished
+     * events (the caller Finished a host-handed, unanswered call). The
+     * facade typically wires this to the peer's L3 event listeners.
+     */
+    addAnswerFinishedListener?(
+      listener: (answerId: number) => void,
+    ): () => void;
+    /** Optional (feature bit 12): answer a caller-finished call canceled. */
+    sendReturnCanceled?(peer: number, answerId: number): void;
   };
 }
 
@@ -640,6 +650,7 @@ export class RpcServerBridge {
   #rejectedInputFrames = 0;
   readonly #maxRetainedInputFrameBytes: number | null;
   #dispatchByCapability = new Map<number, RegisteredDispatch>();
+  #answerCancellationHosts = new Set<number>();
   #onUnhandledError?: RpcServerBridgeOptions["onUnhandledError"];
   #onFinish?: RpcServerBridgeOptions["onFinish"];
   #onBootstrap?: RpcServerBridgeOptions["onBootstrap"];
@@ -1204,6 +1215,7 @@ export class RpcServerBridge {
       );
     }
 
+    this.#attachAnswerCancellation(wasmHost);
     let handled = 0;
     while (maxCalls === undefined || handled < maxCalls) {
       const hostCall = wasmHost.abi.popHostCall(wasmHost.handle);
@@ -1212,6 +1224,41 @@ export class RpcServerBridge {
       handled += 1;
     }
     return handled;
+  }
+
+  /**
+   * Subscribes (once per wasm host) to answer-finished events: the caller
+   * Finished a host-handed call the bridge has not answered. The pending
+   * dispatch's abort signal fires so handlers stop, and the peer is
+   * answered with `Return{canceled}`, freeing the caller's question id; the
+   * late handler response is then discarded (the entry is finished). A host
+   * without the optional members (feature bit 12) keeps today's behavior.
+   */
+  #attachAnswerCancellation(wasmHost: RpcServerWasmHost): void {
+    if (
+      !wasmHost.abi.addAnswerFinishedListener ||
+      !wasmHost.abi.sendReturnCanceled
+    ) {
+      return;
+    }
+    if (this.#answerCancellationHosts.has(wasmHost.handle)) return;
+    this.#answerCancellationHosts.add(wasmHost.handle);
+    wasmHost.abi.addAnswerFinishedListener((answerId) => {
+      const entry = this.#answerTable.get(answerId);
+      if (!entry || entry.finished) return;
+      entry.finished = true;
+      entry.abortController.abort(
+        new SessionError("rpc call canceled by the caller", {
+          metadata: { phase: "dispatch", questionId: answerId },
+        }),
+      );
+      try {
+        wasmHost.abi.sendReturnCanceled!(wasmHost.handle, answerId);
+      } catch {
+        // The peer already settled the answer (a late Return raced us);
+        // the entry is finished either way.
+      }
+    });
   }
 
   async #handleCall(
