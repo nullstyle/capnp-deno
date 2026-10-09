@@ -1,13 +1,20 @@
 import {
+  acceptProvision,
   CapnpError,
   CapnpFrameFramer,
   connect,
+  instantiatePeer,
+  mintHandoffTokens,
+  provideCapability,
   type RpcStub,
   type RpcTransport,
   serve,
   serveConnection,
   TcpTransport,
+  WasmPeer,
 } from "../../../src/advanced.ts";
+
+const wasmUrl = new URL("../../../generated/capnp_deno.wasm", import.meta.url);
 import { assert, assertEquals, withTimeout } from "../../test_utils.ts";
 import {
   BatchedCancellationTransport,
@@ -324,6 +331,68 @@ async function denoToZig(): Promise<void> {
   }
 }
 
+async function denoL3HandoffToZig(): Promise<void> {
+  // A dedicated native process: the standard lanes' question/export id
+  // spaces stay untouched, and this lane only proves the handoff loop.
+  await l3HandoffToNative(1);
+}
+
+/**
+ * Runs one three-party handoff loop against the native peer behind
+ * `child`: mint tokens, originate the Provide toward the native (targeting
+ * its bootstrap export id `bootstrapExportId`), then accept with the
+ * matching completion and resolve the capability the native itself
+ * granted. The topology is single-connection (the framed fixture hosts one
+ * connection), so both control messages traverse the same pipe; the
+ * protocol frames, the provision matching, and the capability-bearing
+ * Return are entirely the native implementation's. Drives the child's
+ * stdio directly and releases both locks so the PipeTransport constructed
+ * afterward owns the streams.
+ */
+async function l3HandoffToNative(
+  bootstrapExportId: number,
+): Promise<void> {
+  const child = launch(zig, ["server"], true);
+  const transport = new PipeTransport(child);
+  const { peer } = await instantiatePeer(wasmUrl, {}, {
+    expectedVersion: 1,
+    requireVersionExport: true,
+  });
+  const vineHost = WasmPeer.create(peer.abi);
+  let settled = false;
+  transport.start((frame) => {
+    if (settled) return;
+    const { frames } = peer.pushFrame(frame);
+    for (const out of frames) void transport.send(out);
+  });
+  try {
+    const tokens = mintHandoffTokens();
+    provideCapability(peer, vineHost, bootstrapExportId, {
+      recipient: tokens.toAwait,
+      contact: tokens.contact,
+    });
+    for (const frame of peer.drainOutgoingFrames().frames) {
+      await transport.send(frame);
+    }
+    const accepted = acceptProvision(peer, tokens.toAwait, {});
+    for (const frame of peer.drainOutgoingFrames().frames) {
+      await transport.send(frame);
+    }
+    const result = await withTimeout(accepted, 5_000, "native handoff accept");
+    settled = true;
+    assert(
+      result.capabilityIndex >= 0,
+      "expected the native-granted capability import index",
+    );
+  } finally {
+    settled = true;
+    peer.close();
+    vineHost.close();
+    await transport.close();
+    await stop(child);
+  }
+}
+
 async function zigToDeno(): Promise<void> {
   const child = launch(zig, ["client"], true);
   const transport = new PipeTransport(child);
@@ -406,6 +475,7 @@ async function denoToCpp(): Promise<void> {
 for (
   const [label, run] of [
     ["Deno → native Zig (framed pipes)", denoToZig],
+    ["Deno ↔ native Zig L3 handoff (framed pipes)", denoL3HandoffToZig],
     ["native Zig → Deno (framed pipes)", zigToDeno],
     ["Deno → native C++ (TCP)", denoToCpp],
     ["native C++ → Deno (TCP)", cppToDeno],

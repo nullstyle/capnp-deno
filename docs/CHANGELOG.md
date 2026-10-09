@@ -8,6 +8,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- **Cross-implementation L3 handoff proof.** The native interop matrix gains a
+  fifth lane, "Deno ↔ native Zig L3 handoff": against a dedicated native
+  capnp-zig process over the framed-pipe fixture, the Deno wasm peer originates
+  a real Provide/Accept loop which the native reference serves — the provision
+  matching and the capability-bearing Return are entirely native code, and the
+  accepted capability's import index resolves on the Deno side. The topology is
+  single-connection (the framed fixture hosts one pipe), so both control
+  messages traverse it; a two-connection native VatC (C++ `RpcSystem`) is the
+  documented follow-up for the full three-vat matrix.
+
 - **`RpcServerBridge` now acts on caller-side cancels.** When the wasm runtime
   advertises answer cancellation (feature bit 12), the bridge subscribes to
   answer-finished events on its first host-call pump: a caller Finish for an
