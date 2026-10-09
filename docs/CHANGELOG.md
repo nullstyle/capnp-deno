@@ -8,6 +8,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added (Experimental)
 
+- **The true three-vat cross-implementation handoff.** The native Zig endpoint
+  gains a `vatc` mode — two TCP listeners, each accepted connection bound to its
+  own detached peer, both peers enrolled in one `ProvisionIndex`, a Doubler
+  export published as the handoff target, and a per-connection pump thread (the
+  same topology the vendor's in-process vatc test uses). The matrix's sixth
+  lane, "Deno ↔ native Zig three-vat L3 handoff (TCP)", drives the full
+  protocol: Deno plays VatB (Provide over connection 1) and VatA (Accept over
+  connection 2), and the cross-connection Accept is served entirely by native
+  code through the shared index — the capability-bearing Return resolved on the
+  Deno side is native-authored. A 150ms settle between Provide and Accept keeps
+  the lane deterministic (the reverse order parks and adopts, but costs the
+  TTL).
+
 - **Cross-implementation L3 handoff proof.** The native interop matrix gains a
   fifth lane, "Deno ↔ native Zig L3 handoff": against a dedicated native
   capnp-zig process over the framed-pipe fixture, the Deno wasm peer originates

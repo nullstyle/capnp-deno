@@ -6,6 +6,7 @@ import {
   instantiatePeer,
   mintHandoffTokens,
   provideCapability,
+  RpcSession,
   type RpcStub,
   type RpcTransport,
   serve,
@@ -318,6 +319,83 @@ function service(): { implementation: InteropService; check(): void } {
   };
 }
 
+async function denoThreeVatL3Handoff(): Promise<void> {
+  // The true three-vat topology: the native Zig VatC host accepts TWO TCP
+  // connections, both peers enrolled in one ProvisionIndex. Deno plays
+  // VatB (Provide over connection 1) and VatA (Accept over connection 2);
+  // the cross-connection Accept is served entirely by native code.
+  const child = launch(zig, ["vatc"]);
+  try {
+    // First stdout line: "VATC <port1> <port2> <targetId>".
+    const reader = child.stdout.getReader();
+    let line = "";
+    while (!line.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("vatc host closed before the VATC line");
+      line += new TextDecoder().decode(value);
+    }
+    reader.releaseLock();
+    const [, port1Text, port2Text, targetText] = line.trim().split(" ");
+    const port1 = Number(port1Text);
+    const port2 = Number(port2Text);
+    const targetId = Number(targetText);
+    assert(port1 > 0 && port2 > 0 && targetId >= 0, `bad VATC line: ${line}`);
+
+    const transportB = await TcpTransport.connect("127.0.0.1", port1);
+    const transportA = await TcpTransport.connect("127.0.0.1", port2);
+    const { peer: bToC } = await instantiatePeer(wasmUrl, {}, {
+      expectedVersion: 1,
+      requireVersionExport: true,
+    });
+    const bToA = WasmPeer.create(bToC.abi);
+    const aToC = WasmPeer.create(bToC.abi);
+    const sessionB = new RpcSession(bToC, transportB);
+    const sessionA = new RpcSession(aToC, transportA);
+    try {
+      await sessionB.start();
+      await sessionA.start();
+
+      // VatB hands the native-hosted Doubler to VatA: the Provide lands on
+      // VatC's connection-1 peer and registers into the shared index.
+      const tokens = mintHandoffTokens();
+      provideCapability(bToC, bToA, targetId, {
+        recipient: tokens.toAwait,
+        contact: tokens.contact,
+      });
+      for (const frame of bToC.drainOutgoingFrames().frames) {
+        await transportB.send(frame);
+      }
+
+      // Give the native's connection-1 pump a beat to register the
+      // provision before the Accept lands (park-adopt handles the reverse
+      // order, but a settled order keeps the lane deterministic).
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      // VatA accepts over connection 2; the native index matches it against
+      // connection 1's provision and answers with the capability.
+      const accepted = acceptProvision(aToC, tokens.toAwait, {});
+      for (const frame of aToC.drainOutgoingFrames().frames) {
+        await transportA.send(frame);
+      }
+      const result = await withTimeout(
+        accepted,
+        10_000,
+        "three-vat native accept",
+      );
+      assert(
+        result.capabilityIndex >= 0,
+        "expected the native-granted capability import index",
+      );
+    } finally {
+      await sessionA.close();
+      await sessionB.close();
+      bToA.close();
+    }
+  } finally {
+    await stop(child);
+  }
+}
+
 async function denoToZig(): Promise<void> {
   const child = launch(zig, ["server"], true);
   const transport = new PipeTransport(child);
@@ -476,6 +554,7 @@ for (
   const [label, run] of [
     ["Deno → native Zig (framed pipes)", denoToZig],
     ["Deno ↔ native Zig L3 handoff (framed pipes)", denoL3HandoffToZig],
+    ["Deno ↔ native Zig three-vat L3 handoff (TCP)", denoThreeVatL3Handoff],
     ["native Zig → Deno (framed pipes)", zigToDeno],
     ["Deno → native C++ (TCP)", denoToCpp],
     ["native C++ → Deno (TCP)", cppToDeno],

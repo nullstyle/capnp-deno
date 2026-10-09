@@ -15,24 +15,47 @@ fn require(ok: bool) !void {
 }
 const Link = struct {
     live: bool = true,
+    out_fd: c_int = 1,
     fn send(ctx: *anyopaque, bytes: []const u8) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx));
         if (!self.live) return;
         var offset: usize = 0;
         while (offset < bytes.len) {
-            const n = write(1, bytes[offset..].ptr, bytes.len - offset);
+            const n = write(self.out_fd, bytes[offset..].ptr, bytes.len - offset);
             if (n <= 0) return error.NativeWriteFailed;
             offset += @intCast(n);
         }
     }
     fn readAll(out: []u8) !void {
+        return readAllFd(0, out);
+    }
+    fn readAllFd(fd: c_int, out: []u8) !void {
         var offset: usize = 0;
         while (offset < out.len) {
-            const n = read(0, out[offset..].ptr, out.len - offset);
+            const n = read(fd, out[offset..].ptr, out.len - offset);
             if (n == 0 and offset == 0) return error.EndOfStream;
             if (n <= 0) return error.NativeReadFailed;
             offset += @intCast(n);
         }
+    }
+    fn receiveFd(fd: c_int, peer: *Peer) !void {
+        var first: [8]u8 = undefined;
+        try readAllFd(fd, &first);
+        const count: usize = @as(usize, std.mem.readInt(u32, first[0..4], .little)) + 1;
+        try require(count <= 512);
+        const header_size = ((count + 2) & ~@as(usize, 1)) * 4;
+        const header = try peer.allocator.alloc(u8, header_size);
+        defer peer.allocator.free(header);
+        @memcpy(header[0..8], &first);
+        try readAllFd(fd, header[8..]);
+        var size = header_size;
+        for (0..count) |i| size += @as(usize, std.mem.readInt(u32, header[(i + 1) * 4 ..][0..4], .little)) * 8;
+        try require(size <= 2 * 1024 * 1024);
+        const frame = try peer.allocator.alloc(u8, size);
+        defer peer.allocator.free(frame);
+        @memcpy(frame[0..header_size], header);
+        try readAllFd(fd, frame[header_size..]);
+        try peer.handleFrame(frame);
     }
     fn receive(_: *@This(), peer: *Peer) !void {
         var first: [8]u8 = undefined;
@@ -346,6 +369,117 @@ fn consume(peer: *Peer, link: *Link) !void {
     try require(stream.stream.in_flight == 0 and stream.stream.in_flight_bytes == 0);
 }
 
+/// The port a bound listening socket holds (getsockname; sockaddr_in's
+/// port field is big-endian at offset 2).
+fn listenPort(handle: std.posix.socket_t) !u16 {
+    var addr: std.posix.sockaddr.storage = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
+    const rc = std.posix.system.getsockname(handle, @ptrCast(&addr), &len);
+    if (std.posix.errno(rc) != .SUCCESS) return error.NativeGetsockname;
+    if (len < 4) return error.NativeGetsockname;
+    const bytes: [*]const u8 = @ptrCast(&addr);
+    return (@as(u16, bytes[2]) << 8) | bytes[3];
+}
+
+/// Per-connection pump state for the vatc host.
+const VatcConn = struct {
+    fd: std.posix.socket_t,
+    peer: *Peer,
+    link: *Link,
+    fn pump(self: *VatcConn) void {
+        while (true) {
+            Link.receiveFd(@intCast(self.fd), self.peer) catch |err| {
+                if (err == error.EndOfStream) return;
+                std.debug.print("vatc pump error: {}\n", .{err});
+                return;
+            };
+        }
+    }
+};
+
+/// Two-connection VatC host for the cross-implementation three-vat
+/// handoff: two TCP listeners, each accepted connection bound to its own
+/// detached Peer, both Peers enrolled in one ProvisionIndex, and a Doubler
+/// export published on the first peer as the handoff target. Prints
+/// `VATC <port1> <port2> <export_id>` once both listeners are bound, then
+/// pumps both sockets on separate threads until EOF (the parent stops us).
+/// The Deno side plays VatB (Provide over connection 1) and VatA (Accept
+/// over connection 2); the shared index serves the cross-connection Accept
+/// natively, exactly as the vendor vatc test does in-process.
+fn vatc(allocator: std.mem.Allocator, init: std.process.Init) !void {
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    const l1 = try rpc.transport.tcp.createListenSocket(init.io, address, 1, false);
+    const l2 = try rpc.transport.tcp.createListenSocket(init.io, address, 1, false);
+    defer rpc.transport.tcp.closeFd(init.io, .{ .handle = l1.socket.handle });
+    defer rpc.transport.tcp.closeFd(init.io, .{ .handle = l2.socket.handle });
+
+    var index = rpc.peer.ProvisionIndex.init(allocator, .{});
+    index.disableThreadAffinity();
+    defer index.deinit();
+
+    // Connection 1's peer hosts the handoff target (a Doubler export).
+    var peer1 = Peer.initDetached(allocator);
+    peer1.disableThreadAffinity();
+    defer peer1.deinit();
+    var peer2 = Peer.initDetached(allocator);
+    peer2.disableThreadAffinity();
+    defer peer2.deinit();
+    try peer1.attachProvisionIndex(&index);
+    try peer2.attachProvisionIndex(&index);
+
+    var state = ServerState{};
+    var child = g.Doubler.Server{ .ctx = &state, .vtable = .{ .compute = compute, .fail = fail, .hold = forbiddenHold, .hold_deferred = ServerState.hold, .holdStatus = ServerState.holdStatus } };
+    const target_id = try g.Doubler.exportServer(&peer1, &child);
+
+    var link1 = Link{ .out_fd = undefined };
+    var link2 = Link{ .out_fd = undefined };
+    peer1.setSendFrameOverride(&link1, Link.send);
+    peer2.setSendFrameOverride(&link2, Link.send);
+
+    var listener1 = rpc.transport.tcp.Listener.initFd(
+        allocator,
+        init.io,
+        .{ .handle = l1.socket.handle },
+        .{},
+    );
+    var listener2 = rpc.transport.tcp.Listener.initFd(
+        allocator,
+        init.io,
+        .{ .handle = l2.socket.handle },
+        .{},
+    );
+    defer listener1.close();
+    defer listener2.close();
+
+    // Machine-readable on stdout BEFORE accepting (std.debug.print goes to
+    // stderr): the driver waits for the line before it connects. The
+    // ephemeral ports come from getsockname (IpAddress is a bare union).
+    const port1 = try listenPort(l1.socket.handle);
+    const port2 = try listenPort(l2.socket.handle);
+    {
+        var line_buf: [96]u8 = undefined;
+        const line = std.fmt.bufPrint(&line_buf, "VATC {d} {d} {d}\n", .{ port1, port2, target_id }) catch unreachable;
+        var off: usize = 0;
+        while (off < line.len) {
+            const n = write(1, line[off..].ptr, line.len - off);
+            if (n <= 0) return error.NativeWriteFailed;
+            off += @intCast(n);
+        }
+    }
+
+    const conn1_fd = try listener1.acceptFd();
+    const conn2_fd = try listener2.acceptFd();
+    link1.out_fd = @intCast(conn1_fd.handle);
+    link2.out_fd = @intCast(conn2_fd.handle);
+
+    var conn1 = VatcConn{ .fd = @intCast(conn1_fd.handle), .peer = &peer1, .link = &link1 };
+    var conn2 = VatcConn{ .fd = @intCast(conn2_fd.handle), .peer = &peer2, .link = &link2 };
+    const t1 = try std.Thread.spawn(.{}, VatcConn.pump, .{&conn1});
+    const t2 = try std.Thread.spawn(.{}, VatcConn.pump, .{&conn2});
+    t1.join();
+    t2.join();
+}
+
 pub fn main(init: std.process.Init) !void {
     _ = alarm(30);
     var allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -361,6 +495,8 @@ pub fn main(init: std.process.Init) !void {
         link.live = false;
         peer.deinit();
     }
-    if (std.mem.eql(u8, mode, "server")) try serve(&peer, &link) else if (std.mem.eql(u8, mode, "client")) try consume(&peer, &link) else return error.InvalidMode;
+    if (std.mem.eql(u8, mode, "server")) try serve(&peer, &link) else if (std.mem.eql(u8, mode, "client")) try consume(&peer, &link) else if (std.mem.eql(u8, mode, "vatc")) {
+        try vatc(allocator.allocator(), init);
+    } else return error.InvalidMode;
     std.debug.print("native Zig {s}: all checks passed\n", .{mode});
 }
